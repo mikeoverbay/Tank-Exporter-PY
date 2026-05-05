@@ -1,0 +1,15 @@
+{
+  "pkg_dir": "C:/Games/World_of_Tanks_NA/res/packages",
+  "res_mods": "C:/Games/World_of_Tanks_NA/res_mods/2.2.1.2",
+  "lookup_xml": "C:/experiment/TheItemList.xml",
+  "blender_exe": "",
+  "info_panel_collapsed": false,
+  "light_value": 0.25,
+  "ambient_value": 0.5,
+  "smoke_start_size": 0.29259259259259257,
+  "smoke_end_size": 0.6592592592592592,
+  "smoke_speed": 2.5481481481481483,
+  "smoke_fade_start_frame": 0.0,
+  "smoke_fade_end_frame": 76.84444444444445,
+  "show_hardpoints": false
+}

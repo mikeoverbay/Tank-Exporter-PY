@@ -1,0 +1,1011 @@
+-= TANKS FOUND IN GAME =-
+---- Tier : 01 ----
+A01_T1_Cunningham             :T1
+Ch06_Renault_NC31             :NC-31
+Cz06_Kolohousenka             :K-housenka
+F01_RenaultFT                 :FT
+G12_Ltraktor                  :L.Tr.
+GB01_Medium_Mark_I            :Medium I
+GB03_Cruiser_Mk_I             :Cruiser I
+It04_Fiat_3000                :Fiat 3000
+J01_NC27                      :R. Otsu
+Pl14_4TP                      :4TP
+R11_MS-1                      :MS-1
+S05_Strv_M21_29               :Strv fm/21
+---- Tier : 02 ----
+A02_M2_lt                     :M2
+A19_T2_lt                     :T2 Light
+A24_T2_med                    :T2 Medium
+A46_T3                        :T3 HMC
+A74_T1_E6                     :T1E6
+A93_T7_Combat_Car             :T7 Car
+A107_T1_HMC                   :T1 HMC
+Ch07_Vickers_MkE_Type_BT26    :VAE Type B
+Ch30_T-26G_FT                 :T-26G FT
+Ch60_Vickers_TypeB            :Vickers 6 t
+Cz03_LT_vz35                  :LT vz. 35
+F02_D1                        :D1
+F12_Hotchkiss_H35             :H35
+F20_RenaultBS                 :FT BS
+F30_RenaultFT_AC              :FT AC
+F39_AMR_P103                  :AMR P.103
+F42_AMR_35                    :AMR 35
+F49_RenaultR35                :R35
+F50_FCM36_20t                 :FCM 36
+F111_AM39_Gendron_Somua       :AM Gendron
+F138_Renault_R35_FCM_36       :R35/FCM 36
+G06_PzII                      :Pz. II
+G07_Pz35t                     :Pz. 35 (t)
+G21_PanzerJager_I             :Pz.Jäg. I
+G33_H39_captured              :Pz. 38H
+G53_PzI                       :Pz. I
+G93_GW_Mk_VIe                 :G.Pz. Mk. VI
+G108_PzKpfwII_AusfD           :Pz. II D
+G139_MKA                      :MKA
+G160_Pz_Kpfw_35_R_mit_T_26_Tur:Pz. 35 R
+GB05_Vickers_Medium_Mk_II     :Medium II
+GB14_M2                       :M2
+GB25_Loyd_Gun_Carriage        :Loyd GC
+GB39_Universal_CarrierQF2     :UC 2-pdr
+GB69_Cruiser_Mk_II            :Cruiser II
+GB76_Mk_VIC                   :Light VIC
+It05_Carro_L6_40              :L6/40
+It06_M14_41                   :M14/41
+J02_Te_Ke                     :Te-Ke
+J03_Ha_Go                     :Ha-Go
+J15_Chi_Ni                    :Chi-Ni
+J26_Type_89                   :I-Go/Chi-Ro
+Pl01_TKS_20mm                 :TKS 20
+Pl09_7TP                      :7TP
+R08_BT-2                      :BT-2
+R09_T-26                      :T-26
+R10_AT-1                      :AT-1
+R16_SU-18                     :SU-18
+R42_T-60                      :T-60
+R84_Tetrarch_LL               :Tetrarch
+R125_T_45                     :T-45
+S03_Strv_M38                  :Strv m/38
+S09_L_120_TD                  :Pvlvv fm/42
+S15_L_60                      :L-60
+---- Tier : 03 ----
+A03_M3_Stuart                 :M3 Stuart
+A16_M7_Priest                 :M7 Priest
+A25_M2_med                    :M2 Medium
+A33_MTLS-1G14                 :MTLS-1G14
+A43_M22_Locust                :Locust
+A76_M3_A3                     :M3A3 Stuart
+A108_T18_HMC                  :T18 HMC
+A109_T56_GMC                  :T56 GMC
+A148_Convertible_Medium_Tank_T:T3 Convert.
+A154_Convertible_Medium_Tank_T:T3E2 Medium
+Ch08_Type97_Chi_Ha            :Chi-Ha
+Ch31_M3G_FT                   :M3G FT
+Cz10_LT_vz38                  :LT vz. 38
+Cz29_Pzw_39                   :Pzw. 39
+F03_D2                        :D2
+F13_AMX38                     :AMX 38
+F21_Lorraine39_L_AM           :Lorr. 39L AM
+F27_FCM_36Pak40               :FCM36Pak40
+F44_Somua_S35                 :Somua S35
+F52_RenaultUE57               :UE 57
+F77_FCM_2C                    :FCM 2C
+G08_Pz38t                     :Pz. 38 (t)
+G11_Bison_I                   :Bison
+G19_Wespe                     :Wespe
+G20_Marder_II                 :Marder II
+G34_S35_captured              :Pz. S35
+G36_PzII_J                    :Pz. II J
+G50_T-15                      :Pz. T 15
+G63_PzI_ausf_C                :Pz. I C
+G82_Pz_II_AusfG               :Pz. II G
+G83_Pz_IV_AusfA               :Pz. IV A
+G100_Gtraktor_Krupp           :Gr.Tr.
+G102_Pz_III                   :Pz. III E
+G117_Toldi_III                :Toldi III
+G161_Pz_Kpfw_M15_38_t         :Pz. M 15
+G175_Rheinmetall_Begleitwagen :B.W.(Rh)
+G179_Straussler_V4            :V–4/40
+GB04_Valentine                :Valentine
+GB06_Vickers_Medium_Mk_III    :Medium III
+GB15_Stuart_I                 :Stuart I-IV
+GB27_Sexton                   :Sexton II
+GB58_Cruiser_Mk_III           :Cruiser III
+GB78_Sexton_I                 :Sexton I
+GB127_A7E3                    :A7E3
+It03_M15_42                   :M15/42
+It29_Carro_Celere_Sahariano   :Sahariano
+J04_Ke_Ni                     :Ke-Ni
+J07_Chi_Ha                    :Chi-Ha
+J21_Type_91                   :Type 91
+Pl06_10TP                     :10TP
+R22_T-46                      :T-46
+R34_BT-SV                     :BT-SV
+R43_T-70                      :T-70
+R50_SU76I                     :SU-76I
+R56_T-127                     :T-127
+R66_SU-26                     :SU-26
+R67_M3_LL                     :M3 Light
+R86_LTP                       :LTP
+R105_BT_7A                    :BT-7 art.
+R143_T_29                     :T-29
+R161_T_116                    :T-116
+R174_BT-5                     :BT-5
+S12_Strv_M40                  :Strv m/40L
+S20_Ikv_72                    :Ikv 72
+S34_Lago_M38                  :Lago M38
+S39_Strv_m31                  :Strv m/31
+---- Tier : 04 ----
+A04_M3_Grant                  :M3 Lee
+A17_M37                       :M37
+A22_M5_Stuart                 :M5 Stuart
+A27_T82                       :T82 HMC
+A29_T40                       :T40
+A57_M8A1                      :M8A1
+A129_T6_medium                :T6
+Ch09_M5                       :M5A1 Stuart
+Ch32_SU-76G_FT                :SU-76G FT
+Cz11_V_8_H                    :ST vz. 39
+Cz22_Skoda_T_15A              :Škoda T 15A
+F04_B1                        :B1
+F14_AMX40                     :AMX 40
+F32_Somua_Sau_40              :SAu 40
+F66_AMX_Ob_Am105              :AMX 105 AM
+F70_SARL42                    :SARL 42
+G09_Hetzer                    :Hetzer
+G10_PzIII_AusfJ               :Pz. III J
+G22_Sturmpanzer_II            :St.Pz. II
+G25_PzII_Luchs                :Luchs
+G35_B-1bis_captured           :Pz. B2
+G39_Marder_III                :Marder 38T
+G52_Pz38_NA                   :Pz. 38 nA
+G80_Pz_IV_AusfD               :Pz. IV D
+G86_VK2001DB                  :VK 20.01 D
+G90_DW_II                     :D.W. 2
+G95_Pz_Sfl_IVb                :Pz.Sfl. IVb
+G101_StuG_III                 :StuG III B
+G151_Pz_Sfl_IC                :Pz.Sfl. IC
+GB07_Matilda                  :Matilda
+GB17_Grant_I                  :Grant
+GB26_Birch_Gun                :Birch Gun
+GB33_Sentinel_AC_I            :Sentinel
+GB42_Valentine_AT             :Valentine AT
+GB57_Alecto                   :Alecto
+GB59_Cruiser_Mk_IV            :Cruiser IV
+GB113_Matilda_LVT             :Matilda LVT
+GB116_Harry_Hopkins_I         :A25 H.H. I
+It07_P26_40                   :P26/40
+J06_Ke_Ho                     :Ke-Ho
+J09_Chi_He                    :Chi-He
+J22_Type_95                   :Type 95
+J50_Type_1_Ho_Ni_II           :Ho-Ni II
+Pl07_14TP                     :14TP
+R03_BT-7                      :BT-7
+R06_T-28                      :T-28
+R14_SU-5                      :SU-5
+R24_SU-76                     :SU-76M
+R25_GAZ-74b                   :SU-85B
+R31_Valentine_LL              :Valentine II
+R44_T80                       :T-80
+R68_A-32                      :A-32
+R118_T28_F30                  :T-28E F-30
+R185_T_34_L_11_1941           :T-34 1941
+R201_IT_3                     :IT-3
+S04_Lago_I                    :Lago
+S19_Sav_M43                   :Sav m/43
+---- Tier : 05 ----
+A05_M4_Sherman                :M4 Sherman
+A09_T1_hvy                    :T1
+A18_M41                       :M41
+A21_T14                       :T14
+A23_M7_med                    :M7
+A30_M10_Wolverine             :Wolverine
+A34_M24_Chaffee               :Chaffee
+A34_M24_Chaffee_CFE_V         :Chaffee Camo
+A44_M4A2E4                    :M4A2E4
+A58_T67                       :T67
+A62_Ram-II                    :Ram II
+A78_M4_Improved               :M4 Improved
+A160_M24_594                  :Chaffee 594
+A161_ARMT                     :ARMT
+Ch21_T34                      :Type T-34
+Ch33_60G_FT                   :60G FT
+Cz09_T_24                     :Škoda T 24
+F05_BDR_G1B                   :BDR G1 B
+F11_Renault_G1R               :G1 R
+F22_AMX_105AM                 :AMX 13 AM
+F28_105_leFH18B2              :leFH18B2
+F33_S_35CA                    :S35 CA
+F62_ELC_AMX                   :AMX ELC bis
+F112_M10_RBFM                 :M10 RBFM
+F124_AMX_13FL11               :AMX 13 FL 11
+G05_StuG_40_AusfG             :StuG III G
+G13_VK3001H                   :VK 30.01 H
+G23_Grille                    :Grille
+G26_VK1602                    :Leopard
+G28_PzIII_IV                  :Pz. III/IV
+G32_PzV_PzIV                  :Pz. V/IV
+G32_PzV_PzIV_ausf_Alfa        :Pz. V/IV A
+G46_T-25                      :Pz. T 25
+G70_PzIV_Hydro                :Pz. IV hydr.
+G76_Pz_Sfl_IVc                :Pz.Sfl. IVc
+G81_Pz_IV_AusfH               :Pz. IV H
+G81_Pz_IV_AusfH_GuP           :Pz. IV H Ankou
+G104_Stug_IV                  :StuG IV
+G107_PzKpfwIII_AusfK          :Pz. III K
+G116_Turan_III_prot           :Turán III PT
+G122_VK6501H                  :VK 65.01 (H)
+G124_Pz_Kpfw_38_K             :Pz. 38 (K)
+G163_Pz_Kpfw_KW_Ir_mit_75mm_kw:Pz. KW I
+G170_PzKpfwIV_Ausf_F2         :Pz. IV F2
+G173_BT42_DIT                 :BT-42 Jatk.
+G191_StuG_IIIF_CFE_A          :StuG III Kaba
+GB08_Churchill_I              :Churchill I
+GB28_Bishop                   :Bishop
+GB37_Valliant                 :Valiant
+GB44_Archer                   :Archer
+GB50_Sherman_III              :Sherman III
+GB51_Excelsior                :Excelsior
+GB60_Covenanter               :Covenanter
+GB68_Matilda_Black_Prince     :Matilda BP
+GB73_AT2                      :AT 2
+GB107_Cavalier                :Cavalier
+GB124_AEC_Armoured_Car        :AEC
+GB137_Cromwell_Applique       :Cromwell A
+GB146_Gabler_s_Destroyer      :G. Destroyer
+It11_P43                      :P.43
+It28_Semovente_M41_Da_75_18   :SMV M41
+J08_Chi_Nu                    :Chi-Nu
+J12_Chi_Nu_Kai                :Chi-Nu Kai
+J23_Mi_To                     :O-I Exp.
+J37_Type_3_Ho_Ni_III          :Ho-Ni III
+J45_Mitsu_108                 :Mitsu 108
+Pl12_25TP_KSUST_II            :25TP
+Pl17_DS_PZlnz                 :DS PZInż
+Pl33_SDP_Wz_40                :Zadymka
+R02_SU-85                     :SU-85
+R04_T-34                      :T-34
+R12_A-20                      :A-20
+R32_Matilda_II_LL             :Matilda IV
+R33_Churchill_LL              :Churchill III
+R38_KV-220                    :KV-220-2
+R38_KV-220_beta               :KV-220-2 T
+R41_T-50                      :T-50
+R78_SU_85I                    :SU-85I
+R80_KV1                       :KV-1
+R100_SU122A                   :SU-122A
+R154_T_34E_1943               :T-34S
+R186_KV_1_Screened            :KV-1Sh
+R193_M4A2_T_34                :M4-85
+R197_KV_1S_MZ                 :KV-1SA
+R202_SU_2_122                 :SU-2-122
+R218_T_115                    :T-115
+R225_SU_100i                  :SU-100I
+S02_Strv_M42                  :Strv m/42
+S14_Ikv_103                   :Ikv 103
+---- Tier : 06 ----
+A06_M4A3E8_Sherman            :E8 Sherman
+A10_M6                        :M6
+A31_M36_Slagger               :Jackson
+A36_Sherman_Jumbo             :M4A3E2
+A41_M18_Hellcat               :Hellcat
+A71_T21                       :T21
+A87_M44                       :M44
+A94_T37                       :T37
+A104_M4A3E8A                  :Fury
+A118_M4_Thunderbolt           :Thunderbolt
+A123_T78                      :T78
+A134_M24E2_SuperChaffee       :Super Chaffee
+A142_Pawlack_Tank             :Pawlack Tank
+A172_M4A3E8_Sherman_BPXIV     :M4A3(76)W
+A192_M4A4_Firefly_CFE_A       :Firefly Saunders
+Ch15_59_16                    :59-16
+Ch20_Type58                   :Type 58
+Ch24_Type64                   :Type 64
+Ch34_WZ131G_FT                :WZ-131G FT
+Cz01_Skoda_T40                :Škoda T 40
+Cz08_T_25                     :Škoda T 25
+F06_ARL_44                    :ARL 44
+F15_AMX_12t                   :AMX 12 t
+F23_AMX_13F3AM                :AMX 13 F3
+F34_ARL_V39                   :ARL V39
+F85_M4A1_FL10                 :M4A1 FL 10
+F109_AMD_Panhard_178B         :AMD 178B
+F113_Bretagne_Panther         :Bret. Panther
+F127_AMX_ELC_901              :AMX ELC 901
+F129_ARL_44_BPXIV             :CDT
+G02_Hummel                    :Hummel
+G15_VK3601H                   :VK 36.01 H
+G17_JagdPzIV                  :Jg.Pz. IV
+G27_VK3001P                   :VK 30.01 P
+G40_Nashorn                   :Nashorn
+G41_DickerMax                 :Dicker Max
+G66_VK2801                    :VK 28.01
+G77_PzIV_Schmalturm           :Pz. IV S.
+G87_VK3002DB_V1               :VK 30.01 D
+G96_VK3002M                   :VK 30.02 M
+G136_Tiger_131                :Tiger 131
+G158_VK2801_105_SPXXI         :VK 28.01 105
+GB09_Churchill_VII            :Churchill VII
+GB19_Sherman_Firefly          :Firefly
+GB20_Crusader                 :Crusader
+GB21_Cromwell                 :Cromwell
+GB35_Sentinel_AC_IV           :AC 4 Exp.
+GB40_Gun_Carrier_Churchill    :Churchill GC
+GB45_Achilles_IIC             :Achilles
+GB63_TOG_II                   :TOG II*
+GB74_AT8                      :AT 8
+GB77_FV304                    :FV304
+GB85_Cromwell_Berlin          :Cromwell B
+GB95_Ekins_Firefly_M4A4       :Firefly VC
+GB96_Excalibur                :Excalibur
+GB105_Black_Prince_2019       :A43 BP
+GB108_A46                     :A46
+GB122_Staghound_Mk_III        :Staghound
+GB136_Churchill_BPXIV         :Crocodile
+GB150_Churchill_VII_A         :Chur Gloriana
+It10_P43_bis                  :P.43 bis
+It27_M43_da_105_25_Bassoto    :Bassotto
+J10_Chi_To                    :Chi-To
+J19_Tiger_I_Jpn               :HT No. VI
+J24_Mi_To_130_tons            :O-I
+J38_Type_95_Ji_Ro             :Ji-Ro
+J44_Type_3_Ju_Nu              :Ju-Nu
+Pl03_PzV_Poland               :Pudel
+Pl10_40TP_Habicha             :40TP
+Pl16_T34_85_Rudy              :Rudy Pl
+Pl18_BUGI                     :B.U.G.I.
+Pl32_SDP_Wz_44                :Burza
+R07_T-34-85                   :T-34-85
+R13_KV-1s                     :KV-1S
+R17_SU-100                    :SU-100
+R26_SU-8                      :SU-8
+R49_SU100Y                    :SU-100Y
+R57_A43                       :A-43
+R72_T150                      :T-150
+R77_KV2                       :KV-2
+R101_MT25                     :MT-25
+R106_KV85                     :KV-85
+R108_T34_85M                  :T-34-85M
+R114_Object_244               :Obj. 244
+R117_T34_85_Rudy              :Rudy U.S.S.R.
+R140_M4_Loza                  :Loza's M4-A2
+R152_KV2_W                    :KV-2 (R)
+R160_T_50_2                   :T-50-2
+S01_Strv_74_A2                :Strv m/42-57
+S07_Strv_74                   :Strv 74
+S08_Ikv_65_Alt_2              :Ikv 65 II
+---- Tier : 07 ----
+A07_T20                       :T20
+A11_T29                       :T29
+A32_M12                       :M12
+A64_T25_AT                    :T25 AT
+A72_T25_2                     :T25/2
+A86_T23E3                     :T23E3
+A101_M56                      :Scorpion
+A102_T28_concept              :T28 HTC
+A103_T71E1                    :T71 DA
+A112_T71E2                    :T71 CMCD P
+A112_T71E2R                   :T71 CMCD
+A121_M26_Cologne              :Eagle 7
+A126_PzVI_Tiger_II_capt       :King Tiger (C)
+A130_Super_Hellcat            :Super Hellcat
+A147_M_II_Y                   :M-II-Y
+Ch02_Type62                   :Type 62
+Ch04_T34_1                    :T-34-1
+Ch10_IS2                      :IS-2
+Ch16_WZ_131                   :WZ-131
+Ch35_T-34-2G_FT               :T-34-2G FT
+Ch51_BZ_58                    :BZ-58
+Cz05_T34_100                  :T-34/100
+Cz15_Skoda_T-45_Prem          :Škoda T 45
+Cz19_Vz_44_1                  :Vz. 44-1
+Cz23_Skoda_T_17               :Škoda T 17
+F07_AMX_M4_1945               :AMX M4 45
+F16_AMX_13_75                 :AMX 13 75
+F24_Lorraine155_50            :Lorr. 155 50
+F35_AMX_AC_Mle1946            :AMX AC 46
+F69_AMX13_57_100              :AMX 13 57
+F69_AMX13_57_100_GrandFinal   :AMX 13 57F
+F107_Hotchkiss_EBR            :EBR Hotch.
+G03_PzV_Panther               :Panther
+G04_PzVI_Tiger_I              :Tiger I
+G18_JagdPanther               :JPanther
+G24_VK3002DB                  :VK 30.02 D
+G43_Sturer_Emil               :St. Emil
+G48_E-25                      :E 25
+G49_G_Panther                 :G.W. Panther
+G57_PzVI_Tiger_P              :Tiger (P)
+G78_Panther_M10               :Panther/M10
+G85_Auf_Panther               :Aufkl.Panther
+G109_Steyr_WT                 :Steyr WT
+G113_SP_I_C                   :SP I C
+G118_VK4503                   :VK 45.03
+G172_PzVIB_Tiger_II_DIT       :Tiger II Kuro.
+GB10_Black_Prince             :Black Prince
+GB22_Comet                    :Comet
+GB29_Crusader_5inch           :Crusader SP
+GB41_Challenger               :Challenger
+GB52_A45                      :FV201 (A45)
+GB71_AT_15A                   :AT 15A
+GB75_AT7                      :AT 7
+GB104_GSR_3301_Setter         :Setter
+GB126_FSV_Scheme_A            :FSV Sch. A
+GB140_FV224_Chopper           :Chopper
+GB149_Centurion_MkI_A         :Cent Gloriana
+GB156_Black_Prince_II         :BP II
+It09_P43_ter                  :P.43 ter
+It16_Carro_d_assalto_P88      :Carro P.88
+It26_CC_56                    :SMV CC-56
+J11_Chi_Ri                    :Chi-Ri
+J28_O_I_100                   :O-Ni
+J32_Chi_To_SPG                :Chi-To SP
+J43_Type_4_Ju-To              :Ju-To
+Pl11_45TP_Habicha             :45TP
+Pl20_CS_44                    :CS-44
+Pl31_SDP_Wz_57D               :Gowika
+R01_IS                        :IS
+R15_S-51                      :S-51
+R18_SU-152                    :SU-152
+R23_T-43                      :T-43
+R39_KV-3                      :KV-3
+R46_KV-13                     :KV-13
+R59_A44                       :A-44
+R71_IS_2B                     :IS-2
+R74_SU100M1                   :SU-100M1
+R89_SU122_44                  :SU-122-44
+R91_SU14_1                    :SU-14-1
+R116_ISU122C_Berlin           :ISU-122S
+R131_Tank_Gavalov             :LTG
+R133_KV_122                   :KV-122
+R156_IS_2M                    :IS-2M
+R175_IS_2_screen              :IS-2S
+S06_Ikv_90_Typ_B_Bofors       :Ikv 90 B
+S13_Leo                       :Leo
+---- Tier : 08 ----
+A12_T32                       :T32
+A12_T32_FL                    :T32 FL
+A13_T34_hvy                   :T34
+A13_T34_hvy_BF                :T34 B
+A13_T34_hvy_FL                :T34 FL
+A35_Pershing                  :Pershing
+A37_M40M43                    :M40/M43
+A39_T28                       :T28
+A45_M6A2E1                    :M6A2E1
+A63_M46_Patton_KR             :M46 KR
+A68_T28_Prototype             :T28 Prototype
+A80_T26_E4_SuperPershing      :T26E4
+A80_T26_E4_SuperPershing_FL   :T26E4 FL
+A81_T95_E2                    :T95E2
+A90_T69                       :T69
+A97_M41_Bulldog               :Bulldog
+A97_M41_Bulldog_FL            :Bulldog FL
+A99_T92_LT                    :T92
+A111_T25_Pilot                :T25 Pilot 1
+A115_Chrysler_K               :Chrysler K
+A115_Chrysler_K_GF            :Chrysler GF
+A117_T26E5                    :T26E5
+A117_T26E5_FL                 :T26E5 FL
+A117_T26E5_Patriot            :T26E5 P
+A122_TS-5                     :TS-5
+A124_T54E2                    :Renegade
+A127_TL_1_LPC                 :TL-1 LPC
+A132_T77                      :T77
+A136_T42                      :T42
+A139_M_III_Y                  :M-III-Y
+A140_ASTRON_REX_105mm         :ASTRON Rex
+A140_ASTRON_REX_105mm_SPD     :Alembic
+A141_M_IV_Y                   :M-IV-Y
+A145_TS_54                    :TS-54
+A149_AMBT                     :AMBT
+A152_M_Project                :Iron Arnie
+A152_M_Project_2              :M47 Improv.
+A153_XM66F                    :XM66F
+A155_AAT60                    :AAT60
+A158_T832                     :T-832
+A159_Chrysler_MTC_2           :Chrysler MTC
+A168_XM_57                    :XM57
+A171_IMT                      :IMT
+A187_Ares_75                  :Ares 75
+Ch01_Type59                   :Type 59
+Ch01_Type59_Gold              :Type 59 G
+Ch03_WZ_111_A                 :Alpine Tiger
+Ch03_WZ-111                   :WZ-111
+Ch05_T34_2                    :T-34-2
+Ch11_110                      :110
+Ch14_T34_3                    :T-34-3
+Ch17_WZ131_1_WZ132            :WZ-132
+Ch17_WZ131_1_WZ132_FL         :WZ-132 FL
+Ch23_112                      :112
+Ch23_112_FL                   :112 FL
+Ch26_59_Patton                :59-Patton
+Ch36_WZ111_1G_FT              :WZ-111-1 FT
+Ch39_WZ120_1G_FT              :WZ-120-1 FT
+Ch39_WZ120_1G_FT_FL           :WZ-120-1 FT FL
+Ch42_WalkerBulldog_M41D       :M41D
+Ch43_WZ_122_2                 :122 TM
+Ch46_113_140                  :WZ-113-II
+Ch47_BZ_176                   :BZ-176
+Ch50_BZ_166                   :BZ-166
+Ch56_BZ_74_1                  :BZ-74-1
+Ch58_111_Vz51                 :WZ-111 6
+Ch65_Type59_IC4_3DSt          :First Warrior
+Cz07_TVP_46                   :TVP VTU
+Cz13_T_27                     :Škoda T 27
+Cz14_Skoda_T-56               :Škoda T 56
+Cz14_Skoda_T-56_WT24_3Dst     :Projekt ION
+Cz18_TNH_105_1000             :TNH 105/1000
+Cz20_ShPTK_TVP_100_mm         :ShPTK-TVP
+Cz20_ShPTK_TVP_100_mm_CO      :Šotek
+Cz24_Vz_64_Blesk              :Blesk
+Cz33_Vz_68_Squall             :Squall
+Cz38_SZDV_vz50                :SZDV Vz. 50
+F08_AMX_50_100                :AMX 50 100
+F19_Lorraine40t               :Lorr. 40 t
+F25_Lorraine155_51            :Lorr. 155 51
+F36_AMX_AC_Mle1948            :AMX AC 48
+F36_AMX_AC_Mle1948_FL         :AMX AC 48 FL
+F65_FCM_50t                   :FCM 50 t
+F68_AMX_Chasseur_de_char_46   :AMX CDC
+F73_M4A1_Revalorise           :M4A1 Rev.
+F73_M4A1_Revalorise_FL        :M4A1 Rev. FL
+F74_AMX_M4_1949               :AMX M4 49
+F74_AMX_M4_1949_FL            :AMX M4 49 FL
+F74_AMX_M4_1949_Liberte       :AMX M4 49 L
+F81_Char_de_65t               :AMX 65 t
+F84_Somua_SM                  :Somua SM
+F87_Batignolles-Chatillon_12t :B-C 12 t
+F89_Canon_dassaut_de_105      :AMX Cda 105
+F97_ELC_EVEN_90               :ELC EVEN 90
+F97_ELC_EVEN_90_FL            :ELC EVEN 90 FL
+F106_Panhard_EBR_75_Mle1954   :EBR 75 FL 10
+F110_Lynx_6x6                 :Lynx 6x6
+F116_Bat_Chatillon_Bourrasque :Bourrasque
+F116_Bat_Chatillon_Bourrasque_:Miel
+F117_Alt_Proto_AMX_30         :A.P. AMX 30
+F128_SFAC_105                 :SFAC 105
+F131_Brennos                  :Brennos
+F134_Lorraine_120_Alby        :Alby
+G16_PzVIB_Tiger_II            :Tiger II
+G16_PzVIB_Tiger_II_FL         :Tiger II FL
+G37_Ferdinand                 :Ferdinand
+G37_Ferdinand_FL              :Ferdinand FL
+G44_JagdTigerH                :Jagdtiger Pr
+G51_Lowe                      :Löwe
+G51_Lowe_FL                   :Löwe FL
+G64_Panther_II                :Panther II
+G65_JagdTiger_SdKfz_185       :JgTig.8.8 cm
+G67_VK4502A                   :VK 45.02 A
+G71_JagdPantherII             :JPanther II
+G88_Indien_Panzer             :Indien-Pz.
+G94_GW_Tiger_P                :G.W. Tiger P
+G99_RhB_Waffentrager          :Rhm.-B. WT
+G106_PzKpfwPanther_AusfF      :Panther 8.8
+G112_KanonenJagdPanzer        :KanJPz
+G112_KanonenJagdPanzer_105    :KanJPz 105
+G114_Rheinmetall_Skorpian     :Skorpion G
+G114_Skorpian                 :Skorpion
+G115_Typ_205_4_Jun            :VK 100.01 P
+G119_Panzer58                 :Pz. 58
+G119_Panzer58_BF              :Schwarzpz.58
+G119_Panzer58_FL              :Pz. 58 FL
+G119_Pz58_Mutz                :Pz. 58 Mutz
+G120_M41_90                   :M 41 90 mm
+G120_M41_90_GrandFinal        :M 41 90 GF
+G126_HWK_12                   :HWK 12
+G138_VK168_02                 :VK 168.01 P
+G138_VK168_02_Mauerbrecher    :Mauerbrecher
+G140_HWK_30                   :HWK 30
+G141_VK7501K                  :VK 75.01 K
+G142_M48RPz                   :M48 RPz
+G143_E75_TS                   :E 75 TS
+G154_Kpz_07_RH                :Kpz 07 RH
+G154_Kpz_07_RH_LN             :White Dragon
+G164_Kpz_Pr_68_P              :MKpz 68 (P)
+G166_LKpz_70_K                :LKpz 70 (K)
+G174_Kpz3_GST_Turm            :GST Turm
+G177_E65_Zwilling             :E 65 Zwilling
+G178_KanJpz_2                 :KanJPz 2
+G184_Windhund                 :Windhund
+GB11_Caernarvon               :Caernarvon
+GB23_Centurion                :Centurion I
+GB70_N_FV4202_105             :FV4202
+GB70_N_FV4202_105_FL          :FV4202 FL
+GB72_AT15                     :AT 15
+GB79_FV206                    :FV207
+GB80_Charioteer               :Charioteer
+GB87_Chieftain_T95_turret     :Chieftain/T95
+GB93_Caernarvon_AX            :Caernarvon AX
+GB94_Centurion_Mk5-1_RAAC     :Centurion 5/1
+GB97_Chimera                  :Chimera
+GB99_Turtle_Mk1               :Turtle I
+GB101_FV1066_Senlac           :Senlac
+GB102_LHMTV                   :LHMTV
+GB109_GSOR_1008               :GSOR 1008
+GB109_GSOR_1008_CFE_J         :Jade Coil
+GB111_Charlemagne             :Charlemagne
+GB112_Caliban                 :Caliban
+GB115_Gonsalo                 :Gonsalo
+GB121_GSOR_1010_FB            :GSOR 1010
+GB125_Saladin                 :Saladin
+GB128_Nemesis                 :Nemesis
+GB131_Crusher                 :Crusher
+GB133_Charioteer_MkVII        :Nomad
+GB139_FV226_Contradictious    :Contradictious
+GB145_Crusher_ASE_4           :Nergal
+GB148_FV227_Conceiver         :Conceiver
+It13_Progetto_M35_mod_46      :Progetto M35 mod 46
+It13_Progetto_M35_mod_46_LE   :Progetto M35 mod 46
+It14_P44_Pantera              :P.44 Pantera
+It17_Progetto_CC55_mod_54     :Progetto 54
+It18_Progetto_C45_mod_71      :Bisonte C45
+It30_CC_mod_64_Prem           :Vipera
+It31_CC_67_B                  :SMV CC-67
+It33_Prototipo_6              :Prototipo 6
+It36_Progetto_C45_mod_71_M    :Stone Sentinel
+J13_STA_1                     :STA-1
+J18_STA_2_3                   :STA-2
+J27_O_I_120                   :O-Ho
+J31_Type_5_KaRi               :Ka-Ri
+J33_Ho_Ri_2                   :Ho-Ri 2
+J36_Type_63_HT                :Type 63
+J39_Type_57                   :Type 57
+J42_Chi_Se                    :Chi-Se
+J42_Chi_Se_CFE_A              :Stitch
+Pl08_50TP_prototyp            :50TP pr.
+Pl08_50TP_Prototyp_Resilient  :50TP R.
+Pl13_53TP_Markowskiego        :53TP
+Pl19_CS_52_LIS                :CS-52 LIS
+Pl23_CS_53                    :CS-53
+Pl24_56TP                     :56TP
+Pl25_CS_52_C                  :CS-52 C
+Pl27_SDP_Wz_66T               :Grom
+Pl30_SDP_Wz58T                :Kilana
+Pl34_Cs53_56_Woitek           :Wojtek
+R19_IS-3                      :IS-3
+R20_T-44                      :T-44
+R20_T-44_FL                   :T-44 FL
+R27_SU-14                     :SU-14-2
+R47_ISU-152                   :ISU-152
+R54_KV-5                      :KV-5
+R58_SU-101                    :SU-101
+R60_Object416                 :Obj. 416
+R61_Object252                 :IS-6
+R61_Object252_BF              :IS-6 B
+R61_Object252_FL              :IS-6 FL
+R73_KV4                       :KV-4
+R107_LTB                      :LTTB
+R111_ISU130                   :ISU-130
+R112_T54_45                   :T-54 mod. 1
+R112_T54_45_FL                :T-54 mod. 1 FL
+R113_Object_730               :IS-5
+R115_IS-3_auto                :IS-3A
+R115_IS-3_auto_S              :Peregrine
+R121_KV4_KTT                  :KV-4 KTTS
+R122_T44_100                  :T-44-100
+R123_Kirovets_1               :Kirovets-1
+R127_T44_100_I                :T-44-100 I
+R128_KV4_Kreslavskiy          :KV-4 Kresl.
+R134_Object_252K              :Defender
+R134_Object_252U              :Obj. 252U
+R135_T_103                    :T-103
+R139_IS_M                     :IS-M
+R146_STG                      :STG
+R146_STG_Tday                 :Guard
+R147_Object_701               :Obj. 701
+R158_LT_432                   :LT-432
+R159_SU_130PM                 :SU-130PM
+R159_SU_130PM_DR              :Forest Spirit
+R165_Object_703_II            :703 II (122)
+R170_IS_2_II                  :IS-2-II
+R177_ISU_152K_BL10            :ISU-152K
+R180_Object_274_A             :Obj. 274a
+R182_ST_66                    :ST-66
+R188_Object_259A              :Obj. 259A
+R188_Object_259A_CN           :Udarniy
+R192_K_2                      :K-2
+R198_LTS_85                   :LTS-85
+R200_KV_4_Turchaninov         :KV-4 Turch.
+R203_Object_168N              :Obj. 168G
+R204_ISU_122_2                :ISU-122-2
+R205_Tank_Rozanova            :TITT
+R205_Tank_Rozanova_Obsidian   :Obsidian
+R217_Object_Kust              :Kust
+S18_EMIL_1951_E1              :Emil I
+S21_UDES_03                   :UDES 03
+S22_Strv_S1                   :Strv S1
+S22_Strv_S1_FL                :Strv S1 FL
+S23_Strv_81                   :Strv 81
+S23_Strv_81_sabaton           :P
+S25_EMIL_51                   :EMIL 1951
+S26_Lansen_C                  :Lansen C
+S29_UDES_14_5                 :UDES 14 5
+S32_Bofors_Tornvagn           :Tornvagn
+S35_Stridsyxa                 :Stridsyxa
+---- Tier : 09 ----
+A14_T30                       :T30
+A14_T30_FL                    :T30 FL
+A40_T95                       :T95
+A63_M46_Patton                :M46 Patton
+A63_M46_Patton_FL             :M46 FL
+A66_M103                      :M103
+A88_M53_55                    :M53/M55
+A89_T54E1                     :T54E1
+A100_T49                      :T49
+A125_AEP_1                    :AE Phase I
+A128_concept_1b               :Concept 1B
+A144_M_VI_Y                   :M-VI-Y
+A144_M_VI_Y_CFE_R             :M-VI-Y (120)
+A144_M_VI_Y_CFE_RC            :Peacekeeper
+A146_TL_7_120                 :TL-7
+A151_TS_60                    :TS-60
+A156_T54_2022                 :T54 Heavy
+A166_H_3                      :H3
+A167_TS_6                     :TS-6
+A169_PattonIII_120            :Patton Tank
+A175_LTC_II                   :LTC II
+A176_M103_110                 :M103M
+A176_M103_110_CFE_R           :Rambo
+A178_SPHT                     :SPHT
+A190_Ares_85                  :Ares 85
+Ch12_111_1_2_3                :WZ-111 1-4
+Ch12_111_1_2_3_FL             :WZ-111 1-4 FL
+Ch18_WZ-120                   :WZ-120
+Ch28_WZ_132A                  :WZ-132A
+Ch37_WZ111G_FT                :WZ-111G FT
+Ch40_WZ120G_FT                :WZ-120G FT
+Ch45_WZ_114                   :WZ-114
+Ch49_BZ_68                    :BZ-68
+Ch59_BZ58_2                   :BZ-58-2
+Ch61_DZT_159                  :DZT-159
+Ch61_DZT_159_CFE_A            :Dragon's Soul
+Ch63_Yong_Bing                :Yong Bing
+Cz02_TVP_T50                  :Škoda T 50
+Cz16_TNH_T_vz51               :TNH T Vz. 51
+Cz28_LPT_67_Selma             :Šelma
+Cz30_TBT                      :TBT
+Cz32_Vz_58_Koncept            :Medvěd
+Cz35_T56_G                    :TT-130M
+Cz37_SDT_58_Vlkodav           :Vlkodav
+Cz43_Ogar                     :Ogar
+F09_AMX_50_120                :AMX 50 120
+F17_AMX_13_90                 :AMX 13 90
+F37_AMX50_Foch                :Foch
+F67_Bat_Chatillon155_55       :B-C 155 55
+F71_AMX_30_prototype          :AMX 30
+F75_Char_de_25t               :B-C 25 t AP
+F83_AMX_M4_Mle1949_Bis        :AMX M4 51
+F83_AMX_M4_Mle1949_Bis_FL     :AMX M4 51 FL
+F100_Panhard_EBR_90           :EBR 90
+F114_Projet_4_1               :Char Futur 4
+F115_Lorraine_50t             :Lorraine 50 t
+F118_Char_Mle_75              :Char Mle. 75
+F119_Char_Murat               :Char Murat
+F120_Projet_Louis             :Projet Louis
+F122_VCS_6x6_TS90             :VCS 6x6
+F123_ERAC_105_Proto           :ERAC 105 Pr
+F130_Sentinelle               :Sentinelle
+F132_Vercingetorix            :Vercingétorix
+F137_LEOX                     :Leox
+F139_Terrifiant               :Terrifiant
+F140_Fantome                  :Fantôme
+G44_JagdTiger                 :Jagdtiger
+G44_JagdTiger_FL              :Jagdtiger FL
+G45_G_Tiger                   :G.W. Tiger
+G54_E-50                      :E 50
+G54_E-50_FL                   :E 50 FL
+G55_E-75                      :E 75
+G58_VK4502P                   :VK 45.02 B
+G91_Pro_Ag_A                  :Leopard PT A
+G97_Waffentrager_IV           :WT auf Pz. IV
+G103_RU_251                   :Ru 251
+G105_T-55_NVA_DDR             :T 55A
+G110_Typ_205                  :Mäuschen
+G144_Kpz_50t                  :Kpz 50 t
+G147_Kunze_Panzer             :Kunze Panzer
+G159_KPZ_3_Project_07_HK      :KPz 3 Pr.07HK
+G165_Erich_Konzept_I          :Kpz EK I
+G167_Tiger_Maus_120t          :Tiger-Maus
+G168_KJpz_T_III               :TIII Jäger
+G169_T_54D                    :T 54D
+G171_E77                      :E 77
+G176_Jagdpanzer_E90           :Jg.Pz. E 90
+GB12_Conqueror                :Conqueror
+GB12_Conqueror_FL             :Conqueror FL
+GB24_Centurion_Mk3            :Centurion 7/1
+GB30_FV3805                   :FV3805
+GB32_Tortoise                 :Tortoise
+GB81_FV4004                   :Conway
+GB103_GSOR3301_AVR_FS         :AVR FS
+GB106_Cobra                   :Cobra
+GB110_FV4201_Chieftain_Prototy:Chieftain P.
+GB123_GSOR_1006_v7            :GSOR 1006/7
+GB141_GSOR_the_TANK           :GSOR TANK
+GB143_FV229_Contender         :Contender
+It12_Prototipo_Standard_B     :Standard B
+It19_Progetto_C50_mod_66      :Progetto 66
+It24_Controcarro_1_Mk2        :CC-1 Mk. 2
+It34_Toro                     :Toro
+It35_Felice                   :Felice
+It37_Serpente                 :Serpente
+It40_Predatore                :Predatore
+J14_Type_61                   :Type 61
+J25_Type_4                    :Type 4 H
+J34_Ho_Ri_1                   :Ho-Ri 1
+J41_Type_68                   :Type 68
+J48_Saryuda                   :Saryuda
+J49_Kame                      :Kame
+Pl05_50TP_Tyszkiewicza        :50TP
+Pl22_CS_59                    :CS-59
+Pl26_Czolg_P_Wz_46            :Pancernik
+Pl28_SDP_Wz_60                :Gonkiewicza
+R40_T-54                      :T-54
+R40_T-54_FL                   :T-54 FL
+R51_Object_212                :212A
+R53_Object_704                :Obj. 704
+R63_ST_I                      :ST-I
+R81_IS8                       :T-10
+R93_Object263                 :Obj. 263
+R96_Object_430                :Obj. 430
+R104_Object_430_II            :Obj. 430 II
+R109_T54S                     :T-54 ltwt.
+R119_Object_777               :Obj. 777 II
+R151_Object_257_2             :Obj. 257
+R153_Object_705               :Obj. 705
+R171_IS_3_II                  :IS-3-II
+R172_Object_752               :Obj. 752
+R172_Object_752_CFE_T         :Peerless
+R173_K_91_2                   :K-91-2
+R183_K_91_PT                  :K-91-PT
+R187_Object_590               :Obj. 590
+R191_Object_283               :Obj. 283
+R199_SU_122V                  :SU-122V
+R219_Object_265T              :Obj. 265T
+R231_Buryan                   :Buryan
+R235_KB_52                    :KB-52
+S10_Strv_103_0_Series         :Strv 103-0
+S10_Strv_103_0_Series_FL      :Strv 103-0 FL
+S17_EMIL_1952_E2              :Emil II
+S27_UDES_16                   :UDES 16
+S30_UDES_03_Alt_3             :UDES 03 3
+S31_Strv_K                    :Strv K
+S33_Latt_Stridsfordon_120     :Lätt Strf 120
+---- Tier : 10 ----
+A38_T92                       :T92 HMC
+A67_T57_58                    :T57 Heavy
+A69_T110E5                    :T110E5
+A69_T110E5_cl                 :T110E5 CL
+A83_T110E4                    :T110E4
+A85_T110E3                    :T110E3
+A92_M60                       :M60
+A95_T95_E6                    :T95E6
+A116_XM551                    :Sheridan
+A120_M48A5                    :M48 Patton
+A143_M_V_Y                    :M-V-Y
+A150_MBT_B                    :MBT-B
+A174_T57_58_Rush_Ep1          :Stinger
+A189_Ares_90                  :Ares 90
+A194_AHT_7                    :AHT-7
+Ch19_121                      :121
+Ch22_113                      :113
+Ch22_113_Beijing_Opera        :113 BO
+Ch25_121_mod_1971B            :121B
+Ch25_121_mod_1971B_MK         :Monkey King
+Ch29_Type_62C_prot            :WZ-132-1
+Ch38_WZ113G_FT                :WZ-113G FT
+Ch41_WZ_111_5A                :WZ-111 5A
+Ch41_WZ_111_QL                :WZ-111 QL
+Ch44_114_SP2                  :114 SP2
+Ch48_BZ_75                    :BZ-75
+Ch52_WZ_122_6_F3              :116-F3
+Ch54_BZ_72_1                  :BZ-72-1
+Ch57_BZT_70                   :BZT-70
+Ch62_BZ_75_M                  :Divine Valor
+Cz04_T50_51                   :TVP T 50/51
+Cz17_Vz_55                    :Vz. 55
+Cz17_Vz_55_CN                 :Vz. 55 GW
+Cz21_Vz_60S_Dravec            :Dravec
+Cz34_Vz_71_Tesak              :Tesák
+Cz40_DBV_152                  :DBV-152
+F10_AMX_50B                   :AMX 50 B
+F18_Bat_Chatillon25t          :B-C 25 t
+F38_Bat_Chatillon155_58       :B-C 155 58
+F64_AMX_50Fosh_155            :Foch 155
+F64_AMX_50Fosh_B              :Foch B
+F72_AMX_30                    :AMX 30 B
+F82_AMX_M4_Mle1949_Ter        :AMX M4 54
+F88_AMX_13_105                :AMX 13 105
+F108_Panhard_EBR_105          :EBR 105
+G42_Maus                      :Maus
+G56_E-100                     :E 100
+G61_G_E                       :G.W. E 100
+G72_JagdPz_E100               :Jg.Pz. E 100
+G73_E50_Ausf_M                :E 50 M
+G89_Leopard1                  :Leopard 1
+G92_VK7201                    :VK 72.01 K
+G98_WT_auf_E_100_Phonix       :Phönix
+G121_Grille_15_L63            :Grille 15
+G125_Spz_57_Rh                :Rhm. Pzw.
+G134_PzKpfw_VII               :Pz.Kpfw. VII
+G162_Project_Kpz_07P_E        :Kpz. 07 P(E)
+G186_Schwertwal               :Schwertwal
+GB13_FV215b                   :FV215b
+GB31_Conqueror_Gun            :Conqueror GC
+GB48_FV215b_183               :FV215b 183
+GB83_FV4005                   :FV4005
+GB84_Chieftain_Mk6            :Chieftain
+GB86_Centurion_Action_X       :Centurion AX
+GB86_Centurion_Action_X_CFE_A :Triumphant
+GB91_Super_Conqueror          :S. Conqueror
+GB92_FV217                    :Badger
+GB98_T95_FV4201_Chieftain     :T95/FV4201
+GB100_Manticore               :Manticore
+GB114_Vickers_MBT_Mk3         :Vickers 3
+GB120_Concept_No_5            :Concept 5
+GB134_Gryphon                 :Gryphon
+GB142_FV230_Canopener         :Canopener
+It08_Progetto_M40_mod_65      :Progetto 65
+It15_Rinoceronte              :Rinoceronte
+It20_Carro_Combattimento_45t  :Carro 45 t
+It21_Lion                     :Lion
+It23_CC_3                     :Minotauro
+It39_Coccodrillo              :Coccodrillo
+J16_ST_B1                     :STB-1
+J20_Type_2605                 :Type 5 H
+J35_Ho_Ri_3                   :Ho-Ri 3
+J40_Type_71                   :Type 71
+J51_Ashigaru                  :Ashigaru
+Pl15_60TP_Lewandowskiego      :60TP
+Pl15_60TP_Lewandowskiego_CFE_A:Ashbringer
+Pl21_CS_63                    :CS-63
+Pl21_CS_63_OSP3               :Hurricane
+Pl29_NC_Wz_70T                :Błyskawica
+Pl36_Wz_64GC_Bzyg             :Bzyg
+R45_IS-7                      :IS-7
+R52_Object_261                :Obj. 261
+R87_T62A                      :T-62A
+R88_Object268                 :Obj. 268
+R90_IS_4M                     :IS-4
+R95_Object_907                :Obj. 907
+R97_Object_140                :Obj. 140
+R97_Object_140_cl             :Obj. 140 CL
+R110_Object_260               :Obj. 260
+R120_T22SR_A22                :T-22 med.
+R126_Object_730_5             :Obj. 268/5
+R132_VNII_100LT               :T-100 LT
+R144_K_91                     :K-91
+R145_Object_705_A             :Obj. 705A
+R148_Object_430_U             :Obj. 430U
+R149_Object_268_4             :Obj. 268/4
+R155_Object_277               :Obj. 277
+R157_Object_279R              :Obj. 279 (e)
+R169_ST_II                    :ST-II
+R178_Object_780               :Obj. 780
+R194_ST_62_var_2              :ST-62 Ver. 2
+R196_Object_452K              :Obj. 452K
+S11_Strv_103B                 :Strv 103B
+S16_Kranvagn                  :Kranvagn
+S28_UDES_15_16                :UDES 15/16
+---- Tier : 11 ----
+A179_Black_Rock               :Black Rock
+A182_T803                     :T803
+A183_XM69_Hacker              :Hacker
+A191_Ares_90_C                :Ares 90 C
+A195_Gorilla                  :Gorilla
+Ch67_BZ_79                    :BZ-79
+Ch70_PTZ_78                   :PTZ-78
+F135_AS_XX_40_t               :AS-XX 40 t
+F136_AMX_67_Imbattable        :Imbattable
+F143_Fauteur                  :Fauteur
+G185_Leopard_120_Verbessert   :Leopard 120
+G187_Taschenratte             :Taschenratte
+G188_LeKpz_Borkenkafer        :Borkenkäfer
+G189_Hirschkafer              :Hirschkäfer
+GB147_FV4025_Contriver        :Contriver
+GB152_AT_FV230_Breaker        :Breaker
+GB158_Executor                :Executor
+J52_STK_2                     :STK-2
+Pl37_CS_67_Szakal             :Szakal
+R228_KR_1                     :KR-1
+R230_Object_432U              :Obj. 432U
+S36_Strv_107_12               :Strv 107-12
+

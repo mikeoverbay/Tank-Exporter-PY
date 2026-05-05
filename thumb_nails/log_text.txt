@@ -1,0 +1,41 @@
+------ App Startup ------
+ Tank Exporter Version: 1.0.0.170
+Starting up OpenGL......
+Vendor: NVIDIA Corporation
+Driver Version: 4.6.0 NVIDIA 591.86
+Shader Version: 4.60 NVIDIA
+End OpenGL Information
+
+OpenGL Startup Complete
+
+Loading required data..
+Loaded: C:\Games\World_of_Tanks_NA\res\packages\gui.pkgs
+Loaded: C:\Games\World_of_Tanks_NA\res\packages\scripts.pkg
+XMLdata.file found and xmlPartList built
+
+Done Creating OpenGL based Buttons.
+Getting DEV API data.
+creating treeview :00
+creating treeview :01
+creating treeview :02
+creating treeview :03
+creating treeview :04
+creating treeview :05
+creating treeview :06
+creating treeview :07
+creating treeview :08
+creating treeview :09
+creating treeview :10
+Total Tanks Found:998
+Done Creating XY Grid Display List.
+loading models..
+T = 0ms
+loading Env textures...
+T = 576ms
+loading Upton....
+T = 69ms
+find Decal Textures
+T = 78ms
+loading Decal Layout and used decals
+T = 1385ms
+----- Startup Complete -----

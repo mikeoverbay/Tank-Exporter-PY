@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"C:\\\\\\\\!_Tank Exporter\\\\\\\\!_Tank Exporter\\\\\\\\Modules\\\\\\\\\")",
+      "Bash(grep -n \"export_fbx_textures\\\\|Sub write_FBX\\\\|Sub Open_2016_fbx\\\\|Sub export_aspose_fbx\" \"C:\\\\\\\\!_Tank Exporter\\\\\\\\!_Tank Exporter\\\\\\\\Modules\\\\\\\\mod_Exporter.vb\")",
+      "Bash(grep -n \"get_translations\\\\|build_textures\" \"C:\\\\\\\\!_Tank Exporter\\\\\\\\!_Tank Exporter\\\\\\\\Modules\\\\\\\\ModTankLoader.vb\")",
+      "Bash(ls -la \"C:\\\\\\\\!_Tank Exporter\\\\\\\\!_Tank Exporter\\\\\\\\shaders\\\\\\\\\")",
+      "Bash(python tank_viewer.py \"C:\\\\games\\\\tanks\\\\hull_normal.primitives_processed\")",
+      "Bash(pkill -f \"python tank_viewer.py\")",
+      "Bash(python -m py_compile tank_viewer.py)",
+      "Bash(xcopy /I /Y \"C:\\\\!_Tank Exporter\\\\!_Tank Exporter\\\\resources\\\\cube\\\\new_cube\\\\*\" \"C:\\\\experiment\\\\resources\\\\environment_maps\\\\\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'Fix winding order, normal Z-flip, buffer overruns, and primitive tag ordering' --body ' *)",
+      "Bash(where gh *)",
+      "Bash(winget list *)",
+      "PowerShell($env:GITHUB_TOKEN)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue; [System.Environment]::GetEnvironmentVariable\\(\"GH_TOKEN\", \"User\"\\); [System.Environment]::GetEnvironmentVariable\\(\"GITHUB_TOKEN\", \"User\"\\))",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:80.lv)",
+      "WebSearch",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tankviewer/loaders.py'\\).read\\(\\)\\); print\\('loaders.py OK'\\)\")",
+      "Bash(python -c \"from tankviewer import loaders; print\\('imports OK'\\)\")"
+    ]
+  }
+}
