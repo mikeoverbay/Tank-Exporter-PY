@@ -15,6 +15,21 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Real fire flipbook (1.36.1)
+
+`resources/fire/` previously held a single-blast explosion sequence
+(`explosion 1_rgb*.png`).  Replaced with a procedurally-rendered
+91-frame fire animation -- continuous flame, ignition / mature /
+dissipation lifecycle, upward-scrolling turbulence, no white-hot
+"steam" tip (palette tops out at warm yellow).  Legacy explosion
+frames moved to `resources/fire_legacy_explosion/` for reference.
+
+Generator: `cust_tools/make_fire_frames.py`.  All knobs (palette,
+phase fractions, flame envelope, noise scales, scroll rate) live
+at the top of the file; re-run to regenerate.  Frozen RNG seed so
+two runs at the same settings produce byte-identical output --
+clean git diffs of generated assets.
+
 ### Burn the damaged tanks (1.36.0) -- HP_Fire_* particle system
 
 When the user loads a tank with the "Load Damaged" checkbox ticked,
