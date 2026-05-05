@@ -310,17 +310,33 @@ Offset    Type      Description
 +68..end  Single[]  Pairs (u, v), 8 bytes each
 ```
 
-#### BPVT layout (132-byte preamble) — used when the matching
+#### BPVT layout (136-byte preamble) — used when the matching
 `.vertices` section's format string starts with `BPVT`
+
+Mirrors the matching `.vertices` section's preamble (primary +
+secondary format string + uint32 count) exactly:
+
 ```
 Offset    Type      Description
 ────────────────────────────────
-+0..63    Char[64]  Format string
-+64..127  Byte[64]  Additional BPVT header (mirrors the 64-byte BPVT
-                    extension on the .vertices preamble)
-+128..131 UInt32    uv2_count   (NOT TRUSTED)
-+132..end Single[]  Pairs (u, v), 8 bytes each
++0..67    Char[68]  Primary format string ('BPVSuv2', 64 bytes
+                    of string + 4 bytes of zero pad)
++68..131  Char[64]  Secondary format string ('set3/uv2pc')
++132..135 UInt32    uv2_count   (NOT TRUSTED)
++136..end Single[]  Pairs (u, v), 8 bytes each
 ```
+
+> **Off-by-4 trap.**  An older draft of this doc described the BPVT
+> preamble as 132 bytes (count at offset 128, body at 132).  That was
+> wrong: live tank data has count at 132 and body at 136.  Probing
+> 132 first looked safe because integer truncation
+> `(section_size - 132) // 8` rounded `1638.5` down to `1638` and
+> matched `expected_count` by coincidence -- but it shifted the body
+> read by 4 bytes, so `uv1[0]` came back as the count uint32
+> reinterpreted as a float (`2.295e-42`, a denormal).  The loader's
+> probe list was changed to `(136, 68)` and the divisibility check
+> tightened to require `(size - offset) % 8 == 0` to prevent the
+> false positive from coming back.  See CHANGELOG 2026-05-05.
 
 ### Per-entry payload (8 bytes)
 ```
@@ -619,6 +635,67 @@ viewer reads them as plain `4 × uint8` blocks because all we do
 with them today is round-trip through Blender's `WoTBoneIdx` /
 `WoTBoneWeight` color attributes.  The reverse-padding will need to
 be respected if we ever drive a Blender skin cluster from this data.
+
+---
+
+## Writing the format
+
+The encoder lives at `tankviewer/writers/_primitive_encoder.py`; the
+public entry point is `encode_file(meshes, want_uv2=True)` and the
+public wrapper that drops it on disk atomically is
+`tankviewer.writers.write_primitives()`.
+
+### Two layouts the encoder must support
+
+The encoder picks one of two layouts per file based on `mesh.name`
+(the section base name preserved by the loader from the source file's
+section table).  These are the same two layouts the parser groups
+sections into, just viewed from the writer side:
+
+| Layout              | Detected by                  | Section names emitted                            | Visual reference style |
+| ------------------- | ---------------------------- | ------------------------------------------------ | ---------------------- |
+| **bare-shared**     | every `mesh.name == ''`      | one global `indices` + `vertices` (+ `uv2`)      | by index               |
+| **named-per-mesh**  | every `mesh.name != ''`      | `<base>.indices` + `<base>.vertices` (+ `<base>.uv2`) per mesh | by name |
+
+Mixed input (some named, some empty) raises `ValueError`.
+
+In bare-shared layout the `indices` section header reports `N`
+primitive groups + `N` per-group metadata entries (one per mesh, with
+running `start_index` / `start_vertex` offsets).  Indices are
+re-based into a single shared vertex buffer.
+
+In named-per-mesh layout each section's `group_count = 1` and the
+single primitive-group entry covers the whole local buffer
+(`start_index = 0`, `start_vertex = 0`).  No re-basing across meshes.
+
+### What never to invent on the writer side
+
+`mesh.identifier` (the WoT *visual-side* material label like
+`tank_chassis_01_skinned`) is **not** a section name.  Substituting it
+when `mesh.name` is empty would make the engine look for sections that
+don't exist anywhere in the file.  If `mesh.name` is empty, write the
+bare-shared layout; if it's populated, use it verbatim.
+
+### Section bodies that the engine ignores
+
+Real pkg `.primitives_processed` files have non-zero data in bytes
+8..63 of each section (after the 4-byte format-string head): pointer-
+shaped values (`0x74EA9A87`, `0xD6EA50D0`), sentinels
+(`0xFFFFFFFFFFFFFFFE` = `-2` int64), small counts (`0x07FE` = 2046).
+This is metadata BigWorld writes during compilation -- runtime
+pointers / cache state / build counters captured at the moment the
+file was last serialised.  The engine does **not** validate this
+region at load time; our writer leaves it zero-filled and the game
+loads our output cleanly.  No need to chase these bytes for
+round-trip fidelity.
+
+### What the writer doesn't yet handle
+
+* `.colour` / `.colour2` sidecar write-back (parsed read-only today).
+* The visual-rewrite pass that splices new `<PG_ID>` blocks into the
+  matching `.visual_processed` when the user has *added* meshes.
+  Will land alongside "add new mesh to a tank".
+* `BSP2` collision data -- old format, not used by live tanks.
 
 ---
 

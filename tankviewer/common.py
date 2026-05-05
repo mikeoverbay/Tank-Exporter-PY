@@ -217,6 +217,78 @@ def unpack_normal_bpvt(packed):
     return np.array([x / length, y / length, z / length], dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Inverse pack functions -- used by the .primitives_processed writer
+# (tankviewer/writers/primitives_writer.py).  Each pack_* is the
+# inverse of the matching unpack_* above so a write -> read round-trip
+# yields the same uint32 byte-for-byte (modulo the rounding step).
+
+def pack_normal(x, y, z):
+    """Inverse of unpack_normal: pack a unit vector into a 32-bit
+    integer using the 10:10:10 signed-fixed-point layout.  Returns
+    a Python int (uint32-shaped); caller writes it as '<I' bytes.
+
+    Bit layout (matches unpack_normal):
+        X: bits  0..10  (10-bit signed, /511)
+        Y: bits 11..20  (10-bit signed, /511)
+        Z: bits 22..31  (10-bit signed, /511)
+
+    Each component is clamped to [-1, 1] then quantised to a signed
+    10-bit value via round(c * 511), in [-511, +511].  Negative
+    values are stored in two's-complement-on-1024 form -- the same
+    form unpack_normal undoes via the `if pk < 512: pk - 1024` branch.
+    """
+    def _q(c):
+        i = int(round(max(-1.0, min(1.0, float(c))) * 511.0))
+        if i < -512:
+            i = -512
+        elif i > 511:
+            i = 511
+        return (i + 1024) & 0x3FF if i < 0 else i & 0x3FF
+    ix = _q(x)
+    iy = _q(y)
+    iz = _q(z)
+    return (ix | (iy << 11) | (iz << 22)) & 0xFFFFFFFF
+
+
+def pack_normal_bpvt(x, y, z):
+    """Pack a unit vector into a 32-bit integer using WoT's BPVT
+    8:8:8 normal format (the one the legacy VB Tank Exporter writes
+    via packnormalFBX888_writePrimitive_NEWMODEL + s_to_int).
+
+    The format is NOT the simple `(c + 1) * 127.5` you'd expect.  It
+    layers three operations (each component independent):
+
+        signed   = round(-c * 127)        # negate + scale to int8
+        byte     = signed & 0xFF          # two's-complement wrap to uint8
+        stored   = byte XOR 127           # final on-disk byte
+
+    XOR-127 flips the low 7 bits, leaving the sign bit alone; this
+    means c=0 maps to byte 127 (NOT 128, which is what a naive
+    midpoint pack would produce).  The matching unpack is
+    `unpackNormal_8_8_8` in modPrimWriter.vb -- see
+    VISUAL_PROCESSED_FORMAT.md for the round-trip discussion.
+
+    Bit layout in the returned uint32:
+        bits  0..7   x byte
+        bits  8..15  y byte
+        bits 16..23  z byte
+        bits 24..31  reserved (left at 0)
+    """
+    def _q(c):
+        signed = int(round(-max(-1.0, min(1.0, float(c))) * 127.0))
+        if signed < -128:
+            signed = -128
+        elif signed > 127:
+            signed = 127
+        byte = signed & 0xFF       # two's-complement wrap
+        return byte ^ 0x7F          # final XOR-127 step
+    bx = _q(x)
+    by = _q(y)
+    bz = _q(z)
+    return (bx | (by << 8) | (bz << 16)) & 0xFFFFFFFF
+
+
 def read_c_string(data, offset, max_len=64):
     """Read a null-terminated ASCII string from `data` starting at `offset`,
     capped at `max_len` bytes. Stops at first null byte."""

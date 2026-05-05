@@ -107,6 +107,25 @@ class Splash:
         if self.welcome_text:
             self._build_banner_texture()
 
+        # ---- Status log (top-down, grows with every set_status call) --
+        # Shows short progress messages on the splash so users know the
+        # app isn't hung during the multi-second startup phase (shaders
+        # compile, IBL bake, pkg pre-warm, tier-tree build).  Each call
+        # to set_status() APPENDS a new line under the previous one --
+        # the log builds top-down as the user watches.  Rendered as
+        # white text on per-line translucent dark strips for legibility
+        # against whatever splash artwork is showing.
+        #
+        # Each entry is a dict: {'text': str, 'tex': GLuint, 'w': int, 'h': int}
+        # Cleaned up wholesale in cleanup() at viewer-shutdown time.
+        self.status_lines = []
+        # Max-character cap per line so a long path string can't push
+        # past the splash's edge.  Also caps total kept (we don't
+        # expect more than ~15 entries during init, so no real cap
+        # needed; this is just defensive).
+        self._status_max_chars = 80
+        self._status_max_lines = 30
+
         # ---- Fullscreen quad in NDC, with letterbox padding ------------
         # Aspect-fit the splash inside the window so it's not stretched.
         # Excess area on the left/right (or top/bottom) is left black via
@@ -153,15 +172,39 @@ class Splash:
         glBindVertexArray(0)
 
     # ------------------------------------------------------------------
+    # Cursive / script font fallback chain for the welcome banner.
+    # pygame.font.SysFont walks the comma-list left-to-right and uses
+    # the first installed match.  Gabriola sits at the top -- it's
+    # the user-picked face (Vista+ Microsoft, ornate stylistic
+    # alternates, reads beautifully on the burnt-orange strip).
+    # Everything below it is a graceful-degradation chain for the
+    # rare box where Gabriola isn't installed.
+    _BANNER_FONT_CHAIN = (
+        'Gabriola,'                  # picked face (Vista+ MS, ornate)
+        'Monotype Corsiva,'          # classic cursive, ships with Office
+        'Lucida Handwriting,'        # handwriting-style fallback
+        'Segoe Script,'              # Windows 7+ script face
+        'Brush Script MT,'           # legacy office font
+        'Comic Sans MS,'             # informal but always available
+        'Calibri'                    # safe stop
+    )
+
     def _build_banner_texture(self):
         """Render self.welcome_text to a GL texture using pygame.font.
         Stored on self.banner_text_tex / w / h.  No-op on failure --
-        the banner just doesn't appear in that case."""
+        the banner just doesn't appear in that case.
+
+        Uses a cursive font chain so the welcome message reads like a
+        signature rather than a flat sans-serif label.  Cursive faces
+        are usually display-only (no real bold cut), so we render at
+        a larger size instead of forcing bold -- the heavier strokes
+        come from the typeface itself.
+        """
         try:
             import pygame
             if not pygame.font.get_init():
                 pygame.font.init()
-            font = pygame.font.SysFont('Segoe UI', 28, bold=True)
+            font = pygame.font.SysFont(self._BANNER_FONT_CHAIN, 32)
             surf = font.render(self.welcome_text, True, (255, 255, 255))
             data = pygame.image.tostring(surf, 'RGBA', False)
             self.banner_text_w = surf.get_width()
@@ -180,6 +223,61 @@ class Splash:
         except Exception as exc:
             print(f"[splash] banner build failed: {exc}")
             self.banner_text_tex = 0
+
+    # ------------------------------------------------------------------
+    def set_status(self, text):
+        """Append one line to the splash status log.
+
+        Each call adds a NEW line under the previous one -- the log
+        builds top-down as the user watches startup progress.  Caller
+        should follow with `self.render()` and `pygame.display.flip()`
+        (Viewer's `_splash_status` helper does both).
+
+        An empty / None text is ignored (no spurious blank lines).
+        """
+        text = (text or '').strip()
+        if not text:
+            return
+        # Cap each line at _status_max_chars so a long path string
+        # never extends past the splash's left edge.
+        if len(text) > self._status_max_chars:
+            text = text[:self._status_max_chars - 1] + '...'
+
+        try:
+            import pygame
+            if not pygame.font.get_init():
+                pygame.font.init()
+            # Calibri 16 bold -- user's pick.  Big enough to read across
+            # the room; a 1 px black drop-shadow in render() handles
+            # legibility against the splash artwork without a backdrop.
+            font = pygame.font.SysFont('Calibri', 16, bold=True)
+            surf = font.render(text, True, (255, 255, 255))
+            data = pygame.image.tostring(surf, 'RGBA', False)
+            tex = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                         surf.get_width(), surf.get_height(), 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, data)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            self.status_lines.append({
+                'text': text,
+                'tex':  tex,
+                'w':    surf.get_width(),
+                'h':    surf.get_height(),
+            })
+            # Cap total kept (defensive; init shouldn't produce 30+ lines)
+            if len(self.status_lines) > self._status_max_lines:
+                old = self.status_lines.pop(0)
+                if old.get('tex'):
+                    try: glDeleteTextures(1, [old['tex']])
+                    except Exception: pass
+        except Exception as exc:
+            # Splash status is a UX nicety; never let it crash startup.
+            print(f"[splash] status texture failed: {exc}")
 
     # ------------------------------------------------------------------
     def _set_banner_quad(self, px, py, pw, ph, flip_v=False):
@@ -292,6 +390,73 @@ class Splash:
             glUniform4f(self.u_color,   1.0, 1.0, 1.0, 1.0)
             glDrawArrays(GL_TRIANGLES, 0, 6)
 
+        # ---- 3. Status log (top-down stack, transparent + scrolling) --
+        # Each set_status() call appended a line; we render them all
+        # stacked top-down so the user sees startup accomplishments
+        # accumulate in real time.  When the stack would extend past
+        # the bottom of the splash, the WHOLE log shifts up by the
+        # excess so the newest line stays visible -- older lines
+        # naturally fall off the top of the window (GL viewport clips
+        # them automatically).
+        # No solid backdrop -- the text is white-on-splash with a 1 px
+        # dark drop-shadow drawn one pixel down/right.  That's enough
+        # contrast to keep the white text readable against any splash
+        # artwork without a translucent strip muddying the background.
+        if self.status_lines:
+            LEFT_PAD     = 18         # left margin for the column
+            TOP_PAD      = 18         # top margin (clear of corner)
+            BOTTOM_PAD   = 18         # don't run text into the very bottom edge
+            LINE_GAP     = 4          # vertical pixel gap between rows
+            ROW_PAD      = 2          # vertical pad per row (legibility)
+
+            # Per-line vertical advance.  Lines might have slightly
+            # different heights (e.g. glyphs with descenders), but in
+            # practice Calibri 16 bold renders at a consistent height.
+            line_advances = [
+                line['h'] + ROW_PAD * 2 + LINE_GAP
+                for line in self.status_lines
+            ]
+            total_h = sum(line_advances)
+            available_h = self.window_h - TOP_PAD - BOTTOM_PAD
+
+            # Scroll offset: when the stack overflows, shift everything
+            # UP so the newest line ends near the bottom of the window.
+            # Older lines that would now be ABOVE the splash's top edge
+            # render off-screen and clip naturally via the GL viewport.
+            scroll_off = max(0, total_h - available_h)
+
+            cur_y = TOP_PAD - scroll_off
+            glBindVertexArray(self.banner_vao)
+            for line, adv in zip(self.status_lines, line_advances):
+                tx = LEFT_PAD
+                ty = cur_y + ROW_PAD
+
+                # 3a. Black drop-shadow -- same texture, +1 px offset,
+                # darkened via the colour multiply.  Cheap (one extra
+                # quad per line) and dramatically improves readability.
+                self._set_banner_quad(tx + 1, ty + 1,
+                                      line['w'], line['h'],
+                                      flip_v=True)
+                glActiveTexture(GL_TEXTURE0)
+                glBindTexture(GL_TEXTURE_2D, line['tex'])
+                glUniform1i(self.u_tex,     0)
+                glUniform1i(self.u_use_tex, 1)
+                # Fragment = texture * u_color; texture is white +
+                # alpha mask, so multiplying by black turns it into a
+                # black silhouette.  Alpha stays 1.0 so the shadow
+                # sits at full opacity wherever glyph alpha is > 0.
+                glUniform4f(self.u_color, 0.0, 0.0, 0.0, 1.0)
+                glDrawArrays(GL_TRIANGLES, 0, 6)
+
+                # 3b. White text on top of the shadow
+                self._set_banner_quad(tx, ty,
+                                      line['w'], line['h'],
+                                      flip_v=True)
+                glUniform4f(self.u_color, 1.0, 1.0, 1.0, 1.0)
+                glDrawArrays(GL_TRIANGLES, 0, 6)
+
+                cur_y += adv
+
         glBindVertexArray(0)
 
         # Restore the GL state the rest of the viewer expects
@@ -307,6 +472,13 @@ class Splash:
         if self.banner_text_tex:
             glDeleteTextures(1, [self.banner_text_tex])
             self.banner_text_tex = 0
+        # Free every status-line texture in the top-down log.
+        for line in self.status_lines:
+            tex = line.get('tex')
+            if tex:
+                try: glDeleteTextures(1, [tex])
+                except Exception: pass
+        self.status_lines = []
         if self.vbo:
             glDeleteBuffers(1, [self.vbo])
             self.vbo = None

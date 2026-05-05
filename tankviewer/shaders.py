@@ -50,6 +50,102 @@ def _compile_program(vsrc, fsrc, label='shader'):
     return program
 
 
+def _compile_program_vgf(vsrc, gsrc, fsrc, label='shader'):
+    """Compile and link a vertex + GEOMETRY + fragment shader trio.
+
+    Same shape as `_compile_program` but with a geometry stage in the
+    middle.  Raises on any compile / link failure.  Used by
+    NormalsShader for the surface-normal debug-line feature -- the
+    geometry shader expands each vertex into a 2-point line strip.
+    """
+    vs = glCreateShader(GL_VERTEX_SHADER)
+    glShaderSource(vs, vsrc)
+    glCompileShader(vs)
+    if not glGetShaderiv(vs, GL_COMPILE_STATUS):
+        print(f"{label} vertex shader error:",
+              glGetShaderInfoLog(vs).decode())
+        raise RuntimeError(f"{label} vertex shader compilation failed")
+
+    gs = glCreateShader(GL_GEOMETRY_SHADER)
+    glShaderSource(gs, gsrc)
+    glCompileShader(gs)
+    if not glGetShaderiv(gs, GL_COMPILE_STATUS):
+        print(f"{label} geometry shader error:",
+              glGetShaderInfoLog(gs).decode())
+        raise RuntimeError(f"{label} geometry shader compilation failed")
+
+    fs = glCreateShader(GL_FRAGMENT_SHADER)
+    glShaderSource(fs, fsrc)
+    glCompileShader(fs)
+    if not glGetShaderiv(fs, GL_COMPILE_STATUS):
+        print(f"{label} fragment shader error:",
+              glGetShaderInfoLog(fs).decode())
+        raise RuntimeError(f"{label} fragment shader compilation failed")
+
+    program = glCreateProgram()
+    glAttachShader(program, vs)
+    glAttachShader(program, gs)
+    glAttachShader(program, fs)
+    glLinkProgram(program)
+    if not glGetProgramiv(program, GL_LINK_STATUS):
+        print(f"{label} link error:",
+              glGetProgramInfoLog(program).decode())
+        raise RuntimeError(f"{label} link failed")
+
+    glDeleteShader(vs)
+    glDeleteShader(gs)
+    glDeleteShader(fs)
+    return program
+
+
+class NormalsShader:
+    """Surface-normal debug-line shader (vert + geom + frag).
+
+    Renders short debug lines along surface normals.  Two modes
+    driven by `u_mode`:
+
+      0 (by-face, default)  -- one cyan line per triangle, drawn
+        from the triangle's centroid along the AVERAGE of the
+        three vertex normals.  Cleaner per-face overview.
+
+      1 (by-vertex)         -- three lines per triangle, one
+        starting at each vertex going in that vertex's own normal.
+        Coloured by abs(normal) so axis-aligned faces show pure
+        R/G/B and off-axis blends are natural mixes.
+
+    Driven by the right-panel "Normals" slider (length, 0 = off)
+    plus the "PerVtx" checkbox (mode toggle).  The viewer re-binds
+    each mesh's existing VAO and draws GL_TRIANGLES via its EBO,
+    so no extra geometry gets uploaded for the debug pass.
+
+    Uniforms:
+        model            (mat4)  -- per-mesh world placement
+        view             (mat4)  -- camera view
+        projection       (mat4)  -- camera projection
+        u_normal_length  (float) -- line length in world units; 0 = off
+        u_mode           (int)   -- 0 = by-face, 1 = by-vertex
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/normals.vert')
+        gs = load_shader_file('shaders/normals.geom')
+        fs = load_shader_file('shaders/normals.frag')
+        self.program = _compile_program_vgf(vs, gs, fs, 'Normals shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, matrix):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, matrix)
+
+    def set_float(self, name, value):
+        glUniform1f(glGetUniformLocation(self.program, name), float(value))
+
+    def set_int(self, name, value):
+        glUniform1i(glGetUniformLocation(self.program, name), int(value))
+
+
 class SimpleColorShader:
     """Per-vertex colored shader for lines and simple meshes (grid, axes, sphere)."""
 

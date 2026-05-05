@@ -571,12 +571,29 @@ class MeshParser:
         return np.array(indices, dtype=np.uint32), prim_groups
 
     # Candidate body offsets for a sidecar UV2 section.  WoT writes
-    # the same preamble as the matching vertex section: 64 bytes of
-    # format-string + a small fixed header.  When the vertex stream is
-    # BPVT we get a 132-byte preamble; otherwise it's 68.  We probe in
-    # decreasing-likelihood order and keep the first layout whose body
-    # size lines up with the expected vertex count.
-    _UV2_PROBE_OFFSETS = (132, 68)
+    # the same preamble as the matching vertex section: a 64-byte
+    # primary format string + a 64-byte secondary format string +
+    # uint32 count.  Two real layouts:
+    #
+    #   136 bytes  -- BPVT-mirroring (live tanks, e.g. G102_Pz_III
+    #                 chassis track_*.uv2).  Layout:
+    #                     0..67   primary format string ('BPVSuv2')
+    #                     68..131 secondary format string ('set3/uv2pc')
+    #                     132..135 uint32 vertex_count
+    #                     136..    body
+    #   68 bytes   -- non-BPVT (older / simpler):
+    #                     0..63   primary format string
+    #                     64..67  uint32 vertex_count
+    #                     68..    body
+    #
+    # 132 is intentionally NOT in the list: an off-by-4 read of the
+    # 136-byte layout coincidentally passes the (size-offset)//8 ==
+    # expected probe via integer-division truncation, which silently
+    # shifts the entire UV stream forward by 4 bytes (the count field
+    # gets read as the first u-value, ~2.3e-42 garbage).  The exact
+    # divisibility guard in _parse_uv2_section is the second line of
+    # defence; keeping the probe list clean is the first.
+    _UV2_PROBE_OFFSETS = (136, 68)
 
     @staticmethod
     def _parse_uv2_section(data, expected_count, group_label=''):
@@ -628,8 +645,14 @@ class MeshParser:
         for body_offset in MeshParser._UV2_PROBE_OFFSETS:
             if body_offset > len(data):
                 continue
-            body_pairs = (len(data) - body_offset) // 8
-            if body_pairs == expected_count:
+            body_len = len(data) - body_offset
+            # Require exact divisibility -- without this, a 136-byte
+            # layout's (size - 132) yields 1638.5 pairs which rounds
+            # down to 1638 and false-matches expected_count.  Found
+            # the hard way; see _UV2_PROBE_OFFSETS comment.
+            if body_len % 8 != 0:
+                continue
+            if body_len // 8 == expected_count:
                 chosen_offset = body_offset
                 break
 
@@ -1356,12 +1379,110 @@ class PkgExtractor:
     # Path to the experiment root (where tank_viewer.py and TheItemList.xml live)
     _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    def __init__(self, wot_root, pkg_dir=None, lookup_xml=None):
+    # Pkg-basename filters for the scan-fallback list.  We never need to
+    # search MAP archives (numeric prefix like '01_karelia.pkg' /
+    # '203_battle_royale.pkg'), MAP HD variants, NOR the handful of
+    # non-map game-mode bundles that don't carry tank assets.  Filtering
+    # these out:
+    #   * cuts scan-fallback time by roughly half on a fresh session
+    #   * avoids opening 100+ map-archive central directories for files
+    #     that are never going to be in any of them
+    #
+    # Add new entries here as we identify them.  The regex catches every
+    # numeric-prefix pkg automatically; the literal set is for the
+    # non-numeric oddballs the user has flagged.
+    _MAP_PKG_RE = re.compile(r'^\d+_')
+    _EXCLUDE_PKG_BASENAMES = {
+        # Battle modes / event bundles -- no tank assets
+        'fun_random.pkg',
+        'battle_royale.pkg',
+        'battle_modifiers.pkg',
+        'comp7.pkg',
+        'comp7_core.pkg',
+        'comp7_light.pkg',
+        'frontline.pkg',
+        'last_stand.pkg',
+        'last_stand_hd.pkg',
+        'event_platform.pkg',
+        'story_mode.pkg',
+        'in_battle_achievements.pkg',
+        'la_pinger.pkg',
+        'open_bundle.pkg',
+        'prime_gaming_content.pkg',
+        'resource_well.pkg',
+        'server_side_replay.pkg',
+        # Hangars are environments, not vehicles
+        'hangar_v4.pkg',
+        'hangar_v4_hd.pkg',
+        'hangar_v4_last_stand.pkg',
+        'hangar_v4_last_stand_hd.pkg',
+        # h33_* pkgs are map variants (numeric prefix masked by 'h' tag)
+        'h33_battle_royale_2021.pkg',
+        'h33_battle_royale_2021_hd.pkg',
+        'h33_comp7.pkg',
+        'h33_comp7_hd.pkg',
+        # Audio -- never indexes a 3D asset
+        'audioww-part1.pkg',
+        'audioww-part2.pkg',
+        'audioww-part3.pkg',
+    }
+
+    @classmethod
+    def _is_excluded_pkg(cls, basename):
+        """True when the given basename is a map archive or one of
+        the explicit non-vehicle bundles we know never carry tank assets.
+        """
+        return (cls._MAP_PKG_RE.match(basename) is not None
+                or basename in cls._EXCLUDE_PKG_BASENAMES)
+
+    def __init__(self, wot_root, pkg_dir=None, lookup_xml=None,
+                  progress_callback=None):
+        # progress_callback (callable(str) | None) -- fired with short
+        # status messages during the slow pre-warm step so the splash
+        # screen / startup log can show pkg-by-pkg progress instead
+        # of a silent multi-second pause.  None = no progress reports.
+        self._progress_cb = progress_callback
+        # Pending TheItemList.xml additions accumulated during the
+        # session.  Pushed by _persist_entry on every scan-fallback
+        # discovery; flushed in one batched read+write by
+        # flush_persisted_entries() at end-of-load (and again on
+        # cleanup) so we never rewrite the 15 MB XML 20+ times in
+        # a row during a single tank load.
+        # List of (zip_path, pkg_basename) tuples.
+        self._pending_persists = []
         self.wot_root  = wot_root
         self.pkg_dir   = pkg_dir or os.path.join(wot_root, 'res', 'packages')
         self._temp_dir = tempfile.mkdtemp(prefix='tankviewer_pkg_')
         self._extracted = {}   # zip_path -> local path (already extracted)
         self._index     = {}   # pkg_path -> frozenset of names (lazy, scan-fallback only)
+        # Open ZipFile handles per pkg.  Reading a single .primitives_processed
+        # via a fresh `with zipfile.ZipFile(pkg, 'r') as zf: zf.open(...)`
+        # costs ~50-100 ms BECAUSE the ZipFile constructor reads the
+        # entire central directory (which can be hundreds of KB on a
+        # vehicles_level_*.pkg).  Holding the handle across calls means
+        # we pay that tax once per pkg per session instead of once per
+        # extract.  Cleaned up in cleanup() at viewer-shutdown time.
+        self._open_zips = {}   # pkg_path -> open zipfile.ZipFile
+
+        # ------ Timing instrumentation -----------------------------------
+        # Records every extract() call with how long it took, which path
+        # served it (lookup hit / case-fallback hit / scan-fallback hit /
+        # missing), and how many pkg namelists had to be opened for the
+        # scan-fallback case.  reset_timing() clears the buffer at the
+        # start of each load_vehicle so the summary at the end shows
+        # JUST that load.
+        #
+        # Each entry:
+        #   {'op': 'extract' | 'index_pkg',
+        #    'path': str,        # zip_path for extract; pkg basename for index_pkg
+        #    'route': str,       # 'lookup' / 'case' / 'scan' / 'missing' / 'cached'
+        #    'pkg_scans': int,   # how many pkg namelists were opened (scan only)
+        #    'elapsed_ms': float}
+        self._timing = []
+        # Threshold in seconds above which a single op is logged in real
+        # time (not just at summary).  Most lookups are <1 ms; anything
+        # above 100 ms is interesting enough to surface immediately.
+        self.timing_log_threshold_s = 0.100
         # Lazy case-insensitive view of self._file_to_pkg used as a
         # fallback when an exact-case lookup misses.  Built on first use
         # and invalidated on _persist_entry / new entries.  Some WoT
@@ -1385,11 +1506,34 @@ class PkgExtractor:
         # files) use <root>.  _persist_entry uses this to find the closing tag.
         self._lookup_root_tag = 'FileList'
         if os.path.isfile(self._lookup_xml_path):
+            if self._progress_cb:
+                # Surface the parse on the splash log -- the file is
+                # ~15 MB / ~99k entries and takes 1-2 s to walk on
+                # first launch (Windows file cache will speed up
+                # subsequent runs).  User sees the wait isn't a hang.
+                size_mb = os.path.getsize(self._lookup_xml_path) / (1024.0 * 1024.0)
+                self._progress_cb(
+                    f"Loading TheItemList.xml "
+                    f"({size_mb:.1f} MB)...")
             self._load_lookup(self._lookup_xml_path)
+            if self._progress_cb:
+                self._progress_cb(
+                    f"  -> {len(self._file_to_pkg):,} lookup entries")
         else:
             print(f"[PkgExtractor] Lookup XML not found: {self._lookup_xml_path}")
+            if self._progress_cb:
+                self._progress_cb(
+                    f"WARNING: TheItemList.xml not found at "
+                    f"{os.path.basename(self._lookup_xml_path)}")
 
         # --- Fallback pkg list (used only when lookup misses) ------------------
+        # We deliberately drop:
+        #   * MAP pkgs (numeric prefix) -- never carry tank assets
+        #   * Game-mode / event bundles (battle_royale, fun_random,
+        #     comp7*, frontline, hangars, ...) -- same reason
+        #   * Audio bundles -- pure sound, no 3D
+        # See _is_excluded_pkg above for the full filter.  Without this
+        # a lookup miss walks ~200 archives, ~150 of which are pointless.
         self._pkg_files = []
         if os.path.isdir(self.pkg_dir):
             all_pkgs = sorted(
@@ -1397,14 +1541,90 @@ class PkgExtractor:
                 for fn in os.listdir(self.pkg_dir)
                 if fn.lower().endswith('.pkg')
             )
-            veh  = [p for p in all_pkgs if 'vehicle' in os.path.basename(p).lower()]
-            rest = [p for p in all_pkgs if 'vehicle' not in os.path.basename(p).lower()]
+            kept = [p for p in all_pkgs
+                    if not self._is_excluded_pkg(os.path.basename(p))]
+            dropped = len(all_pkgs) - len(kept)
+            # Vehicle pkgs go first so scan-fallback hits them earliest.
+            veh  = [p for p in kept if 'vehicle' in os.path.basename(p).lower()]
+            rest = [p for p in kept if 'vehicle' not in os.path.basename(p).lower()]
             self._pkg_files = veh + rest
-            print(f"[PkgExtractor] pkg_dir: {self.pkg_dir} "
-                  f"({len(self._pkg_files)} archives, "
+            print(f"[PkgExtractor] pkg_dir: {self.pkg_dir}  "
+                  f"({len(self._pkg_files)} archives "
+                  f"after dropping {dropped} maps + non-vehicle bundles, "
                   f"{len(self._file_to_pkg)} lookup entries)")
+
+            # ---- Pre-warm: open every kept pkg once at startup so the
+            # ~50-150 ms central-directory read is paid up-front in a
+            # tight loop instead of trickling out across the first few
+            # tank loads.  Each ZipFile stays open for the life of the
+            # session (cleanup() closes them).  Costs ~3-6 s of startup
+            # time on a typical install in exchange for instant lookups
+            # and fast scan-fallback once it's done.
+            #
+            # Progress is reported via self._progress_cb every 10 pkgs
+            # so the splash screen shows real progress instead of
+            # appearing frozen for several seconds.  Without a callback
+            # this is a silent stdout-only operation.
+            import time as _time
+            t0 = _time.perf_counter()
+            opened = 0
+            n_total = len(self._pkg_files)
+            if self._progress_cb:
+                self._progress_cb(
+                    f"Pre-warming {n_total} pkg archives...")
+            # Log EVERY pkg (not every 10th) so the user can see each
+            # archive open in real time -- including gui-part1..4 and
+            # other named pkgs they care about confirming.  Each
+            # callback also pumps the OS event queue (via the
+            # callback's render+flip+pump chain in
+            # viewer._splash_status) so Windows doesn't mark the
+            # window unresponsive during the multi-second warmup.
+            for i, p in enumerate(self._pkg_files):
+                if self._get_zip(p) is not None:
+                    opened += 1
+                if self._progress_cb:
+                    self._progress_cb(
+                        f"  [{i + 1:2d}/{n_total}] {os.path.basename(p)}")
+            warm_ms = (_time.perf_counter() - t0) * 1000.0
+            print(f"[PkgExtractor] Pre-opened {opened}/{n_total} "
+                  f"archives in {warm_ms:.0f} ms")
+            if self._progress_cb:
+                self._progress_cb(
+                    f"Pre-warmed {opened}/{n_total} pkg archives "
+                    f"in {warm_ms:.0f} ms")
         else:
             print(f"[PkgExtractor] pkg_dir not found: {self.pkg_dir}")
+
+    # ------------------------------------------------------------------
+    def reload_lookup(self, path=None):
+        """Drop the current `_file_to_pkg` dict and re-parse the lookup
+        XML in place.  Used by the in-app "Rebuild ItemList" action so
+        the running session picks up entries the rebuild just added,
+        without a restart.
+
+        Args:
+            path (str | None): override path; defaults to whatever the
+                extractor was constructed with (`_lookup_xml_path`).
+
+        Side effects:
+            * Empties `_file_to_pkg`, `_lower_to_actual`, and `_missing`
+              (the negative cache that was based on the old table).
+            * Re-runs `_load_lookup` so `_lookup_root_tag` stays in sync
+              with whatever the rebuilt file used.
+            * Drops queued `_pending_persists` -- they're already in the
+              freshly written file.
+        """
+        target = path or self._lookup_xml_path
+        if not target or not os.path.isfile(target):
+            print(f"[PkgExtractor] reload_lookup: no file at {target}")
+            return
+        self._file_to_pkg.clear()
+        self._lower_to_actual.clear()
+        self._lower_index_dirty = True
+        self._missing.clear()
+        self._pending_persists = []
+        self._lookup_xml_path  = target
+        self._load_lookup(target)
 
     # ------------------------------------------------------------------
     def _load_lookup(self, xml_path):
@@ -1430,16 +1650,42 @@ class PkgExtractor:
             print(f"[PkgExtractor] Failed to parse {xml_path}: {exc}")
 
     # ------------------------------------------------------------------
+    def _get_zip(self, pkg_path):
+        """Return a cached, open zipfile.ZipFile for `pkg_path`.
+
+        First call per pkg pays the ~50-150 ms central-directory read.
+        Every subsequent call returns the same handle in microseconds,
+        which is the entire reason _extract_from went from ~80 ms per
+        call to ~3 ms per call.
+
+        Returns None when the file isn't a readable archive (broken
+        download, locked file, etc.) -- callers fall back to None
+        from _extract_from in that case.
+        """
+        zf = self._open_zips.get(pkg_path)
+        if zf is not None:
+            return zf
+        if not os.path.isfile(pkg_path):
+            return None
+        try:
+            zf = zipfile.ZipFile(pkg_path, 'r')
+        except Exception as exc:
+            print(f"[PkgExtractor] Cannot open {os.path.basename(pkg_path)}: {exc}")
+            return None
+        self._open_zips[pkg_path] = zf
+        return zf
+
+    # ------------------------------------------------------------------
     def _extract_from(self, pkg_path, zip_path):
         """Open pkg_path and extract zip_path to temp dir.  Returns local path or None."""
-        if not os.path.isfile(pkg_path):
+        zf = self._get_zip(pkg_path)
+        if zf is None:
             return None
         try:
             out_path = os.path.join(self._temp_dir, zip_path.replace('/', os.sep))
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with zipfile.ZipFile(pkg_path, 'r') as zf:
-                with zf.open(zip_path) as src, open(out_path, 'wb') as dst:
-                    dst.write(src.read())
+            with zf.open(zip_path) as src, open(out_path, 'wb') as dst:
+                dst.write(src.read())
             self._extracted[zip_path] = out_path
             print(f"[PkgExtractor] {os.path.basename(zip_path)} "
                   f"<- {os.path.basename(pkg_path)}")
@@ -1450,15 +1696,117 @@ class PkgExtractor:
 
     # ------------------------------------------------------------------
     def _index_pkg(self, pkg_path):
-        """Lazily build the member-name set for one archive (scan fallback)."""
+        """Lazily build the member-name set for one archive (scan fallback).
+
+        Times the FIRST build per pkg (cache miss) -- subsequent calls
+        hit the in-memory dict and are essentially free.  The first
+        index of a big pkg can be 50-300 ms because zipfile reads the
+        whole central directory; that's the cost we're trying to make
+        visible with timing.
+        """
         if pkg_path not in self._index:
-            try:
-                with zipfile.ZipFile(pkg_path, 'r') as zf:
-                    self._index[pkg_path] = frozenset(zf.namelist())
-            except Exception as exc:
-                print(f"[PkgExtractor] Cannot index {os.path.basename(pkg_path)}: {exc}")
+            import time
+            t0 = time.perf_counter()
+            zf = self._get_zip(pkg_path)
+            if zf is None:
                 self._index[pkg_path] = frozenset()
+            else:
+                try:
+                    self._index[pkg_path] = frozenset(zf.namelist())
+                except Exception as exc:
+                    print(f"[PkgExtractor] Cannot index "
+                          f"{os.path.basename(pkg_path)}: {exc}")
+                    self._index[pkg_path] = frozenset()
+            elapsed_s = time.perf_counter() - t0
+            self._timing.append({
+                'op':         'index_pkg',
+                'path':       os.path.basename(pkg_path),
+                'route':      'first-open',
+                'pkg_scans':  1,
+                'elapsed_ms': elapsed_s * 1000.0,
+            })
+            if elapsed_s >= self.timing_log_threshold_s:
+                print(f"[PkgExtractor:timing] index_pkg "
+                      f"{os.path.basename(pkg_path)} took "
+                      f"{elapsed_s * 1000.0:.1f} ms "
+                      f"({len(self._index[pkg_path])} entries)")
         return self._index[pkg_path]
+
+    # ------------------------------------------------------------------
+    # Timing helpers
+    # ------------------------------------------------------------------
+
+    def reset_timing(self):
+        """Clear the timing buffer.  Called by Viewer at the start of
+        each load_vehicle so the summary at the end shows JUST that
+        load, not the cumulative session.
+        """
+        self._timing = []
+
+    def summarize_timing(self, top_n=10):
+        """Return (summary_lines, totals) describing the timing buffer.
+
+        Returns:
+            (list[str], dict) where:
+                summary_lines is a human-readable digest
+                  (totals + top-N slowest individual ops) suitable for
+                  feeding into Viewer.log() one line at a time.
+                totals = {
+                    'count_extract': int,
+                    'count_index_pkg': int,
+                    'total_ms': float,
+                    'by_route': {route: (count, total_ms), ...},
+                    'pkg_scans_total': int,
+                }
+        """
+        ext_calls = [e for e in self._timing if e['op'] == 'extract']
+        idx_calls = [e for e in self._timing if e['op'] == 'index_pkg']
+
+        total_ms = sum(e['elapsed_ms'] for e in self._timing)
+
+        # Per-route aggregation for extract calls
+        by_route = {}
+        for e in ext_calls:
+            r = e['route']
+            ct, ms = by_route.get(r, (0, 0.0))
+            by_route[r] = (ct + 1, ms + e['elapsed_ms'])
+
+        scans_total = sum(e['pkg_scans'] for e in ext_calls)
+
+        # Top slowest single ops (mix of extract + index_pkg)
+        slowest = sorted(self._timing,
+                         key=lambda e: e['elapsed_ms'],
+                         reverse=True)[:top_n]
+
+        lines = []
+        lines.append(f"PkgExtractor timing: {total_ms:.0f} ms total  "
+                     f"(extracts={len(ext_calls)}, "
+                     f"pkg-namelists-opened={len(idx_calls)}, "
+                     f"scan-iters={scans_total})")
+        for r in ('lookup', 'case', 'scan', 'cached', 'missing'):
+            if r in by_route:
+                ct, ms = by_route[r]
+                lines.append(f"  route {r:<8s}  "
+                             f"{ct:>4d} call(s)  {ms:>7.1f} ms")
+        if slowest:
+            lines.append(f"Top {min(top_n, len(slowest))} slowest:")
+            for e in slowest:
+                if e['op'] == 'extract':
+                    lines.append(f"  {e['elapsed_ms']:>6.1f} ms  "
+                                 f"[{e['route']:<6s} scans={e['pkg_scans']:>2d}]  "
+                                 f"{e['path'][-60:]}")
+                else:
+                    lines.append(f"  {e['elapsed_ms']:>6.1f} ms  "
+                                 f"[index_pkg]  {e['path']}")
+
+        totals = {
+            'count_extract':   len(ext_calls),
+            'count_index_pkg': len(idx_calls),
+            'total_ms':        total_ms,
+            'by_route':        by_route,
+            'pkg_scans_total': scans_total,
+        }
+        return lines, totals
 
     # ------------------------------------------------------------------
     def extract(self, internal_path):
@@ -1474,24 +1822,43 @@ class PkgExtractor:
             internal_path (str): forward-slash archive path,
                 e.g. 'vehicles/american/A14_T30/normal/lod0/Hull.primitives_processed'
         """
+        import time
+        t0 = time.perf_counter()
         zip_path = internal_path.replace(os.sep, '/')
+        scans = 0   # how many pkg namelists we touched in scan-fallback
+
+        def _record(route, result):
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            self._timing.append({
+                'op':         'extract',
+                'path':       zip_path,
+                'route':      route,
+                'pkg_scans':  scans,
+                'elapsed_ms': elapsed_ms,
+            })
+            if elapsed_ms / 1000.0 >= self.timing_log_threshold_s:
+                print(f"[PkgExtractor:timing] extract "
+                      f"{zip_path[-60:]:>60s}  "
+                      f"route={route:<10s}  scans={scans:>2d}  "
+                      f"{elapsed_ms:7.1f} ms")
+            return result
 
         # Already extracted this session
         if zip_path in self._extracted:
-            return self._extracted[zip_path]
+            return _record('cached', self._extracted[zip_path])
 
         # Negative cache: same missing file was already scanned and not
         # found in any pkg this session.  Avoids re-walking ~30 archives
         # for files that genuinely don't exist (HD-skin variants, etc.).
         if zip_path in self._missing:
-            return None
+            return _record('missing', None)
 
         # Fast path: lookup table (exact case)
         if self._file_to_pkg:
             pkg_basename = self._file_to_pkg.get(zip_path)
             if pkg_basename:
-                return self._extract_from(
-                    os.path.join(self.pkg_dir, pkg_basename), zip_path)
+                return _record('lookup', self._extract_from(
+                    os.path.join(self.pkg_dir, pkg_basename), zip_path))
             # Case-insensitive fallback.  WoT visuals occasionally
             # reference textures with the wrong case (e.g.
             # 'Lion_KL_3Dst_turret_01_AM.dds' vs the actual file
@@ -1508,7 +1875,7 @@ class PkgExtractor:
                         # Cache under BOTH the requested (wrong-case) and
                         # actual paths so subsequent calls hit the fast path
                         self._extracted[zip_path] = result
-                        return result
+                        return _record('case', result)
             # Lookup miss -- fall through to scan-fallback.  TheItemList.xml
             # is often older than the WoT install (newly-added tanks like
             # F143_Fauteur won't be indexed), so we need to keep looking
@@ -1521,6 +1888,7 @@ class PkgExtractor:
         # hits the O(1) lookup path on first try.
         zip_path_lower = zip_path.lower()
         for pkg_path in self._pkg_files:
+            scans += 1
             members = self._index_pkg(pkg_path)
             if zip_path in members:
                 actual = zip_path
@@ -1540,11 +1908,11 @@ class PkgExtractor:
                     # Cache the wrong-case request too so we don't repeat
                     # the case-insensitive scan
                     self._extracted[zip_path] = result
-                return result
+                return _record('scan', result)
 
         # File doesn't exist anywhere -- remember so we don't rescan
         self._missing.add(zip_path)
-        return None
+        return _record('missing', None)
 
     # ------------------------------------------------------------------
     def _lookup_case_insensitive(self, zip_path):
@@ -1773,74 +2141,114 @@ class PkgExtractor:
 
     # ------------------------------------------------------------------
     def cleanup(self):
-        """Delete every file in the temp dir.  Scan-fallback discoveries
-        are already persisted eagerly via _persist_entry, so cleanup is
-        purely about freeing disk space."""
+        """Delete every file in the temp dir + close every cached
+        ZipFile handle.  Also flushes any queued TheItemList.xml
+        discoveries that haven't been written out yet (one final
+        batched read+write pass).
+        """
+        # Drain any pending lookup-table writes BEFORE wiping anything
+        # else -- we want every scan-fallback discovery from this
+        # session preserved across runs.
+        try:
+            self.flush_persisted_entries()
+        except Exception as exc:
+            print(f"[PkgExtractor] cleanup: flush failed: {exc}")
+        # Close cached zip handles BEFORE wiping the temp dir.  Open
+        # zipfile objects don't lock the underlying .pkg on POSIX but
+        # do on Windows -- closing first avoids spurious "file in use"
+        # errors during shutdown.
+        for zf in list(self._open_zips.values()):
+            try:
+                zf.close()
+            except Exception:
+                pass
+        self._open_zips = {}
         if self._temp_dir and os.path.isdir(self._temp_dir):
             shutil.rmtree(self._temp_dir, ignore_errors=True)
         self._temp_dir = None
 
     # ------------------------------------------------------------------
     def _persist_entry(self, zip_path, pkg_basename):
-        """Append one <items> element to TheItemList.xml.
+        """Queue one (zip_path, pkg_basename) entry for later batch
+        write to TheItemList.xml.  Returns True (always queues; the
+        actual disk write happens in flush_persisted_entries()).
 
-        Called inline whenever scan-fallback resolves a file that wasn't
-        already in the lookup table.  Returns True on success, False on
-        any failure (missing path, malformed file, write error).
+        OLD behaviour was to read+rewrite the entire 15 MB lookup
+        XML on every scan-fallback discovery -- that turned a fresh
+        tank load into 20-30 file rewrites and accounted for most of
+        the multi-second first-load slowness.  Now we just append
+        to an in-memory list; the in-memory `self._file_to_pkg`
+        dict was already updated by the caller, so subsequent
+        lookups in this session hit the fast path immediately.
 
-        Implementation: locates the closing </root> tag in the file and
-        splices the new entry in before it.  This avoids re-parsing the
-        full tree (~99K entries) on every discovery.
-
-        Format matches what _load_lookup expects:
-            <items>
-              <filename>...</filename>
-              <package>...</package>
-            </items>
+        Caller (Viewer.load_vehicle / cleanup) is responsible for
+        invoking flush_persisted_entries() when convenient.
         """
+        if not self._lookup_xml_path:
+            return False
+        self._pending_persists.append((zip_path, pkg_basename))
+        return True
+
+    # ------------------------------------------------------------------
+    def flush_persisted_entries(self):
+        """Write every queued discovery to TheItemList.xml in ONE
+        read + write pass, then clear the queue.  No-op when the
+        queue is empty.
+
+        Called by Viewer.load_vehicle after each successful load
+        (so a session that loads 5 tanks does 5 batched writes
+        instead of dozens), and again by cleanup() at shutdown.
+        """
+        if not self._pending_persists:
+            return
         xml_path = self._lookup_xml_path
         if not xml_path:
-            return False
+            self._pending_persists = []
+            return
 
-        # XML-escape the values defensively (paths shouldn't contain
-        # &/</> but better safe than sorry).
         from xml.sax.saxutils import escape as _xml_escape
-        snippet = (
-            '  <items>\n'
-            f'    <filename>{_xml_escape(zip_path)}</filename>\n'
-            f'    <package>{_xml_escape(pkg_basename)}</package>\n'
-            '  </items>\n'
-        )
+        # Build one big snippet covering every queued entry.
+        snippet_parts = []
+        for zip_path, pkg_basename in self._pending_persists:
+            snippet_parts.append(
+                '  <items>\n'
+                f'    <filename>{_xml_escape(zip_path)}</filename>\n'
+                f'    <package>{_xml_escape(pkg_basename)}</package>\n'
+                '  </items>\n'
+            )
+        snippet = ''.join(snippet_parts)
 
         root_tag = getattr(self, '_lookup_root_tag', 'FileList')
         close_tag_bytes = f'</{root_tag}>'.encode('utf-8')
+        n = len(self._pending_persists)
 
         try:
-            # No file yet -- create with a single entry
+            # No file yet -- create with the full snippet
             if not os.path.isfile(xml_path):
                 with open(xml_path, 'w', encoding='utf-8') as fh:
                     fh.write('<?xml version="1.0" standalone="yes"?>\n'
                              f'<{root_tag}>\n' + snippet + f'</{root_tag}>\n')
-                print(f"[PkgExtractor] persisted +1: {zip_path} -> "
-                      f"{pkg_basename}  (created {os.path.basename(xml_path)})")
-                return True
+                print(f"[PkgExtractor] persisted +{n} entries  "
+                      f"(created {os.path.basename(xml_path)})")
+                self._pending_persists = []
+                return
 
-            # Existing file -- find the closing root tag and splice before it
+            # Existing file -- splice once before </root>
             with open(xml_path, 'rb') as fh:
                 data = fh.read()
             idx = data.rfind(close_tag_bytes)
             if idx < 0:
-                print(f"[PkgExtractor] _persist_entry: </{root_tag}> not found "
-                      f"in {os.path.basename(xml_path)}")
-                return False
+                print(f"[PkgExtractor] flush_persisted_entries: </{root_tag}> "
+                      f"not found in {os.path.basename(xml_path)}")
+                return
             new_data = data[:idx] + snippet.encode('utf-8') + data[idx:]
             with open(xml_path, 'wb') as fh:
                 fh.write(new_data)
-            print(f"[PkgExtractor] persisted +1: {zip_path} -> {pkg_basename}")
-            return True
+            print(f"[PkgExtractor] persisted +{n} entries to "
+                  f"{os.path.basename(xml_path)}")
+            self._pending_persists = []
         except Exception as exc:
-            print(f"[PkgExtractor] _persist_entry({zip_path}) failed: {exc}")
-            return False
+            print(f"[PkgExtractor] flush_persisted_entries failed: {exc}")
 
 
 # ============================================================================
@@ -2573,8 +2981,13 @@ class VehicleXMLLoader:
                 vis_local = extracted
 
         return {
-            'label':      label,
-            'primitives': prim_local if os.path.isfile(prim_local) else None,
-            'visual':     vis_local  if os.path.isfile(vis_local)  else None,
-            'offset':     np.array(offset, dtype=np.float32),
+            'label':          label,
+            'primitives':     prim_local if os.path.isfile(prim_local) else None,
+            'visual':         vis_local  if os.path.isfile(vis_local)  else None,
+            'offset':         np.array(offset, dtype=np.float32),
+            # Canonical pkg-relative paths (forward slashes, no leading
+            # 'res/').  Used by the .primitives_processed writer to
+            # mirror the original layout under res_mods/<version>/.
+            'primitives_zip': prim_zip,
+            'visual_zip':     vis_zip,
         }

@@ -75,12 +75,12 @@ def main():
         # Parent to the root empty so move/rotate ops act on the whole tank
         obj.parent = root
 
-    # --- Save the source .blend alongside the export (free, useful for debug)
-    blend_out = os.path.splitext(args.output)[0] + '.blend'
-    try:
-        bpy.ops.wm.save_as_mainfile(filepath=blend_out)
-    except Exception as exc:
-        print(f"[blender-runner] .blend save failed: {exc}")
+    # NOTE: we deliberately do NOT save a .blend file alongside the
+    # export.  An earlier version of this runner did (as a debugging
+    # convenience) but that polluted the user's export folder with
+    # a 10-20 MB working file every time.  The headless Blender
+    # process exits cleanly without saving; only the requested
+    # FBX / GLB / GLTF / OBJ lands on disk.
 
     # --- Export ------------------------------------------------------------
     fmt = args.format.lower()
@@ -95,20 +95,45 @@ def main():
             object_types={'EMPTY', 'MESH'},
             use_mesh_modifiers=True,
             mesh_smooth_type='EDGE',
-            path_mode='COPY',          # copy referenced textures next to FBX
+            # path_mode='AUTO' writes texture paths into the FBX that
+            # point at our existing <base>_textures/ sidecar folder
+            # (the one _build_mesh_object already populated).  We used
+            # to use 'COPY' here, but COPY makes Blender clone every
+            # texture a SECOND time into a <basename>.fbm/ folder next
+            # to the FBX -- duplicates of files we just wrote, in a
+            # location no downstream tool expects.  AUTO + the sidecar
+            # folder is what the rest of the pipeline (and our own
+            # importer) is built around.
+            path_mode='AUTO',
             embed_textures=False,
         )
     elif fmt == 'glb':
+        # GLB is the binary glTF container -- single self-contained
+        # file with geometry buffer + textures + materials all packed
+        # in.  Best for "send me the model" workflows.
         bpy.ops.export_scene.gltf(
             filepath=args.output,
             export_format='GLB',
             export_apply=True,
+            export_materials='EXPORT',
+            export_image_format='AUTO',     # keep PNG as PNG, JPG as JPG
         )
     elif fmt == 'gltf':
+        # GLTF_EMBEDDED writes ONE .gltf file with the geometry buffer
+        # AND every referenced texture inlined as base64 data URIs --
+        # no sidecar .bin, no sidecar .png/.jpg, just one self-contained
+        # JSON.  Larger on disk than GLB but human-inspectable, which
+        # is the whole point of asking for the .gltf form over .glb.
+        # Materials carry the full Principled-BSDF node graph
+        # (diffuse + normal + metallic/roughness from GMM) that
+        # _build_material constructs upstream -- glTF exporter walks
+        # that node graph and writes a real PBR shader stack.
         bpy.ops.export_scene.gltf(
             filepath=args.output,
-            export_format='GLTF_SEPARATE',
+            export_format='GLTF_EMBEDDED',
             export_apply=True,
+            export_materials='EXPORT',
+            export_image_format='AUTO',
         )
     elif fmt == 'obj':
         bpy.ops.wm.obj_export(

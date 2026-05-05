@@ -1356,6 +1356,444 @@ class UIMeshWindow:
 
 
 # ============================================================================
+# UIConsole -- bottom-anchored scrollable log panel
+# ============================================================================
+
+class UIConsole:
+    """Persistent scrollable text log that lives at the bottom of the
+    3D viewport.  Header bar acts as a drag handle for vertical resize
+    (drag up to grow, drag down to shrink).  Two action buttons in
+    the header: Copy (whole buffer to clipboard) and a collapse toggle.
+
+    Public API used by Viewer:
+        add_line(text, color=None) -- append one line; auto-scroll
+                                       to bottom unless the user has
+                                       scrolled up manually.
+        clear()                    -- empty the buffer (typically
+                                       called at the start of a fresh
+                                       user-driven action).
+        toggle_collapsed()         -- flip the collapse state.
+        height_for_layout()        -- pixel height the panel currently
+                                       occupies.  Used by Viewer's
+                                       resize logic to shrink the 3D
+                                       camera viewport.
+        render(...)
+        handle_mouse_down(mx, my)  -> True if click was consumed
+        handle_mouse_drag(mx, my)
+        handle_mouse_up()
+        handle_scroll(mx, my, dy)  -> True if scroll consumed
+        update_hover(mx, my)
+    """
+
+    HEADER_H        = 22
+    LINE_H          = 16
+    PAD             = 8
+    SCROLLBAR_W     = 8
+    BTN_W           = 60     # 'Copy' button
+    COLLAPSE_W      = 22     # square chevron
+    MIN_LINES       = 1
+    MAX_LINES       = 40
+    DEFAULT_LINES   = 6
+    BUFFER_SIZE     = 500    # ring-buffer cap on lines kept
+
+    # On-screen colours (sRGB tuples for rendering)
+    COL_HEADER_BG   = (0.18, 0.20, 0.24, 1.0)
+    COL_BODY_BG     = (0.10, 0.11, 0.13, 0.92)
+    COL_HEADER_HL   = (0.27, 0.32, 0.40, 1.0)
+    COL_SCROLLBAR   = (0.55, 0.58, 0.65, 0.85)
+    COL_BTN_NORMAL  = (0.30, 0.34, 0.42, 1.0)
+    COL_BTN_HOVER   = (0.42, 0.48, 0.58, 1.0)
+
+    def __init__(self):
+        self.x         = 0
+        self.y         = 0
+        self.w         = 0
+        self.height_lines = self.DEFAULT_LINES
+        self.collapsed = False
+
+        # Status string shown in the header bar -- set by Viewer at
+        # the start of every user action ("Load Tank: T-34", "Export
+        # FBX", "Save Prim: Hull, Chassis", ...).  Lets the user see
+        # at a glance what the panel's currently reporting on without
+        # reading every line.  Defaults to 'Ready' on startup.
+        self.status = 'Ready'
+
+        # (text, color_rgb_0_255) tuples.  Newest at end.
+        self._lines    = []     # list of (str, (r,g,b))
+        self._line_tex = []     # parallel list of (tid, w, h) for self._lines
+
+        self._scroll   = 0       # 0 = newest visible at bottom; positive = scrolled up
+        self._user_scrolled = False  # sticky once user scrolls back
+
+        # Drag-resize state
+        self._resize_active = False
+        self._resize_start_y      = 0
+        self._resize_start_height = self.height_lines
+
+        # Hover hints (drive cursor + button highlight)
+        self.hover_copy     = False
+        self.hover_collapse = False
+        self.hover_header   = False  # for the resize-cursor hint
+
+        # Cached header-text textures.  Rebuild on text change.
+        self._header_tex = None
+        self._header_w   = 0
+        self._header_h   = 0
+        self._copy_tex   = None
+        self._copy_w     = 0
+        self._copy_h     = 0
+        self._chev_tex   = None
+        self._chev_w     = 0
+        self._chev_h     = 0
+        self._header_text_cached = None
+        self._chev_text_cached   = None
+
+    # ---- public state mutators ----------------------------------------
+
+    def add_line(self, text, color=None, bg_color=None):
+        """Append one log line.  Multi-line inputs split on '\n'.
+
+        Args:
+            text     (str): the line.
+            color    (tuple|None): foreground (r, g, b) 0-255.  None
+                                   = default light grey.
+            bg_color (tuple|None): optional background (r, g, b) 0-1
+                                   floats.  When set, the renderer
+                                   paints a solid strip behind this
+                                   line so it pops against the rest
+                                   of the buffer (used for mismatch
+                                   highlighting in the Compare dump).
+                                   None = transparent (default body bg).
+        """
+        if text is None:
+            return
+        col = color if color is not None else (220, 222, 230)
+        for piece in str(text).split('\n'):
+            self._lines.append((piece, col, bg_color))
+            self._line_tex.append(None)   # built on next render
+        # Trim ring buffer
+        if len(self._lines) > self.BUFFER_SIZE:
+            drop = len(self._lines) - self.BUFFER_SIZE
+            for tex in self._line_tex[:drop]:
+                if tex and tex[0]:
+                    try: glDeleteTextures(1, [tex[0]])
+                    except Exception: pass
+            self._lines      = self._lines[drop:]
+            self._line_tex   = self._line_tex[drop:]
+        # Auto-scroll-to-bottom unless the user has manually scrolled up
+        if not self._user_scrolled:
+            self._scroll = 0
+
+    def clear(self, status=None):
+        """Empty the buffer.  Called when starting a fresh user-driven
+        action that should produce its own clean output (e.g. tank
+        load, Import, Export, Save Prim).  Pass `status` to update
+        the header text in the same call -- pairs naturally with
+        viewer's `self.console.clear(status='Load Tank: T-34')`
+        pattern.
+        """
+        for tex in self._line_tex:
+            if tex and tex[0]:
+                try: glDeleteTextures(1, [tex[0]])
+                except Exception: pass
+        self._lines = []
+        self._line_tex = []
+        self._scroll = 0
+        self._user_scrolled = False
+        if status is not None:
+            self.status = status
+
+    def set_status(self, status):
+        """Update the header status text without clearing lines."""
+        self.status = status or ''
+
+    def toggle_collapsed(self):
+        self.collapsed = not self.collapsed
+
+    def set_geometry(self, x, y, w):
+        """Top-left + width are owned by the caller.  Height is
+        computed from height_lines + collapsed state via height_for_layout.
+        """
+        self.x = int(x)
+        self.y = int(y)
+        self.w = int(w)
+
+    def height_for_layout(self):
+        if self.collapsed:
+            return self.HEADER_H
+        body = self.height_lines * self.LINE_H + self.PAD * 2
+        return self.HEADER_H + body
+
+    # ---- public input handlers ----------------------------------------
+
+    def hit(self, mx, my):
+        """True when (mx, my) is anywhere over the console (header or
+        body when expanded).  Used by Viewer.is_pointer_over_ui so the
+        camera doesn't pan when the user is interacting with the log.
+        """
+        h = self.height_for_layout()
+        return (self.x <= mx <= self.x + self.w
+                and self.y <= my <= self.y + h)
+
+    def _copy_rect(self):
+        # Right-aligned in header, just left of the collapse button
+        bx = self.x + self.w - self.COLLAPSE_W - 4 - self.BTN_W - 4
+        by = self.y + 3
+        return (bx, by, self.BTN_W, self.HEADER_H - 6)
+
+    def _collapse_rect(self):
+        bx = self.x + self.w - self.COLLAPSE_W - 4
+        by = self.y + 3
+        return (bx, by, self.COLLAPSE_W, self.HEADER_H - 6)
+
+    def _header_rect(self):
+        return (self.x, self.y, self.w, self.HEADER_H)
+
+    def _body_rect(self):
+        if self.collapsed:
+            return None
+        body_h = self.height_for_layout() - self.HEADER_H
+        return (self.x, self.y + self.HEADER_H, self.w, body_h)
+
+    @staticmethod
+    def _hit(rect, mx, my):
+        x, y, w, h = rect
+        return x <= mx <= x + w and y <= my <= y + h
+
+    def update_hover(self, mx, my):
+        self.hover_copy     = self._hit(self._copy_rect(),     mx, my)
+        self.hover_collapse = self._hit(self._collapse_rect(), mx, my)
+        self.hover_header   = (self._hit(self._header_rect(), mx, my)
+                               and not self.hover_copy
+                               and not self.hover_collapse)
+
+    def handle_mouse_down(self, mx, my):
+        """Returns True when the click was consumed (header strip,
+        copy / collapse buttons, scrollbar drag, ...).
+        """
+        if not self.hit(mx, my):
+            return False
+
+        # Buttons first
+        if self._hit(self._copy_rect(), mx, my):
+            self._copy_to_clipboard()
+            return True
+        if self._hit(self._collapse_rect(), mx, my):
+            self.toggle_collapsed()
+            return True
+
+        # Header (anywhere outside the buttons) -> start resize drag.
+        # Resizing only makes sense when expanded; collapsed clicks on
+        # the header just no-op.
+        if self._hit(self._header_rect(), mx, my):
+            if not self.collapsed:
+                self._resize_active = True
+                self._resize_start_y      = my
+                self._resize_start_height = self.height_lines
+            return True
+
+        # Body click -- consume but no action (used to be a focus
+        # mechanic in some UIs; here it just stops the camera from
+        # panning when the user clicks inside the panel area).
+        if self._body_rect() and self._hit(self._body_rect(), mx, my):
+            return True
+
+        return False
+
+    def handle_mouse_drag(self, mx, my):
+        if not self._resize_active:
+            return False
+        # Drag UP makes the body taller (more lines).
+        dy = self._resize_start_y - my
+        new_lines = (self._resize_start_height
+                     + int(round(dy / self.LINE_H)))
+        new_lines = max(self.MIN_LINES, min(self.MAX_LINES, new_lines))
+        if new_lines != self.height_lines:
+            self.height_lines = new_lines
+            self._dirty = True
+        return True
+
+    def handle_mouse_up(self):
+        was = self._resize_active
+        self._resize_active = False
+        return was
+
+    def handle_scroll(self, mx, my, dy):
+        body = self._body_rect()
+        if body is None or not self._hit(body, mx, my):
+            return False
+        # dy from pygame: +1 = wheel up = scroll BACK (older lines)
+        max_scroll = max(0, len(self._lines) - self.height_lines)
+        self._scroll = max(0, min(max_scroll, self._scroll + int(dy)))
+        # If user scrolled back from bottom, freeze auto-scroll
+        self._user_scrolled = self._scroll > 0
+        return True
+
+    # ---- clipboard ----------------------------------------------------
+
+    def _copy_to_clipboard(self):
+        """Push the entire buffer to the system clipboard via tkinter.
+        Tkinter is already a Save Prim / Export / Import dependency so
+        this doesn't add anything new.
+        """
+        text = '\n'.join(t for t, _fg, _bg in self._lines)
+        try:
+            import tkinter as tk
+            r = tk.Tk()
+            r.withdraw()
+            r.clipboard_clear()
+            r.clipboard_append(text)
+            r.update()                # required so the data sticks
+            try:
+                r.destroy()
+            except Exception:
+                pass
+            print(f"[console] copied {len(self._lines)} line(s) "
+                  f"to clipboard ({len(text)} chars)")
+        except Exception as exc:
+            print(f"[console] clipboard copy failed: {exc}")
+
+    # ---- render -------------------------------------------------------
+
+    def render(self, ui_manager, width, height):
+        """Draw the panel.  Caller has already set the orthographic
+        UI projection and bound the UIShader; we just submit quads
+        + text textures via the manager's helpers (_solid, _draw_tex,
+        _make_tex).
+        """
+        if self.w <= 0:
+            return
+
+        n = len(self._lines)
+        # Header text: status + line count.  Rebuilt only when text
+        # changes (prevents per-frame GL texture churn).
+        header_text = (f"Console -- {self.status}"
+                       f"   ({n} line{'s' if n != 1 else ''})")
+        if header_text != self._header_text_cached:
+            if self._header_tex:
+                try: glDeleteTextures(1, [self._header_tex])
+                except Exception: pass
+            self._header_tex, self._header_w, self._header_h = (
+                ui_manager._make_tex(header_text, (235, 240, 250)))
+            self._header_text_cached = header_text
+
+        if self._copy_tex is None:
+            self._copy_tex, self._copy_w, self._copy_h = (
+                ui_manager._make_tex('Copy', (235, 240, 250)))
+
+        chev = '+' if self.collapsed else '-'
+        if chev != self._chev_text_cached:
+            if self._chev_tex:
+                try: glDeleteTextures(1, [self._chev_tex])
+                except Exception: pass
+            self._chev_tex, self._chev_w, self._chev_h = (
+                ui_manager._make_tex(chev, (235, 240, 250)))
+            self._chev_text_cached = chev
+
+        # ---- header bar -----------------------------------------------
+        # Slight highlight when the cursor's over the resize zone so
+        # the user knows it's draggable.
+        hb = self.COL_HEADER_HL if self.hover_header else self.COL_HEADER_BG
+        ui_manager._solid(*hb, self.x, self.y, self.w, self.HEADER_H)
+
+        # Header text (left)
+        ui_manager._draw_tex(self._header_tex,
+                             self.x + self.PAD,
+                             self.y + (self.HEADER_H - self._header_h) // 2,
+                             self._header_w, self._header_h)
+
+        # Copy button
+        cx, cy, cw, ch = self._copy_rect()
+        cb = self.COL_BTN_HOVER if self.hover_copy else self.COL_BTN_NORMAL
+        ui_manager._solid(*cb, cx, cy, cw, ch)
+        ui_manager._draw_tex(self._copy_tex,
+                             cx + (cw - self._copy_w) // 2,
+                             cy + (ch - self._copy_h) // 2,
+                             self._copy_w, self._copy_h)
+
+        # Collapse button
+        kx, ky, kw, kh = self._collapse_rect()
+        kb = self.COL_BTN_HOVER if self.hover_collapse else self.COL_BTN_NORMAL
+        ui_manager._solid(*kb, kx, ky, kw, kh)
+        ui_manager._draw_tex(self._chev_tex,
+                             kx + (kw - self._chev_w) // 2,
+                             ky + (kh - self._chev_h) // 2,
+                             self._chev_w, self._chev_h)
+
+        # ---- body (skip when collapsed) -------------------------------
+        body = self._body_rect()
+        if body is None:
+            return
+        bx, by, bw, bh = body
+        ui_manager._solid(*self.COL_BODY_BG, bx, by, bw, bh)
+
+        end   = n - self._scroll
+        start = max(0, end - self.height_lines)
+
+        # Build any missing line textures lazily during render -- GL
+        # state is already prepared by UIManager.
+        for i in range(start, end):
+            if self._line_tex[i] is None:
+                txt, fg, _bg = self._lines[i]
+                self._line_tex[i] = ui_manager._make_tex(txt, fg)
+
+        # Draw each visible line.  When a line carries a bg_color we
+        # paint a solid strip across the body width FIRST so the text
+        # texture renders on top of it -- gives the Compare dump's
+        # mismatch rows a clear "warning" highlight against the dark
+        # body background.  Long lines clip on the right at text_w_max
+        # (the texture itself is full-width; we just shrink the dest).
+        line_x = bx + self.PAD
+        line_y = by + self.PAD
+        bg_x   = bx + 2
+        bg_w   = bw - 4 - self.SCROLLBAR_W
+        text_w_max = bw - self.PAD * 2 - self.SCROLLBAR_W - 4
+        for i in range(start, end):
+            tex_info = self._line_tex[i]
+            _txt, _fg, bg = self._lines[i]
+            if bg is not None:
+                # bg is (r, g, b) 0-1 floats; full alpha
+                ui_manager._solid(bg[0], bg[1], bg[2], 1.0,
+                                  bg_x, line_y - 2,
+                                  bg_w, self.LINE_H)
+            if not tex_info or not tex_info[0]:
+                line_y += self.LINE_H
+                continue
+            tid, tw, th = tex_info
+            draw_w = min(tw, text_w_max)
+            ui_manager._draw_tex(tid, line_x, line_y, draw_w, th)
+            line_y += self.LINE_H
+
+        # Scrollbar -- only when there's more than fits.
+        if n > self.height_lines:
+            track_x = bx + bw - self.SCROLLBAR_W - 2
+            track_y = by + 2
+            track_h = bh - 4
+            ratio_visible = self.height_lines / float(n)
+            thumb_h = max(16, int(track_h * ratio_visible))
+            max_scroll = max(1, n - self.height_lines)
+            # _scroll == 0 -> thumb at BOTTOM (newest visible)
+            scroll_frac = (max_scroll - self._scroll) / float(max_scroll)
+            thumb_y = track_y + int((track_h - thumb_h) * scroll_frac)
+            ui_manager._solid(*self.COL_SCROLLBAR,
+                              track_x, thumb_y,
+                              self.SCROLLBAR_W, thumb_h)
+
+    def cleanup(self):
+        for tex in self._line_tex:
+            if tex and tex[0]:
+                try: glDeleteTextures(1, [tex[0]])
+                except Exception: pass
+        for tid in (self._header_tex, self._copy_tex, self._chev_tex):
+            if tid:
+                try: glDeleteTextures(1, [tid])
+                except Exception: pass
+        self._lines = []
+        self._line_tex = []
+        self._header_tex = self._copy_tex = self._chev_tex = None
+
+
+# ============================================================================
 # UIManager
 # ============================================================================
 
@@ -1405,7 +1843,19 @@ class UIManager:
         self.buttons    = []
         self.sliders    = []
         self.checkboxes = []
-        self.font       = pygame.font.SysFont('Segoe UI', 13)
+        # Static text labels drawn in the left/right control panels --
+        # used for "UI" / "IO" / "Tools" section headers above grouped
+        # button rows.  Each entry is (text_tex, x, y, w, h) so render()
+        # can blit them in one tight loop.  Populated via
+        # `add_panel_label`; cleared via `clear_panel_labels` so a
+        # re-layout (window resize) regenerates them cleanly.
+        self.panel_labels = []
+        # Calibri Bold -- thicker / more readable than the previous
+        # Segoe UI at small sizes, especially against the dark side
+        # panels.  The font name falls back to plain Calibri if the
+        # Bold cut isn't installed (very rare on Windows -- it ships
+        # with the OS).
+        self.font       = pygame.font.SysFont('Calibri', 13, bold=True)
         self._active_slider = None
 
         # Side panels + modal dialogs (created on demand by Viewer)
@@ -1416,6 +1866,16 @@ class UIManager:
         self.dialog       = UIConfirmDialog()       # legacy, kept for compat
         self.load_dialog  = UILoadTankDialog()      # tank-load picker
         self.paths_dialog = UIPathsDialog()
+        # Bottom-anchored scrollable log panel.  Rendered AFTER the
+        # 3D scene so it overlays the viewport without disturbing the
+        # camera's GL state.  Geometry set by Viewer._on_resize.
+        self.console      = UIConsole()
+        # Set every time the console's collapsed state OR drag-resize
+        # height changes -- Viewer reads + clears it each frame and
+        # re-runs _on_resize so the 3D camera viewport tracks the
+        # console's current size.  Avoids re-laying out on every
+        # frame when the console hasn't moved.
+        self._console_geometry_dirty = False
 
         # Info-panel collapse state.  Viewer initialises this from config
         # at startup and registers `on_info_toggle` so a click on the
@@ -1476,6 +1936,38 @@ class UIManager:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
         glBindTexture(GL_TEXTURE_2D, 0)
         return tid, w, h
+
+    def add_panel_label(self, text, x, y, color=(180, 180, 195)):
+        """Drop a small text label into the static panel-decoration list.
+
+        Used for "UI" / "IO" / "Tools" section headers above grouped
+        button rows.  Returns the (tex, x, y, w, h) tuple that was
+        appended so callers that care about the rendered width (e.g.
+        for centring) can read it.
+
+        Args:
+            text  (str)              : label text
+            x, y  (int)              : top-left corner in panel coords
+            color (tuple[int, int, int]) : RGB 0-255 colour (alpha is 1.0)
+
+        Returns:
+            (gl_texture_id, x, y, w, h) -- the entry as stored.
+        """
+        tex, w, h = self._make_tex(text, color=color)
+        entry = (tex, x, y, w, h)
+        self.panel_labels.append(entry)
+        return entry
+
+    def clear_panel_labels(self):
+        """Free every panel-label texture and empty the list.  Called
+        before a fresh layout pass so window-resize / re-grouping
+        doesn't leak GL textures."""
+        for tex, _x, _y, _w, _h in self.panel_labels:
+            try:
+                glDeleteTextures([tex])
+            except Exception:
+                pass
+        self.panel_labels = []
 
     def add_button(self, label, x, y, w, h, active=True, action=None):
         """Create and register a bar button.
@@ -1571,6 +2063,16 @@ class UIManager:
         if self.mesh_window.handle_click(mx, my):
             return None
 
+        # 2b. Console (click on header / Copy / collapse).  Fires before
+        # the other panels so a click on its header is never stolen by
+        # the camera-orbit fall-through.  Returns True when consumed;
+        # collapse/resize state changes need a viewer relayout to
+        # update the camera viewport, so we set a flag the caller
+        # checks via `console_geometry_dirty`.
+        if self.console and self.console.handle_mouse_down(mx, my):
+            self._console_geometry_dirty = True
+            return None
+
         # 3. Tab bar above the tree -- check before the tree itself
         if self.tab_bar and self.tab_bar.hit(mx, my):
             self.tab_bar.handle_click(mx, my)
@@ -1646,6 +2148,8 @@ class UIManager:
         if (self.dialog.active or self.paths_dialog.active
                 or self.load_dialog.active):
             return True
+        if self.console and self.console.handle_scroll(mx, my, dy):
+            return True
         if self.mesh_window.handle_scroll(mx, my, dy):
             return True
         if self.tree and self.tree.handle_scroll(mx, my, dy):
@@ -1656,12 +2160,17 @@ class UIManager:
         return False
 
     def handle_mouse_drag(self, mx, my):
-        """Update the active slider while the mouse button is held."""
+        """Update the active slider OR active console-resize drag."""
+        if self.console and self.console.handle_mouse_drag(mx, my):
+            self._console_geometry_dirty = True
+            return
         if self._active_slider:
             self._active_slider.set_from_mouse(mx)
 
     def handle_mouse_up(self):
-        """Release the active slider drag."""
+        """Release the active slider drag and any console resize drag."""
+        if self.console:
+            self.console.handle_mouse_up()
         if self._active_slider:
             self._active_slider._dragging = False
         self._active_slider = None
@@ -1681,6 +2190,8 @@ class UIManager:
         self._spine_hovered = (self.info_panel_full_w > 0 and
                                self.info_spine_hit(mx, my, self._last_render_h))
         self.mesh_window.update_hover(mx, my)
+        if self.console:
+            self.console.update_hover(mx, my)
         self.dialog.update_hover(mx, my)
         self.load_dialog.update_hover(mx, my)
         self.paths_dialog.update_hover(mx, my)
@@ -1706,6 +2217,8 @@ class UIManager:
                 and self.info_panel.hit(mx, my)):
             return True
         if self.mesh_window.hit(mx, my):
+            return True
+        if self.console and self.console.hit(mx, my):
             return True
         if (self.dialog.active or self.paths_dialog.active
                 or self.load_dialog.active):
@@ -1884,6 +2397,13 @@ class UIManager:
                 # consistent styling looks better).
                 self._solid(0.45, 0.45, 0.55, 1.0, rx, ry + rh - 2,  rw, 2)
 
+        # ---- Panel section labels ("UI", "IO", "Tools") ----------------
+        # Drawn between the panel backgrounds and the buttons so the
+        # button rows visually anchor underneath each label.  Pure text
+        # blits -- no boxes, no separators; subtle grouping cue.
+        for tex, lx, ly, lw, lh in self.panel_labels:
+            self._draw_tex(tex, lx, ly, lw, lh)
+
         # ---- Toggle buttons (row 1, y=4) ------------------------------
         for btn in self.buttons:
             if not getattr(btn, 'visible', True):
@@ -1983,6 +2503,13 @@ class UIManager:
         # ---- Mesh-visibility window (above the panels, below modals) -
         if self.mesh_window.active:
             self._render_mesh_window(self.mesh_window)
+
+        # ---- Console (bottom-anchored log panel) ---------------------
+        # Sits between the side panels at the bottom of the 3D
+        # viewport.  Always rendered (its header is always visible);
+        # the body is hidden when collapsed.
+        if self.console:
+            self.console.render(self, width, height)
 
         # ---- Modal dialogs (rendered last so they sit on top) --------
         if self.dialog.active:

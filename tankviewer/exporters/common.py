@@ -57,6 +57,13 @@ def collect_payload(viewer, output_path):
     if not viewer.meshes:
         raise RuntimeError("Nothing loaded -- nothing to export")
 
+    # Stage textures into a sidecar folder NAMED AFTER THE OUTPUT
+    # FILE'S STEM with a '_textures' suffix.  Sits next to the FBX/
+    # GLB/OBJ rather than mingling with it -- gives the user one
+    # clean .fbx file at the path they picked plus an obvious
+    # support folder beside it:
+    #     <user_chosen_dir>/A14_T30.fbx
+    #     <user_chosen_dir>/A14_T30_textures/<every referenced .dds>
     base, _ = os.path.splitext(os.path.abspath(output_path))
     tex_dir = base + '_textures'
     os.makedirs(tex_dir, exist_ok=True)
@@ -70,8 +77,17 @@ def collect_payload(viewer, output_path):
         if not getattr(mesh, 'visible', True):
             continue
 
+        # Preserve the original WoT identifier / mesh name as-is.  We
+        # used to append '_{i}' for guaranteed uniqueness, but that
+        # renamed every part the user knows by name in the source data
+        # ('tank_hull_01' became 'tank_hull_01_0').  Blender's own
+        # '.001' suffix handles real collisions on import without
+        # mangling the canonical name on the meshes that don't collide.
+        mat_base_name = (getattr(mesh, 'identifier', '')
+                          or getattr(mesh, 'name', '')
+                          or f'material_{i}')
         material = {
-            'name':         f"{getattr(mesh, 'identifier', '') or mesh.name}_{i}",
+            'name':         mat_base_name,
             'diffuse':      _stage_texture(mesh.diffuse_path, tex_dir, tex_dedupe),
             'normal':       _stage_texture(mesh.normal_path,  tex_dir, tex_dedupe),
             'ao':           _stage_texture(mesh.ao_path,      tex_dir, tex_dedupe),
@@ -88,13 +104,18 @@ def collect_payload(viewer, output_path):
         #
         # Display-name fallback: WoT primitive-group section names
         # ('mesh.name') are often empty -- e.g. for hull/turret -- which
-        # would produce useless '_4'/'_5' object names in Blender.  Prefer
-        # the WoT material identifier (e.g. 'tank_hull_01') when present.
+        # would produce useless 'mesh_4' / 'mesh_5' object names in
+        # Blender.  Prefer the WoT material identifier
+        # ('exportTrackR_Shape', 'tank_hull_01', etc) when present so
+        # the part name a user sees in Blender / FBX matches what the
+        # game uses internally.  No '_{i}' suffix any more -- Blender
+        # auto-appends '.001' on actual name collisions, which is a
+        # less invasive form of disambiguation than mangling every name.
         display_name = (getattr(mesh, 'identifier', '')
                         or getattr(mesh, 'name', '')
                         or f'mesh_{i}')
         out = {
-            'name':         f"{display_name}_{i}",
+            'name':         display_name,
             'positions':    _arr_to_list(mesh.positions),
             'normals':      _arr_to_list(mesh.normals),
             'tangents':     _arr_to_list(mesh.tangents),

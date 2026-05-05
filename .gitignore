@@ -1,0 +1,25 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Smoke-test / scratch files left by the rebuild_itemlist tool when
+# we want to compare an experimental rebuild against the live file
+# without overwriting it.
+TheItemList.NEW.xml
+
+# Local user config -- the viewer writes pkg / res_mods paths in
+# here on first run; they're machine-specific and shouldn't ship.
+# Comment out if you want to commit a default config.
+# tankviewer.json
+
+# requirements/ folder is consumed by go.bat on first install and
+# then deleted; the permanent backup at resources/requirements_backup/
+# is what survives.  Both should ship in the repo though, so neither
+# is ignored here -- this comment is just to remind future readers.

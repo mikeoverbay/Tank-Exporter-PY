@@ -119,6 +119,23 @@ class Mesh:
         # to inspect the body underneath).
         self.visible             = True
 
+        # WoT vehicle component this mesh belongs to.  Set by
+        # Viewer.load_vehicle to one of 'hull' / 'chassis' / 'turret' /
+        # 'gun' so the .primitives_processed writer can group meshes
+        # back into their per-component output files.  Stays '' for
+        # standalone load_mesh calls and FBX/GLB/OBJ imports (no WoT
+        # component context to assign).
+        self.component           = ''
+        # Canonical pkg-relative path of the source .primitives_processed
+        # file (forward slashes, no leading 'res/'), e.g.
+        # 'vehicles/usa/A14_T30/normal/lod0/Hull.primitives_processed'.
+        # Set by Viewer.load_vehicle from the component dict.  Used by
+        # the .primitives_processed writer to compose the destination
+        # under res_mods/<version>/ -- mirrors the original pkg layout
+        # so the game picks up the modified file as an override.
+        # Empty string for FBX imports / standalone primitive loads.
+        self.primitives_zip      = ''
+
         # Per-component world-space translation (set by vehicle loader)
         self.model_matrix = np.eye(4, dtype=np.float32)
 

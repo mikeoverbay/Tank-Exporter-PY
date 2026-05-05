@@ -17,6 +17,7 @@ Classes:
                  _sync_button_state(attr, value)  -- sync viewer flag -> button
 """
 
+import ctypes
 import os
 import re
 import shutil
@@ -35,39 +36,28 @@ from .         import config as _config
 from .mesh     import Mesh
 from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
-                       ParticleShader, ImportedShader)
+                       ParticleShader, ImportedShader, NormalsShader)
 from .skybox   import Skybox
 from .particles import FlipbookTexture, ParticleSystem
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 
 
 # ---------------------------------------------------------------------------
-# Nation armor colors  (sRGB 0-255, from WoT Tank Exporter source)
-# Keys are the folder names used in scripts/item_defs/vehicles/<nation>/
-#
-# Sent to the shader in the SAME color space as the diffuse texture sample
-# (sRGB-normalised 0..1) -- the mix() / multiply happens BEFORE
-# SRGBtoLINEAR.  Earlier code converted these to linear, which made the
-# tint values vanishingly small (USA olive drab in linear = (0.077,
-# 0.060, 0.034)) and produced near-black surfaces at high tint strength.
+# Nation armor colours
 # ---------------------------------------------------------------------------
-def _srgb255_to_norm(r, g, b):
-    """Convert integer sRGB [0-255] to sRGB-normalized [0..1] -- no gamma."""
-    return (r / 255.0, g / 255.0, b / 255.0)
+# The per-nation default tint colour used to live here as a hardcoded
+# table guessed from the legacy VB Tank Exporter source.  It now comes
+# from `tankviewer.armor_colors.ArmorColorLoader`, which parses the
+# authoritative WoT data file `scripts/item_defs/customization/paints/
+# base_paints.xml` and also honours its per-tank exclusion list (Type
+# 59 Gold, Skorpion BF, etc. ship with their unique colour baked into
+# the texture and should render untinted).
+#
+# The hardcoded fallback values for the same 11 nations now live inside
+# ArmorColorLoader._FALLBACK_NATION_COLORS in armor_colors.py and only
+# come into play when the user hasn't pointed us at a WoT install yet.
+# ---------------------------------------------------------------------------
 
-_NATION_ARMOR = {
-    'usa':     _srgb255_to_norm( 82,  72,  51),   # US olive drab
-    'uk':      _srgb255_to_norm( 82,  72,  51),   # British (same as US)
-    'china':   _srgb255_to_norm( 61,  62,  42),   # Chinese dark olive
-    'czech':   _srgb255_to_norm( 15,  36,  36),   # Czech dark teal
-    'france':  _srgb255_to_norm( 15,  36,  36),   # French dark teal
-    'germany': _srgb255_to_norm( 90, 103,  94),   # German grey-green
-    'japan':   _srgb255_to_norm( 15,  36,  36),   # Japanese dark teal
-    'poland':  _srgb255_to_norm( 15,  36,  36),   # Polish dark teal
-    'ussr':    _srgb255_to_norm( 61,  62,  42),   # Soviet dark olive
-    'sweden':  _srgb255_to_norm( 15,  36,  36),   # Swedish dark teal
-    'italy':   _srgb255_to_norm( 15,  36,  36),   # Italian dark teal
-}
 
 def _split_into_submeshes(parsed_group, materials):
     """Yield (synth_group_dict, material_dict) tuples, one per sub-mesh.
@@ -237,8 +227,8 @@ class Viewer:
     # lighting sliders + checkboxes.  Below it sits the info-tree.
     # Right panel: bottom block holds smoke sliders + HP-marker toggle.
     # Above it sits the tab-bar + tank-list tree.
-    LEFT_CONTROLS_H  = 248      # 5 button rows + 2 slider rows + cb row
-    RIGHT_CONTROLS_H = 175      # 5 smoke sliders + Show HP checkbox
+    LEFT_CONTROLS_H  = 274      # 6 button rows + 2 slider rows + cb row
+    RIGHT_CONTROLS_H = 200      # 5 smoke sliders + Normals slider + Show HP checkbox
 
     # Tier-filter tab labels (strings).  '1' .. '11' for WoT tiers I-XI.
     TREE_TIER_TABS = [str(t) for t in range(1, 12)]
@@ -362,13 +352,71 @@ class Viewer:
         self.width  = 1280
         self.height = 720
 
+        # ---- Windows taskbar identity ----------------------------------
+        # By default Windows lumps every script run by `python.exe`
+        # under one taskbar entry that uses the Python icon.  Setting
+        # an explicit AppUserModelID via shell32 tells Windows to treat
+        # TEPY as its own app, which (a) gives us a separate taskbar
+        # group and (b) lets the icon we install via set_icon below
+        # actually appear in the taskbar instead of the Python default.
+        # No-op on non-Windows; harmless when shell32 isn't reachable.
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                'mikeoverbay.TEPY.viewer.1')
+        except Exception:
+            pass
+
+        # ---- Window icon -- MUST be set BEFORE set_mode ----------------
+        # On Windows, pygame.display.set_icon attaches the icon to the
+        # NEXT window pygame creates.  Calling it after set_mode is a
+        # silent no-op (the window already exists with the default
+        # robot icon).  So we install the icon first, then create the
+        # window, and only then write the caption text.
+        #
+        # SDL_image can be flaky about multi-size .ico files (it tends
+        # to pick an arbitrary frame, often too small to look right at
+        # the title-bar size).  We prefer dedicated PNG sidecars
+        # written by `cust_tools/make_icon.py` and try them in
+        # priority order: 24 px first (matches Windows' title-bar
+        # request size on most builds, no awkward downscale), then
+        # 32, then 48, then the .ico as last resort.
+        from . import __version__ as _APP_VERSION
+        self._app_version = _APP_VERSION
+        try:
+            _res_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'resources')
+            _icon_path = None
+            for _candidate in ('tepy_icon_24.png',
+                               'tepy_icon_32.png',
+                               'tepy_icon_48.png',
+                               'tepy.ico'):
+                _full = os.path.join(_res_dir, _candidate)
+                if os.path.isfile(_full):
+                    _icon_path = _full
+                    break
+            if _icon_path:
+                # Note: do NOT .convert_alpha() here -- that requires
+                # a display surface to exist, and we're intentionally
+                # running BEFORE set_mode.  pygame.image.load on a
+                # PNG already returns a 32-bit RGBA surface, which is
+                # what set_icon wants anyway.
+                _icon_surf = pygame.image.load(_icon_path)
+                pygame.display.set_icon(_icon_surf)
+                print(f"[viewer] icon: {os.path.basename(_icon_path)} "
+                      f"({_icon_surf.get_size()})")
+            else:
+                print(f"[viewer] icon: no tepy_icon_*.png or tepy.ico in "
+                      f"{_res_dir}")
+        except Exception as exc:
+            print(f"[viewer] icon skipped: {exc}")
+
         pygame.display.set_mode(
             (self.width, self.height),
             DOUBLEBUF | OPENGL | RESIZABLE
         )
-        from . import __version__ as _APP_VERSION
-        pygame.display.set_caption(f"Tank Exporter PY  v{_APP_VERSION}")
-        self._app_version = _APP_VERSION
+        pygame.display.set_caption(f"TEPY  v{_APP_VERSION}")
 
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.1, 0.1, 0.12, 1.0)
@@ -396,10 +444,19 @@ class Viewer:
             print(f"[viewer] splash skipped: {exc}")
             self.splash = None
 
+        # Splash status updates at key init points so users don't think
+        # the app is hung during the multi-second startup phase.
+        self._splash_status('Compiling shaders...')
+
         # Shaders
         self.shader          = ShaderProgram()      # WoT PBR
         self.color_shader    = SimpleColorShader()  # debug lines / spheres
         self.imported_shader = ImportedShader()     # FBX-import simple shader
+        # Surface-normal debug-line shader (vert + geom + frag).
+        # Driven by the right-panel "Normals" slider; length = 0
+        # disables the pass entirely.  Built once at startup; cheap
+        # to keep around even when off.
+        self.normals_shader  = NormalsShader()
 
         # Camera and scene helpers
         # Camera reports the visible 3D viewport size, which excludes both
@@ -432,6 +489,7 @@ class Viewer:
         # ParticleSystem owns the per-particle CPU state + dynamic VBO;
         # set_emitters() is called every load_vehicle to point it at the
         # current tank's HP_Track_Exhaus_* nodes.
+        self._splash_status('Loading smoke flipbook (91 frames)...')
         self.particle_shader = None
         self.smoke_flipbook  = None
         self.smoke_particles = None
@@ -457,6 +515,7 @@ class Viewer:
             self.smoke_particles = None
 
         # Skybox / environment cubemap
+        self._splash_status('Building skybox + IBL maps (irradiance, BRDF, prefilter)...')
         _env_dir  = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                  'resources', 'environment_maps')
         _x_file   = os.path.join(_env_dir, 'cube_model.x')
@@ -508,6 +567,8 @@ class Viewer:
         self._smoke_speed_slider    = None
         self._smoke_fade_slider     = None
         self._smoke_fade_end_slider = None
+        self._normals_slider        = None
+        self._normals_mode_cb       = None
         self._invert_metal_cb    = None
         self._invert_shine_cb    = None
         self._show_hp_cb         = None
@@ -529,8 +590,17 @@ class Viewer:
         # PKG extractor: created eagerly so the tank-browser tree can be
         # populated before any mesh is loaded.  Reused by load_mesh /
         # load_vehicle later.
+        self._splash_status('Indexing WoT packages (pre-warming archives)...')
         self._pkg_extractor = None
         self._init_pkg_extractor_early()
+
+        # Armor-colour lookup -- reads WoT's base_paints.xml via the
+        # PkgExtractor on first use to get the authoritative per-nation
+        # default tint colours plus the special-edition exclusion list.
+        # Falls back to a hardcoded table when the extractor isn't
+        # configured (no WoT install pointed to yet).
+        from .armor_colors import ArmorColorLoader
+        self._armor_loader = ArmorColorLoader(self._pkg_extractor)
 
         # Shared texture cache (abspath -> GLuint).  Used for textures that
         # are identical across many sub-meshes -- chiefly the detail/scratch
@@ -577,7 +647,9 @@ class Viewer:
         # Each tier-tree build pumps events + renders so the user sees
         # the tab being highlighted amber as it's built.  _build_all_tier_trees
         # detects the existing tab_bar and skips the lazy-build.
+        self._splash_status('Building tank-browser tree (per tier, per nation)...')
         self._build_all_tier_trees()
+        self._splash_status('Almost ready...')
 
         # Auto-prompt for paths on first run / if the configured path is
         # missing or invalid.  The dialog opens; the user can save and
@@ -624,6 +696,23 @@ class Viewer:
                 self.load_vehicle(filepath)
             else:
                 self.load_mesh(filepath)
+
+        # Startup summary line for the in-app console.  Concise -- the
+        # full verbose breakdown still streams to stdout above this.
+        try:
+            n_pkg_entries = (len(self._pkg_extractor._file_to_pkg)
+                             if (self._pkg_extractor is not None
+                                 and getattr(self._pkg_extractor,
+                                             '_file_to_pkg', None))
+                             else 0)
+        except Exception:
+            n_pkg_entries = 0
+        self.log_status('Startup')
+        self.log(f"Tank Exporter PY v{self._app_version} -- ready.")
+        if n_pkg_entries:
+            self.log(f"PkgExtractor: {n_pkg_entries:,} entries indexed")
+        else:
+            self.log_error("PkgExtractor not configured -- open Set Paths")
 
     # ------------------------------------------------------------------
     # UI construction
@@ -692,6 +781,28 @@ class Viewer:
                            action=self._on_compare_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
+        # 'Save Prim' opens a component picker (Hull / Chassis /
+        # Turret / Gun) and writes the chosen parts back out as
+        # WoT-native .primitives_processed files.  Companion to
+        # Export (which writes FBX/GLB/OBJ) -- this one targets the
+        # game's own format.
+        self.ui.add_button('Save Prim', x, y, 70, h, active=False,
+                           action=self._on_save_prim_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+
+        # 'ItemList' rebuilds TheItemList.xml from scratch by walking
+        # every kept pkg under <wot>/res/packages.  Use after a game
+        # patch (new tanks / new file kinds) to refresh the lookup
+        # table so PkgExtractor hits the O(1) dict path on first try
+        # instead of falling back to a multi-pkg scan.  See
+        # cust_tools/rebuild_itemlist.py for the underlying tool.
+        # Position is the placeholder before _layout_widgets does the
+        # real grid placement; the (x, y) here doesn't matter beyond
+        # registration.
+        self.ui.add_button('ItemList', x, y, 70, h, active=False,
+                           action=self._on_rebuild_itemlist_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+
         # --- Sliders + Invert checkboxes --------------------------------
         # Pan slider was removed (baked to 0.20 inside handle_input).
         tx = self.ui.SLIDER_TRACK_X
@@ -743,6 +854,29 @@ class Viewer:
             'Sm FadeE', tx, cy6 + 25,   tw, value=smoke_fade_end_init,
             value_max=91.0, group_id='smoke')
 
+        # Surface-normal debug lines.  Slider drives world-space line
+        # length; 0 = off.  Default loaded from the persisted config
+        # so the user's preferred setting survives across sessions.
+        # Range max 0.5 is plenty for tank-scale meshes -- tracks +
+        # smaller equipment look right around 0.05-0.15, hull faces
+        # around 0.20-0.40.  Final on-screen position is set in
+        # _layout_widgets alongside the smoke sliders.
+        normals_init = float(self._cfg.get('normals_length', 0.0))
+        self._normals_slider = self.ui.add_slider(
+            'Normals', tx, cy6 + 50,   tw, value=normals_init,
+            value_max=0.5, group_id='smoke')
+        # Per-vertex toggle for the normals shader.  Unchecked (default)
+        # = by-face mode (one cyan line per triangle from the centroid).
+        # Checked = by-vertex mode (3 axes-coloured lines per triangle,
+        # one per vertex).  Persisted in config.  cb_size literal here
+        # since the cb_size local is defined a few lines further down --
+        # 14 px matches every other checkbox in this section.
+        self._normals_per_vertex = bool(
+            self._cfg.get('normals_per_vertex', False))
+        self._normals_mode_cb = self.ui.add_checkbox(
+            'PerVtx', cx, cy6 + 50 - 7, 14,
+            checked=self._normals_per_vertex, group_id='smoke')
+
         cb_size = 14
         self._invert_metal_cb = self.ui.add_checkbox(
             'NMap', cx, cy1 - cb_size // 2, cb_size, checked=True,
@@ -765,11 +899,27 @@ class Viewer:
         self.width  = max(1, w)
         self.height = max(1, h)
 
-        # Camera viewport spans the full window height between the two
-        # side panels.  Width respects the info-panel collapse spine.
+        # Console panel (bottom-anchored, between the side panels) eats
+        # vertical space the camera would otherwise use.  Re-read its
+        # current height every resize so collapse / drag-resize updates
+        # immediately reshape the 3D viewport instead of waiting for
+        # the next window-resize event.
+        console_h = (self.ui.console.height_for_layout()
+                     if self.ui.console else 0)
+
+        # Camera viewport spans the height between top-of-window and
+        # top-of-console.  Width respects the info-panel collapse spine.
         left_inset = self.ui.info_left_inset(self.INFO_PANEL_W)
         self.camera.width  = max(1, self.width - left_inset - self.TREE_PANEL_W)
-        self.camera.height = self.height
+        self.camera.height = max(1, self.height - console_h)
+
+        # Position the console: spans the 3D viewport's horizontal
+        # band (between the two side panels), anchored to the bottom.
+        if self.ui.console:
+            self.ui.console.set_geometry(
+                left_inset,
+                self.height - console_h,
+                self.camera.width)
 
         # ---- Right panel: tab bar + tree on top, smoke controls at bottom
         # The tree shrinks to leave room for the smoke control block.
@@ -1028,10 +1178,16 @@ class Viewer:
             return
         wot_root = os.path.dirname(os.path.dirname(cfg_pkg_dir))
         try:
+            # Hand the splash-status updater as the progress callback
+            # so the user sees pkg-by-pkg progress during pre-warm
+            # instead of a silent 3-6 second pause.  When the splash
+            # has already been torn down (e.g. Set-Paths re-init mid-
+            # session), _splash_status is a no-op so this is safe.
             self._pkg_extractor = PkgExtractor(
                 wot_root,
                 pkg_dir=cfg_pkg_dir,
                 lookup_xml=cfg_lookup_xml,
+                progress_callback=self._splash_status,
             )
         except Exception as exc:
             print(f"[viewer] PKG extractor init failed: {exc}")
@@ -1109,32 +1265,139 @@ class Viewer:
         self.ui.paths_dialog.show(initial, on_confirm=self._on_paths_saved)
 
     # ------------------------------------------------------------------
+    def _show_format_picker(self, direction):
+        """Modal tkinter form listing every Blender IO format as a
+        radio button.  Supported formats are enabled; the rest are
+        greyed out and labelled '(not yet)' so the user can see
+        what's coming.  Single-select -- exactly one format at a time
+        for both Import and Export.
+
+        Args:
+            direction (str): 'export' or 'import' -- drives which
+                             format flags are checked for "supported"
+                             AND which window title is shown.
+
+        Returns:
+            list[str] -- a one-element list with the chosen extension
+            (bare, no dot), or an empty list when the user cancelled
+            or hit Continue with no radio selected.  Returned as a
+            list rather than a string so the caller can iterate
+            uniformly with the previous (multi-select) API contract.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            print(f"[{direction}] tkinter not available -- "
+                  f"can't show format picker.  Defaulting to FBX.")
+            return ['fbx']
+
+        from . import io_formats
+
+        title = ('Export tank -- pick format' if direction == 'export'
+                 else 'Import tank -- pick format')
+
+        win = tk.Tk()
+        win.title(title)
+        try:
+            win.attributes('-topmost', True)
+        except Exception:
+            pass
+        win.resizable(False, False)
+        win.geometry('360x420')
+
+        # Header label
+        hdr = ('Pick the format to write.'
+               if direction == 'export' else
+               'Pick the format to import.')
+        tk.Label(win, text=hdr, justify='left',
+                 padx=12, pady=8).pack(fill='x')
+
+        ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
+
+        # Single shared StringVar drives the radio group -- exactly one
+        # format can be selected at a time.  Default-tick FBX since
+        # that's the most-asked-for round-trip format; an empty value
+        # would still be valid but forces an extra click for the common
+        # case.  User can switch to any other supported format with
+        # one click before hitting Continue.
+        key = 'export' if direction == 'export' else 'import_'
+        choice_var = tk.StringVar(value='fbx')
+        rows_frame = tk.Frame(win, padx=12, pady=8)
+        rows_frame.pack(fill='both', expand=True)
+        for f in io_formats.FORMATS:
+            supported = bool(f[key])
+            label = f"{f['name']}  (.{f['ext']})"
+            if not supported:
+                label += '   -- not yet'
+            rb = tk.Radiobutton(
+                rows_frame, text=label,
+                variable=choice_var, value=f['ext'],
+                anchor='w', justify='left',
+                state=('normal' if supported else 'disabled'))
+            rb.pack(fill='x', anchor='w')
+
+        # Result holder -- _confirm() and _cancel() write into this
+        chosen = []
+
+        def _confirm():
+            chosen.clear()
+            ext = choice_var.get()
+            if ext:
+                chosen.append(ext)
+            win.destroy()
+
+        def _cancel():
+            chosen.clear()
+            win.destroy()
+
+        # Buttons row
+        btn_frame = tk.Frame(win, padx=12, pady=8)
+        btn_frame.pack(fill='x', side='bottom')
+        tk.Button(btn_frame, text='Cancel', width=10,
+                  command=_cancel).pack(side='right', padx=4)
+        tk.Button(btn_frame, text='Continue', width=10,
+                  command=_confirm).pack(side='right', padx=4)
+
+        # Window close (X) treated as Cancel
+        win.protocol('WM_DELETE_WINDOW', _cancel)
+        win.mainloop()
+
+        # If Import got more than one tick, narrow to the first since the
+        # downstream file dialog can only open one path at a time.
+        return chosen
+
     def _on_export_clicked(self):
         """Action-button callback for the 'Export' button.
 
         Workflow:
             1. Bail out with a console note if no tank is currently loaded.
-            2. Open a Save dialog (tkinter.filedialog) so the user picks
-               the format (.fbx / .glb / .gltf / .obj) and destination.
-            3. Spawn a headless Blender subprocess via the bridge and
-               wait for it to finish.  Logs land in the console.
+            2. Verify Blender is reachable.
+            3. Show the format-picker form (radio buttons for every
+               Blender IO format; supported ones enabled).
+            4. Open a Save dialog filtered to the chosen extension and
+               spawn Blender to write it.
 
-        Blocks the UI thread for ~3 s while Blender runs.  The render
-        loop is paused but the user gets clear console feedback.
+        Blocks the UI thread for ~3 s per format while Blender runs.
         """
         # 1. Guard: nothing to export without a loaded tank
         if not self.meshes:
-            print("[export] No tank loaded -- pick one from the tree first.")
+            self.log_clear(status='Export')
+            self.log_error("Export: no tank loaded -- pick one from the tree first.")
             return
+
+        # Fresh console for this action.
+        self.log_clear(status='Export')
 
         # Lazy imports keep startup fast / avoid tk dependency until used
         try:
             import tkinter as tk
             from tkinter import filedialog
         except ImportError:
-            print("[export] tkinter not available -- can't show file dialog.")
+            self.log_error("Export: tkinter not available -- can't show file dialog.")
             return
         from .exporters import export_vehicle, find_blender_executable
+        from . import io_formats
 
         # 2. Verify Blender is reachable BEFORE pestering the user with a dialog
         blender_exe = (self._cfg.get('blender_exe') or '').strip() or None
@@ -1145,73 +1408,528 @@ class Viewer:
             return
         print(f"[export] Blender: {resolved_blender}")
 
-        # 3. Default filename -- use the loaded tank's display name if we
-        #    have one, else "Tank".  Default to .fbx (most-asked-for format).
-        default_stem = (
+        # 3. Show format-picker form -- user picks ONE format (radio).
+        chosen_exts = self._show_format_picker('export')
+        if not chosen_exts:
+            print("[export] cancelled.")
+            return
+        print(f"[export] format: {chosen_exts[0]}")
+
+        # 4. Default filename stem -- prefer the WoT XML basename
+        # (e.g. 'A14_T30') because it carries the nation prefix letter
+        # (A=USA, R=USSR, G=Germany, ...), the id number, the
+        # underscore, AND the short display name in one canonical
+        # token -- exactly what users want for cross-referencing
+        # exports back to the in-game tank.  Falls back to the
+        # tanks.txt display name (e.g. 'T30') if the XML basename
+        # isn't known (e.g. user loaded a standalone .primitives_processed),
+        # and finally to a generic 'Tank' label.
+        xml_basename = (getattr(self, 'source_tank_name', '') or '').strip()
+        display_name = (
             (self.ui.tree.loaded_thumb_name or '').strip()
             if (self.ui and self.ui.tree) else ''
-        ) or 'Tank'
-        # tk seems to dislike anything with reserved chars in the default name
+        )
+        default_stem = xml_basename or display_name or 'Tank'
+        # Strip filesystem-illegal chars (keep alphanumerics, space,
+        # underscore, dash -- the basename uses only those anyway).
         default_stem = ''.join(
             c for c in default_stem if c.isalnum() or c in ' _-')
 
+        # 5. Prompt for the filename + spawn Blender.  The loop runs
+        # exactly once today (radio = single format) but kept as a
+        # loop so re-introducing multi-format export later is a one-line
+        # picker change rather than a structural rewrite.
         root = tk.Tk()
         root.withdraw()
         try:
             root.attributes('-topmost', True)
         except Exception:
             pass
-        out_path = filedialog.asksaveasfilename(
-            parent=root,
-            title="Export tank to...",
-            defaultextension=".fbx",
-            initialfile=f"{default_stem}.fbx",
-            filetypes=[
-                ("FBX (Filmbox)",  "*.fbx"),
-                ("glTF binary",    "*.glb"),
-                ("glTF separate",  "*.gltf"),
-                ("Wavefront OBJ",  "*.obj"),
-                ("All files",      "*.*"),
-            ],
-        )
+
         try:
-            root.destroy()
+            for ext in chosen_exts:
+                entry = io_formats.lookup(ext)
+                if not entry or not entry.get('export'):
+                    self.log_error(f"Export {ext!r} not yet implemented -- skipped")
+                    continue
+                self.log_status(f"Export: {ext.upper()}")
+                out_path = filedialog.asksaveasfilename(
+                    parent=root,
+                    title=f"Export tank -- {entry['name']}",
+                    defaultextension=f".{ext}",
+                    initialfile=f"{default_stem}.{ext}",
+                    filetypes=[(entry['name'], f"*.{ext}"),
+                               ('All files', '*.*')],
+                )
+                if not out_path:
+                    self.log(f"Export {ext}: cancelled.")
+                    continue
+
+                # Output goes EXACTLY where the user picked it.  The
+                # texture sidecar folder lives next to the file, named
+                # '<stem>_textures/' (configured by collect_payload --
+                # see tankviewer/exporters/common.py).  This is the
+                # convention the rest of our pipeline + Blender expect:
+                #     <user_dir>/A14_T30.fbx
+                #     <user_dir>/A14_T30_textures/<tex>.dds
+                self.log(f"Export {ext}: {os.path.basename(out_path)}")
+                ok, msg = export_vehicle(
+                    self, out_path, blender_exe=blender_exe,
+                    on_log=lambda s, e=ext: print(f"[export:{e}] {s}"))
+                if ok:
+                    self.log(f"Export {ext}: DONE -- {msg}")
+                else:
+                    self.log_error(f"Export {ext}: FAILED -- {msg}")
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Component picker -- used by Save-Prim to choose which tank
+    # parts (Hull / Chassis / Turret / Gun) to write back to disk as
+    # .primitives_processed files.
+    # ------------------------------------------------------------------
+
+    # Display order + canonical key for each writable component.
+    _COMPONENT_ORDER = (
+        ('hull',    'Hull'),
+        ('chassis', 'Chassis'),
+        ('turret',  'Turret'),
+        ('gun',     'Gun'),
+    )
+
+    def _classify_meshes_by_component(self):
+        """Return {component_key: [Mesh, ...]} for every mesh in the
+        currently active set.  Component key matches mesh.component
+        (set by load_vehicle) -- one of 'hull' / 'chassis' / 'turret'
+        / 'gun' / '' (untagged).
+
+        Untagged meshes (FBX imports, standalone load_mesh, etc.) are
+        bucketed under the empty-string key so the caller can decide
+        whether to surface them.  In practice the Save-Prim dialog
+        ignores that bucket -- it only writes properly-tagged WoT
+        components.
+        """
+        out = {key: [] for key, _label in self._COMPONENT_ORDER}
+        out[''] = []
+        for m in self.meshes:
+            comp = getattr(m, 'component', '') or ''
+            if comp not in out:
+                out[''].append(m)
+            else:
+                out[comp].append(m)
+        return out
+
+    def _show_component_picker(self):
+        """Modal tkinter form for the Save Prim flow.  Two-section layout:
+
+            [ Components ]
+              [x] Hull       (N meshes)
+              [x] Chassis    (N meshes)
+              [x] Turret     (N meshes)
+              [x] Gun        (N meshes)
+            -----------------------------
+            [ Texture handling ]
+              (o) Extract Game textures
+              ( ) Use new textures...
+            -----------------------------
+                 [ Cancel ]   [ Continue ]
+
+        Defaults:
+            * Every component with >= 1 mesh starts ticked.
+            * Texture mode defaults to 'extract' (copy game textures
+              into res_mods at canonical paths).
+
+        When the user picks 'custom' AND clicks Continue, a folder
+        picker opens immediately so the chosen DDS folder is captured
+        before the form returns.
+
+        Returns:
+            dict with keys:
+                'components' : list[str] -- chosen component keys
+                'texture_mode': 'extract' | 'custom'
+                'custom_dir' : str | None -- only set when mode is
+                               'custom'; absolute path the user picked
+            On cancel, returns {'components': []}.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk, filedialog
+        except ImportError:
+            print("[save-prim] tkinter not available -- "
+                  "can't show component picker.")
+            return {'components': []}
+
+        groups = self._classify_meshes_by_component()
+
+        win = tk.Tk()
+        win.title('Save Prim -- pick components + texture mode')
+        try:
+            win.attributes('-topmost', True)
         except Exception:
             pass
+        win.resizable(False, False)
+        win.geometry('360x340')
 
-        if not out_path:
-            print("[export] cancelled.")
+        tk.Label(win,
+                 text='Tick the components to write back as\n'
+                      '.primitives_processed files.',
+                 justify='left', padx=12, pady=8).pack(fill='x')
+        ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
+
+        # ---- component checkboxes -------------------------------------
+        rows_frame = tk.Frame(win, padx=12, pady=8)
+        rows_frame.pack(fill='x')
+
+        vars_by_key = {}
+        for key, label in self._COMPONENT_ORDER:
+            n = len(groups.get(key, []))
+            present = n > 0
+            v = tk.BooleanVar(value=present)
+            vars_by_key[key] = v
+            text = (f"{label}    ({n} mesh{'es' if n != 1 else ''})"
+                    if present else
+                    f"{label}    (none loaded)")
+            cb = tk.Checkbutton(
+                rows_frame, text=text, variable=v,
+                anchor='w', justify='left',
+                state=('normal' if present else 'disabled'))
+            cb.pack(fill='x', anchor='w')
+
+        # ---- separator + texture-mode radios --------------------------
+        ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
+        tex_label = tk.Label(win, text='Textures:',
+                             justify='left', padx=12, pady=4)
+        tex_label.pack(fill='x', anchor='w')
+
+        tex_frame = tk.Frame(win, padx=12, pady=4)
+        tex_frame.pack(fill='x')
+        tex_mode = tk.StringVar(value='extract')
+        tk.Radiobutton(
+            tex_frame,
+            text='Extract Game textures  (copy from pkg, canonical paths)',
+            variable=tex_mode, value='extract',
+            anchor='w', justify='left').pack(fill='x', anchor='w')
+        tk.Radiobutton(
+            tex_frame,
+            text='Use new textures...    (pick a folder of replacement DDS)',
+            variable=tex_mode, value='custom',
+            anchor='w', justify='left').pack(fill='x', anchor='w')
+
+        result = {'components': []}
+
+        def _confirm():
+            chosen = []
+            for key, _label in self._COMPONENT_ORDER:
+                if vars_by_key[key].get():
+                    chosen.append(key)
+            mode = tex_mode.get()
+
+            # When the user picked 'custom', prompt for the DDS folder
+            # right now.  Cancelling the folder picker = cancel the
+            # whole save (rather than silently falling back to extract,
+            # which would surprise the user).
+            custom_dir = None
+            if mode == 'custom':
+                # withdraw the form briefly so the folder dialog isn't
+                # visually layered awkwardly on top
+                try:
+                    win.withdraw()
+                except Exception:
+                    pass
+                custom_dir = filedialog.askdirectory(
+                    parent=win,
+                    title='Save Prim -- pick folder of replacement DDS files',
+                    mustexist=True)
+                if not custom_dir:
+                    print("[save-prim] custom-textures folder picker "
+                          "cancelled -- aborting save")
+                    win.destroy()
+                    return
+
+            result['components']   = chosen
+            result['texture_mode'] = mode
+            result['custom_dir']   = custom_dir
+            win.destroy()
+
+        def _cancel():
+            result['components'] = []
+            win.destroy()
+
+        btn_frame = tk.Frame(win, padx=12, pady=8)
+        btn_frame.pack(fill='x', side='bottom')
+        tk.Button(btn_frame, text='Cancel', width=10,
+                  command=_cancel).pack(side='right', padx=4)
+        tk.Button(btn_frame, text='Continue', width=10,
+                  command=_confirm).pack(side='right', padx=4)
+        win.protocol('WM_DELETE_WINDOW', _cancel)
+        win.mainloop()
+        return result
+
+    def _on_save_prim_clicked(self):
+        """Action-button callback for the 'Save Prim' button.
+
+        Writes the chosen tank components back as
+        .primitives_processed files into the configured res_mods
+        folder, mirroring the pkg's internal directory layout.  WoT
+        scans `res_mods/<version>/` ahead of `res/packages/` at load
+        time, so a file dropped at the same canonical path becomes an
+        automatic override.
+
+        Workflow:
+            1. Bail out if nothing's loaded.
+            2. Bail out if res_mods isn't configured (Set Paths first).
+            3. Show the component picker (Hull / Chassis / Turret / Gun)
+               + texture-mode radios (Extract Game / Use new).
+            4. For each ticked component:
+               a) Compose dest path under res_mods + write the
+                  .primitives_processed (currently a stub).
+               b) Walk the matching .visual_processed and copy every
+                  referenced texture into res_mods at its canonical
+                  path.  Custom-texture mode prefers files in the
+                  user's folder by basename, falling back to the pkg
+                  original.
+
+        File names match the originals -- no visual rewrite needed
+        since each texture lands at the same canonical path the
+        visual already references.
+        """
+        # Fresh console for this action.
+        self.log_clear(status='Save Prim')
+
+        if not self.meshes:
+            self.log_error("Save Prim: no tank loaded -- pick one first.")
             return
 
-        # 4. Spawn Blender (synchronous; blocks the render loop briefly)
-        ok, msg = export_vehicle(self, out_path, blender_exe=blender_exe,
-                                  on_log=lambda s: print(f"[export] {s}"))
-        if ok:
-            print(f"[export] DONE -- {msg}")
-        else:
-            print(f"[export] FAILED -- {msg}")
+        # res_mods must be configured -- the whole point of this
+        # button is writing into the WoT install's override path.
+        res_mods = (self._cfg.get('res_mods') or '').strip()
+        if not res_mods or not os.path.isdir(res_mods):
+            self.log_error(
+                f"Save Prim: res_mods not configured.  Open Set Paths "
+                f"and point at res_mods/<current version>/ first.")
+            return
+        self.log(f"res_mods: {os.path.basename(res_mods)}")
+
+        # Heads-up when the user is writing the unmodified PKG meshes
+        # straight back -- per project policy, real Save Prim usage
+        # comes after an FBX import (the FBX has the user's edits).
+        # Saving the active PKG set IS still a valid operation -- it
+        # produces the same bytes the game already has and is useful
+        # for round-trip testing the encoder.
+        active = getattr(self, '_active_set_name', 'pkg')
+        fbx_loaded = bool(getattr(self._fbx_set, 'meshes', None))
+        if active == 'pkg' and not fbx_loaded:
+            self.log("Note: round-trip test -- re-encoding the PKG "
+                     "meshes (same data the game already has).")
+        elif active == 'pkg' and fbx_loaded:
+            self.log("Note: active set is PKG.  Flip to FBX before "
+                     "Save Prim if you want the edited geometry written.")
+
+        from .writers import write_primitives, PrimitivesWriteOptions
+
+        # Pick which components to write + texture handling
+        groups = self._classify_meshes_by_component()
+        picked = self._show_component_picker()
+        chosen      = picked.get('components', [])
+        texture_mode = picked.get('texture_mode', 'extract')
+        custom_dir   = picked.get('custom_dir')
+        if not chosen:
+            self.log("Save Prim: cancelled.")
+            return
+        self.log_status(f"Save Prim: {', '.join(chosen)}")
+        self.log(f"components: {', '.join(chosen)}  "
+                 f"textures={texture_mode}")
+
+        opts = PrimitivesWriteOptions()
+        for key in chosen:
+            label = dict(self._COMPONENT_ORDER)[key]
+            meshes_for_comp = groups.get(key, [])
+            if not meshes_for_comp:
+                self.log(f"{label}: no meshes -- skipped")
+                continue
+
+            # All meshes in a component share one source file.  Pull
+            # the canonical pkg-relative path off any of them.
+            pkg_path = ''
+            for m in meshes_for_comp:
+                p = getattr(m, 'primitives_zip', '')
+                if p:
+                    pkg_path = p
+                    break
+            if not pkg_path:
+                print(f"[save-prim] {label}: no source pkg path on any "
+                      f"mesh (was the tank loaded via load_vehicle?) -- "
+                      f"skipped")
+                continue
+
+            # 1. Compose .primitives_processed output and call writer
+            rel = pkg_path.replace('/', os.sep).lstrip(os.sep)
+            out_path = os.path.join(res_mods, rel)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            print(f"[save-prim] {label}: writing -> {out_path}")
+            ok, msg = write_primitives(meshes_for_comp, out_path,
+                                        options=opts)
+            # Surface a clear per-component success/fail line in the
+            # in-app console so the user can see at a glance which
+            # parts wrote and which didn't.  Stdout gets the same.
+            if ok:
+                self.log(f"{label}: written successfully -- {msg}")
+                print(f"[save-prim] {label}: DONE -- {msg}")
+            else:
+                self.log_error(f"{label}: FAILED -- {msg}")
+                print(f"[save-prim] {label}: FAILED -- {msg}")
+
+            # 2. Save matching textures from the visual into res_mods
+            #    at their canonical paths.  Independent of whether the
+            #    primitives writer succeeded -- worth doing the texture
+            #    copy now so the user has a partial mod skeleton even
+            #    while the encoder is being built.
+            visual_zip = pkg_path.replace('.primitives_processed',
+                                          '.visual_processed')
+            self._save_component_textures(
+                label, visual_zip, res_mods,
+                texture_mode, custom_dir)
+
+    def _save_component_textures(self, label, visual_zip,
+                                  res_mods, texture_mode, custom_dir):
+        """Copy every texture referenced by `visual_zip` into res_mods.
+
+        Args:
+            label         (str): component label for log ('Hull' etc.)
+            visual_zip    (str): canonical pkg path of the .visual_processed
+            res_mods      (str): destination root (the
+                                 res_mods/<version>/ folder)
+            texture_mode  (str): 'extract' (always pkg) or 'custom'
+                                 (prefer custom_dir, fall back to pkg)
+            custom_dir    (str | None): folder of user-supplied DDS
+                                 files (basename match against texture)
+        """
+        if self._pkg_extractor is None:
+            print(f"[save-prim] {label}: PkgExtractor not configured "
+                  f"-- can't extract textures")
+            return
+
+        # Pull the visual to a local file
+        local_visual = self._pkg_extractor.extract(visual_zip)
+        if not local_visual or not os.path.isfile(local_visual):
+            print(f"[save-prim] {label}: visual not found in pkg "
+                  f"({visual_zip}) -- no texture copy")
+            return
+
+        # Decode the visual to extract every texture reference
+        try:
+            with open(local_visual, 'rb') as fh:
+                blob = fh.read()
+            from .common import decode_bwxml, is_bwxml
+            xml = (decode_bwxml(blob) if is_bwxml(blob)
+                   else blob.decode('utf-8', errors='replace'))
+        except Exception as exc:
+            print(f"[save-prim] {label}: visual decode failed: {exc}")
+            return
+
+        # Every <Texture>...</Texture> element holds a canonical
+        # pkg-relative path.  Dedupe -- many materials share the same
+        # AM/NM/AO/GMM texture across multiple primitive groups.
+        import re
+        textures = sorted(set(
+            m.group(1).strip()
+            for m in re.finditer(r'<Texture>([^<]+)</Texture>', xml)))
+        if not textures:
+            print(f"[save-prim] {label}: no <Texture> entries in visual "
+                  f"-- nothing to copy")
+            return
+        print(f"[save-prim] {label}: {len(textures)} texture(s) referenced "
+              f"by visual")
+
+        # Per-texture copy.  Custom mode tries the user's folder first
+        # (basename match), falls back to extract from pkg.
+        import shutil
+        copied = 0
+        skipped = 0
+        for tex_zip in textures:
+            dest_rel = tex_zip.replace('/', os.sep).lstrip(os.sep)
+            dest = os.path.join(res_mods, dest_rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+            src = None
+            origin = ''
+            if texture_mode == 'custom' and custom_dir:
+                cand = os.path.join(custom_dir, os.path.basename(tex_zip))
+                if os.path.isfile(cand):
+                    src = cand
+                    origin = 'custom'
+
+            if src is None:
+                # Fall back to pkg extraction.  resolve_hd_path picks
+                # _hd over SD when both are present, mirroring the
+                # game's load-time preference -- ship the same flavour
+                # the user is currently rendering.
+                from .loaders import VisualLoader
+                resolved, _used_hd = VisualLoader.resolve_hd_path(
+                    tex_zip, res_mods, self._pkg_extractor)
+                if resolved and os.path.isfile(resolved):
+                    src = resolved
+                    origin = 'pkg'
+
+            if src is None:
+                print(f"  [skip] {tex_zip}  (not found in pkg or custom)")
+                skipped += 1
+                continue
+            try:
+                shutil.copy2(src, dest)
+                copied += 1
+            except Exception as exc:
+                print(f"  [fail] {tex_zip}  ({exc})")
+                skipped += 1
+                continue
+            print(f"  [{origin}] {tex_zip}")
+        print(f"[save-prim] {label}: textures copied={copied} skipped={skipped}")
 
     # ------------------------------------------------------------------
     def _on_import_clicked(self):
         """Action-button callback for the 'Import' button.
 
-        Opens a file picker, spawns Blender to read the chosen FBX/GLB/
-        GLTF/OBJ, and reconstructs the scene from the returned payload.
-        Round-trip companion to _on_export_clicked.
+        Workflow mirror of _on_export_clicked:
+            1. Verify Blender is reachable.
+            2. Show the format-picker form (only one format used on
+               import even if the user tries to tick several -- you
+               can only open one file at a time).
+            3. Open a filtered file dialog and spawn Blender to read it.
         """
+        # Fresh console for this action.
+        self.log_clear(status='Import')
         try:
             import tkinter as tk
             from tkinter import filedialog
         except ImportError:
-            print("[import] tkinter not available -- can't show file dialog.")
+            self.log_error("Import: tkinter not available.")
             return
-        from .exporters import import_vehicle, find_blender_executable
+        from .importers import import_vehicle, find_blender_executable
+        from . import io_formats
 
         blender_exe = (self._cfg.get('blender_exe') or '').strip() or None
         if not find_blender_executable(blender_exe):
-            print("[import] Blender not found.  Install Blender or set "
-                  "config['blender_exe'].")
+            self.log_error("Import: Blender not found.  Set blender_exe in "
+                           "config or install Blender.")
             return
+
+        # Format picker -- single-select for import (the helper
+        # narrows multi-tick down to the first entry).
+        chosen_exts = self._show_format_picker('import')
+        if not chosen_exts:
+            self.log("Import: cancelled.")
+            return
+        ext = chosen_exts[0]
+        entry = io_formats.lookup(ext)
+        if not entry or not entry.get('import_'):
+            self.log_error(f"Import {ext!r}: not yet implemented.")
+            return
+        self.log_status(f"Import: {ext.upper()}")
+        self.log(f"Import format: {ext}")
 
         root = tk.Tk()
         root.withdraw()
@@ -1221,14 +1939,9 @@ class Viewer:
             pass
         in_path = filedialog.askopenfilename(
             parent=root,
-            title="Import tank from...",
-            filetypes=[
-                ("FBX (Filmbox)",  "*.fbx"),
-                ("glTF binary",    "*.glb"),
-                ("glTF separate",  "*.gltf"),
-                ("Wavefront OBJ",  "*.obj"),
-                ("All files",      "*.*"),
-            ],
+            title=f"Import tank -- {entry['name']}",
+            filetypes=[(entry['name'], f"*.{ext}"),
+                       ('All files', '*.*')],
         )
         try:
             root.destroy()
@@ -1250,6 +1963,82 @@ class Viewer:
               f"{os.path.basename(in_path)}")
 
     # ------------------------------------------------------------------
+    def _on_rebuild_itemlist_clicked(self):
+        """Action-button callback for the 'ItemList' tool button.
+
+        Rebuilds `TheItemList.xml` from scratch by walking every kept
+        pkg in the configured WoT install.  After a successful write,
+        re-parses the new file into the running PkgExtractor so the
+        current session sees every freshly-discovered entry without
+        needing a restart.
+
+        Same logic as `cust_tools/rebuild_itemlist.py` -- imported
+        directly so we don't shell out to a subprocess.  The user sees
+        per-pkg progress in the in-app console; total wall time is
+        ~3 seconds on a typical install.
+        """
+        # Fresh console buffer for this action.
+        self.log_clear(status='ItemList')
+
+        ext = self._pkg_extractor
+        if ext is None:
+            self.log_error("ItemList: PkgExtractor not configured -- "
+                           "open Set Paths first.")
+            return
+
+        pkg_dir  = getattr(ext, 'pkg_dir', None)
+        out_path = getattr(ext, '_lookup_xml_path', None)
+        if not pkg_dir or not os.path.isdir(pkg_dir):
+            self.log_error(f"ItemList: pkg dir not found: {pkg_dir}")
+            return
+        if not out_path:
+            self.log_error("ItemList: no lookup XML path on PkgExtractor.")
+            return
+
+        try:
+            from cust_tools.rebuild_itemlist import (
+                list_pkgs, build_index, write_itemlist)
+        except Exception as exc:
+            self.log_error(f"ItemList: rebuild module import failed: {exc}")
+            return
+
+        self.log(f"Rebuilding {os.path.basename(out_path)} from "
+                 f"{pkg_dir} ...")
+        try:
+            pkgs = list_pkgs(pkg_dir, include_all=False)
+            self.log(f"  scanning {len(pkgs)} pkg archive(s) "
+                     f"(map / event / audio bundles excluded)")
+            entries, stats = build_index(pkgs, allowed_exts=None,
+                                         verbose=False)
+            self.log(f"  pkgs scanned : {stats['pkgs_scanned']}/"
+                     f"{stats['pkgs_total']}")
+            self.log(f"  entries seen : {stats['entries_seen']:,}")
+            self.log(f"  unique files : {len(entries):,}  "
+                     f"({stats['duplicates']:,} cross-pkg collisions)")
+            self.log(f"  scan time    : {stats['elapsed_s']:.2f} s")
+
+            self.log(f"  writing {os.path.basename(out_path)} ...")
+            import time as _t
+            t0 = _t.perf_counter()
+            write_itemlist(entries, out_path)
+            wsec = _t.perf_counter() - t0
+            size_mb = os.path.getsize(out_path) / (1024.0 * 1024.0)
+            self.log(f"  -> {size_mb:.1f} MB in {wsec:.2f} s")
+        except Exception as exc:
+            self.log_error(f"ItemList: rebuild failed: {exc}")
+            return
+
+        # Refresh the running PkgExtractor's in-memory lookup so the
+        # next extract() call sees the freshly-indexed entries without
+        # a session restart.
+        try:
+            ext.reload_lookup()
+            self.log(f"PkgExtractor reloaded: "
+                     f"{len(ext._file_to_pkg):,} entries indexed")
+        except Exception as exc:
+            self.log_error(f"ItemList: lookup reload failed: {exc}")
+
+    # ------------------------------------------------------------------
     def _on_compare_clicked(self):
         """Action-button callback for the 'Compare' button.
 
@@ -1262,19 +2051,23 @@ class Viewer:
         scrollable monospace grid.  Always opens fresh -- closing the
         compare window doesn't free anything since tk owns the lifecycle.
         """
+        # Fresh in-app console buffer for this action.
+        self.log_clear(status='Compare')
+
         fbx = self._fbx_set
         pkg = self._pkg_set
         if not fbx.is_loaded() and not pkg.is_loaded():
-            print("[compare] Both sets are empty -- load a tank or import "
-                  "an FBX first.")
+            self.log_error("Compare: both sets are empty -- load a tank "
+                           "or import an FBX first.")
             return
 
         try:
             import tkinter as tk
             from tkinter import ttk, font as tkfont
         except ImportError:
-            print("[compare] tkinter not available -- can't show window.")
-            # Fall back to a console dump
+            self.log_error("Compare: tkinter not available -- can't show "
+                           "window.  Falling back to console dump only.")
+            # Fall back to console-only dump
             self._print_compare_to_console()
             return
 
@@ -1445,34 +2238,65 @@ class Viewer:
         return rows
 
     def _print_compare_to_console(self, rows=None):
-        """Dump the compare grid to stdout -- used as fallback when
-        tkinter is unavailable, and always called alongside the dialog
-        so the same data is visible in the terminal log.
+        """Dump the compare grid into the in-app console panel.
+
+        Layout (one mesh per BLOCK, two lines + blank):
+            #N  FBX  <name>   v=...  f=...  inds=...  UV2=Y  Col=N  fmt=...
+            #N  PKG  <name>   v=...  f=...  inds=...  UV2=Y  Col=N  fmt=...
+            <blank>
+
+        When the FBX and PKG counts disagree on that row, the FBX
+        line gets a burnt-orange background (white text) so the
+        user can scan for misalignment without reading numbers.
+        Burnt orange matches the rest of the app's accent colour.
         """
         if rows is None:
             rows = self._build_compare_rows()
-        print("\n" + "=" * 100)
-        print("COMPARE: FBX (imported) vs PKG (WoT-loaded)")
-        print("=" * 100)
-        hdr = (f"{'#':>3}  "
-               f"{'FBX name':22}{'verts':>8}{'faces':>8}{'inds':>8}"
-               f"{'UV2':>5}{'Col':>5}  {'fmt':<22}  |  "
-               f"{'PKG name':22}{'verts':>8}{'faces':>8}{'inds':>8}"
-               f"{'UV2':>5}{'Col':>5}  {'fmt':<22}")
-        print(hdr)
-        print("-" * len(hdr))
+
+        # Burnt orange (#CC5500 = 204,85,0) normalised to 0..1 for the
+        # bg quad.  White foreground reads cleanly against it.
+        BG_BURNT = (204 / 255.0, 85 / 255.0, 0 / 255.0)
+        FG_WHITE = (255, 255, 255)
+
+        self.log("=" * 80)
+        self.log("COMPARE: FBX (imported) vs PKG (WoT-loaded)")
+        self.log("=" * 80)
+
+        n_mismatch = 0
+        n_total    = len(rows)
         for r in rows:
-            mark = '!' if r['mismatch'] else ' '
-            print(f"{r['idx']:>3}{mark} "
-                  f"{str(r['fbx_name'])[:22]:22}"
-                  f"{str(r['fbx_v']):>8}{str(r['fbx_f']):>8}{str(r['fbx_i']):>8}"
-                  f"{str(r['fbx_uv2']):>5}{str(r['fbx_col']):>5}  "
-                  f"{str(r['fbx_fmt'])[:22]:<22}  |  "
-                  f"{str(r['pkg_name'])[:22]:22}"
-                  f"{str(r['pkg_v']):>8}{str(r['pkg_f']):>8}{str(r['pkg_i']):>8}"
-                  f"{str(r['pkg_uv2']):>5}{str(r['pkg_col']):>5}  "
-                  f"{str(r['pkg_fmt'])[:22]:<22}")
-        print("=" * 100)
+            mismatch = bool(r.get('mismatch'))
+
+            def _fmt(side, name, v, f, i, uv2, col, fmt):
+                return (f"#{r['idx']:>2}  {side}  "
+                        f"{str(name)[:22]:22}  "
+                        f"v={str(v):>6}  f={str(f):>6}  inds={str(i):>7}  "
+                        f"UV2={uv2}  Col={col}  fmt={str(fmt)[:22]}")
+
+            fbx_line = _fmt('FBX',
+                            r['fbx_name'], r['fbx_v'], r['fbx_f'],
+                            r['fbx_i'],    r['fbx_uv2'], r['fbx_col'],
+                            r['fbx_fmt'])
+            pkg_line = _fmt('PKG',
+                            r['pkg_name'], r['pkg_v'], r['pkg_f'],
+                            r['pkg_i'],    r['pkg_uv2'], r['pkg_col'],
+                            r['pkg_fmt'])
+
+            # FBX row: highlight on mismatch.  PKG row stays default.
+            if mismatch:
+                self.log(fbx_line, color=FG_WHITE, bg_color=BG_BURNT)
+                n_mismatch += 1
+            else:
+                self.log(fbx_line)
+            self.log(pkg_line)
+            self.log('')   # blank separator between mesh blocks
+
+        self.log("=" * 80)
+        # Header status reflects the result at a glance.
+        if n_mismatch:
+            self.log_status(f"Compare: {n_mismatch}/{n_total} mismatch")
+        else:
+            self.log_status(f"Compare: {n_total} rows, all match")
 
     def _on_paths_saved(self, values):
         """Called when the user clicks Save in the paths dialog.
@@ -1503,6 +2327,12 @@ class Viewer:
                 pass
             self._pkg_extractor = None
         self._init_pkg_extractor_early()
+
+        # Re-bind the armor-colour loader to the new extractor and
+        # discard its cache so the next load_vehicle re-parses
+        # base_paints.xml from the freshly configured WoT install.
+        from .armor_colors import ArmorColorLoader
+        self._armor_loader = ArmorColorLoader(self._pkg_extractor)
 
         # Rebuild the tier-tree array against the new installation.
         # _build_all_tier_trees handles cleanup of the previously-cached
@@ -1779,6 +2609,10 @@ class Viewer:
             return
 
         print(f"[viewer] building {len(self.TREE_TIER_TABS)} tier trees...")
+        # Roman-numeral tier labels for the splash log -- much more
+        # readable than '1' / '2' / ... and matches the in-app tab labels.
+        _ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII',
+                  'IX', 'X', 'XI']
         for i, tier_str in enumerate(self.TREE_TIER_TABS):
             try:
                 tier = int(tier_str)
@@ -1794,7 +2628,21 @@ class Viewer:
                 self.render()
             except Exception as exc:
                 print(f"[viewer] progress render failed: {exc}")
-            self._tier_tree_cache[i] = self._build_tier_tree(tier)
+
+            # Splash status: per-tier line so the user sees the build
+            # advancing one tier at a time.
+            roman = _ROMAN[i] if 0 <= i < len(_ROMAN) else str(tier)
+            self._splash_status(f"  Tier {roman} ({tier_str}) -- "
+                                f"scanning vehicle XMLs...")
+
+            tree = self._build_tier_tree(tier)
+            self._tier_tree_cache[i] = tree
+
+            # Count leaf rows so the user sees a real "found N tanks"
+            # number rather than a generic "done" -- helps spot when a
+            # tier is suspiciously empty (e.g. mod messed something up).
+            leaf_count = self._count_tree_leaves(tree)
+            self._splash_status(f"  Tier {roman}: {leaf_count} tank(s)")
 
         # Done -- clear the indicator and snap to the active tab's tree
         self.ui.tab_bar.building_index = -1
@@ -1802,6 +2650,36 @@ class Viewer:
         if 0 <= idx < len(self._tier_tree_cache):
             self.ui.tree = self._tier_tree_cache[idx]
         print("[viewer] tier trees ready")
+        # Final splash summary
+        total = sum(self._count_tree_leaves(t)
+                    for t in self._tier_tree_cache if t is not None)
+        self._splash_status(f"Tank tree built: {total} tanks across "
+                            f"{len(self.TREE_TIER_TABS)} tiers")
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _count_tree_leaves(tree):
+        """Count terminal leaves (tank rows) in a UITreeView -- recursive
+        walk over node.children since branches (nation rows) aren't
+        themselves loadable.  Used by the splash log to surface a real
+        per-tier tank count instead of a generic "done".  Returns 0 on
+        any failure (defensive -- splash status should never crash startup).
+        """
+        if tree is None:
+            return 0
+        try:
+            def _walk(node):
+                kids = getattr(node, 'children', None) or []
+                if not kids:
+                    return 1
+                return sum(_walk(c) for c in kids)
+            roots = getattr(tree, 'roots', None)
+            if roots is None:
+                # Some trees expose .nodes instead of .roots; fall back.
+                roots = getattr(tree, 'nodes', None) or []
+            return sum(_walk(r) for r in roots)
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------
     # Left info panel (tank stats / description, collapsible sections)
@@ -2023,6 +2901,9 @@ class Viewer:
                 except Exception:
                     pass
 
+            # Fresh console for this load action.  Header tag tells the
+            # user which tank we're crunching on right now.
+            self.log_clear(status=f'Load Tank: {tank_label}')
             _status(f"Loading {tank_label}...")
             self._load_tank_with_options(
                 local_path,
@@ -2143,6 +3024,30 @@ class Viewer:
 
         self._thumb_path_cache[base] = found
         return found
+
+    # ------------------------------------------------------------------
+    def _splash_status(self, text):
+        """Update the splash-screen status line and immediately
+        repaint so the user sees the change.  Pumps the OS event
+        queue too -- without that, Windows can mark the app as
+        "Not Responding" mid-startup if a single phase takes too long.
+
+        No-op once the splash has been torn down (after run() starts),
+        so it's safe to leave these calls in any code path; they only
+        do work during the init window.
+        """
+        if not self.splash:
+            return
+        try:
+            self.splash.set_status(text)
+            self.splash.render()
+            pygame.display.flip()
+            # Drain pending OS messages so the window stays interactive.
+            # event.pump() is the no-handler equivalent of event.get()
+            # and is exactly what's recommended for long-running init.
+            pygame.event.pump()
+        except Exception as exc:
+            print(f"[viewer] splash status update failed: {exc}")
 
     def _set_loaded_thumbnail(self, xml_basename):
         """Replace the persistent (loaded-tank) thumbnail + display label.
@@ -2898,6 +3803,17 @@ class Viewer:
         os.system('cls' if os.name == 'nt' else 'clear')
         _status("Parsing vehicle XML...")
 
+        # Reset PkgExtractor timing counters so the summary at the end
+        # shows JUST this load (instead of cumulative across the session).
+        # Cheap; just clears a Python list.
+        if self._pkg_extractor is not None:
+            self._pkg_extractor.reset_timing()
+        # Wall-clock timing of the full load_vehicle so we can compare
+        # the PkgExtractor portion against the rest of the work
+        # (texture decode + GPU upload + GL VAO build).
+        import time as _time
+        _load_t0 = _time.perf_counter()
+
         # Native WoT loads always populate the PKG set.  Switch FIRST so
         # _clear_scene() only frees the previous PKG geometry; any
         # currently-loaded FBX in the FBX set is preserved.
@@ -2913,13 +3829,22 @@ class Viewer:
         variant = 'CRASHED' if damaged else 'undamaged'
         print(f"\nLoading vehicle from {xml_path} ({variant}) ...")
 
-        # Detect nation from path and look up armor color
+        # Detect nation from path + look up armor colour.  Pulls from
+        # WoT's own base_paints.xml via ArmorColorLoader -- DEFAULTS
+        # only, not the player-customisation paints.  Tanks listed in
+        # the base-paint exclude filter (Type 59 Gold, Skorpion BF,
+        # etc.) get None back from .get() and render untinted because
+        # their unique colour is baked into the texture itself.
         nation = _nation_from_xml_path(xml_path)
-        self._armor_color = _NATION_ARMOR.get(nation)
+        tank_basename = os.path.splitext(os.path.basename(xml_path))[0]
+        self._armor_color = self._armor_loader.get(nation, tank_basename)
         if self._armor_color:
-            print(f"  nation='{nation}'  armor_color(sRGB norm)={tuple(f'{v:.4f}' for v in self._armor_color)}")
+            print(f"  nation='{nation}'  tank='{tank_basename}'  "
+                  f"armor_color(sRGB norm)="
+                  f"{tuple(f'{v:.4f}' for v in self._armor_color)}")
         else:
-            print(f"  nation='{nation}'  (no armor color entry)")
+            print(f"  nation='{nation}'  tank='{tank_basename}'  "
+                  f"(no armor tint -- excluded or unknown nation)")
 
         try:
             # --- res_mods root: config override -> auto-detect from XML path ----
@@ -3070,6 +3995,8 @@ class Viewer:
                                 mesh.diffuse_path   = resolved
                             else:
                                 mesh.diffuse_tex_id = TextureLoader.create_placeholder(0.7)
+                                self.log_error(f"missing diffuse: "
+                                               f"{os.path.basename(tex['diffuse'])}")
                         else:
                             mesh.diffuse_tex_id = TextureLoader.create_placeholder(0.7)
 
@@ -3082,6 +4009,8 @@ class Viewer:
                                 mesh.normal_path   = resolved
                             else:
                                 mesh.normal_tex_id = TextureLoader.create_placeholder(0.5)
+                                self.log_error(f"missing normal: "
+                                               f"{os.path.basename(tex['normal'])}")
                         else:
                             mesh.normal_tex_id = TextureLoader.create_placeholder(0.5)
 
@@ -3146,6 +4075,23 @@ class Viewer:
                         # Apply component world offset
                         mesh.model_matrix = model_mat
 
+                        # Tag with the WoT component this mesh belongs to.
+                        # Read by the .primitives_processed writer to
+                        # group meshes back into per-component output
+                        # files (Hull / Chassis / Turret / Gun).  The
+                        # label here comes straight from the components
+                        # loop above, lower-cased so the picker dialog
+                        # and the writer share one canonical key.
+                        mesh.component = label.lower()
+                        # Remember the in-pkg path so Save-Prim can
+                        # write the output to res_mods/<version>/<same
+                        # path>, making the file an automatic override
+                        # the game picks up at next launch.  All
+                        # meshes belonging to a given component share
+                        # one source file -- they all get the same
+                        # path here.
+                        mesh.primitives_zip = comp.get('primitives_zip', '')
+
                         mesh.build_vao()
                         self.meshes.append(mesh)
                         all_positions.append(mesh.positions + offset)
@@ -3165,7 +4111,34 @@ class Viewer:
 
             total_v = sum(len(m.positions) for m in self.meshes)
             total_i = sum(len(m.indices)   for m in self.meshes)
+            xml_basename_for_log = os.path.basename(xml_path).rsplit('.', 1)[0]
             print(f"\nLoaded {len(self.meshes)} mesh groups: {total_v} verts, {total_i} indices")
+            # In-app console: short / human-readable summary
+            wall_ms = (_time.perf_counter() - _load_t0) * 1000.0
+            self.log(f"Loaded {xml_basename_for_log}: "
+                     f"{len(self.meshes)} meshes, {total_v} verts, "
+                     f"{total_i // 3} faces  ({wall_ms:.0f} ms)")
+
+            # PkgExtractor timing breakdown -- shows lookup hits vs scan
+            # fallbacks + the slowest individual ops.  Helps explain
+            # the "first chassis is slow" pattern: the slow ones are
+            # almost always scan-fallback hits where TheItemList.xml
+            # didn't index that file, so we have to open one or more
+            # pkg namelists to find it.  Subsequent loads hit the
+            # in-memory namelist cache and are essentially free.
+            if self._pkg_extractor is not None:
+                summary, totals = self._pkg_extractor.summarize_timing(top_n=8)
+                for line in summary:
+                    print(f"[load:timing] {line}")
+                    self.log(line)
+                # Flush any queued TheItemList.xml additions in ONE
+                # batched read+write.  Without this batching we used
+                # to rewrite the 15 MB lookup XML once per scan-
+                # fallback discovery -- 20-30 times during a fresh
+                # tank load, accounting for most of the multi-second
+                # first-load slowness.  After the flush, every newly-
+                # discovered file is also persisted across sessions.
+                self._pkg_extractor.flush_persisted_entries()
 
             # Install the persistent thumbnail for the now-loaded tank
             xml_basename = os.path.basename(xml_path).rsplit('.', 1)[0]
@@ -3232,7 +4205,12 @@ class Viewer:
             return
         setattr(self, attr, btn.active)
         if attr == 'wireframe':
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE if btn.active else GL_FILL)
+            # Just flip the flag -- the next render() pass picks it up
+            # and handles the overlay-vs-solid logic.  We DON'T call
+            # glPolygonMode here any more because the wireframe is now
+            # an overlay pass on top of the solid render, not a global
+            # rasteriser-mode replacement.
+            pass
 
     # ------------------------------------------------------------------
     def _layout_widgets(self):
@@ -3261,46 +4239,105 @@ class Viewer:
         BTN_GAP_X    = 6
         BTN_GAP_Y    = 4
 
-        # Three columns of toggles + action buttons stacked below.
-        # Set Paths spans cols 0..1; Meshes occupies col 2.  Export
-        # gets its own full-width row at the bottom of the button block
-        # so it visually reads as the "do something with what's loaded"
-        # action distinct from the live-state toggles above.
-        button_grid = {
-            'Grid':      (0, 0),
-            'Axes':      (1, 0),
-            'Light':     (2, 0),
-            'Orbit':     (0, 1),
-            'Skybox':    (1, 1),
-            'Wireframe': (2, 1),
-            'Set Paths': (0, 2),
-            'Meshes':    (2, 2),
-            # Row 3: Import on the left half, Export on the right.
-            'Import':    (0, 3),
-            'Export':    (2, 3),
-            # Row 4: Flip on the left half, Compare on the right.
-            # Flip toggles which MeshSet (FBX vs PKG) is rendered;
-            # Compare opens the per-part stats side-by-side dialog.
-            'Flip':      (0, 4),
-            'Compare':   (2, 4),
-        }
+        # Three columns of buttons grouped by category.  Each group has
+        # a small header label drawn above its row(s) so the user can
+        # tell at a glance where to look for "show / hide stuff" vs
+        # "read / write files" vs "rebuild caches and other utilities".
+        #
+        # Group ordering (top -> bottom):
+        #   UI    -- display toggles + windows the user opens to look
+        #            at the loaded tank from a different angle.
+        #   IO    -- everything that touches the disk: the Set Paths
+        #            configuration dialog, FBX/glTF/OBJ Import / Export,
+        #            and the WoT-native Save Prim writer.
+        #   Tools -- batch / one-shot utilities that don't fit the other
+        #            two buckets.  Currently just the ItemList rebuild;
+        #            future round-trip self-test, diagnostics, etc. land
+        #            here.
+        #
+        # Each row is (label, col, span).  span=3 means full-width
+        # (cols 0..2), span=2 spans cols 0..1.  Group order in the
+        # dict determines vertical stacking.
+        button_groups = [
+            ('UI', [
+                ('Grid',      0, 1),
+                ('Axes',      1, 1),
+                ('Light',     2, 1),
+                ('Orbit',     0, 1),
+                ('Skybox',    1, 1),
+                ('Wireframe', 2, 1),
+                ('Meshes',    0, 1),
+                ('Flip',      1, 1),
+                ('Compare',   2, 1),
+            ]),
+            ('IO', [
+                ('Set Paths', 0, 3),
+                ('Import',    0, 2),
+                ('Export',    2, 1),
+                ('Save Prim', 0, 3),
+            ]),
+            ('Tools', [
+                ('ItemList',  0, 3),
+            ]),
+        ]
+
+        # Section-header label: rendered as a single line of soft-grey
+        # text above each group's first row, with a thin gap below.
+        SECTION_LABEL_H   = 16    # vertical reserve for the header text
+        SECTION_GAP_AFTER = 2     # tight tuck under the label
+
+        # Re-create the section labels each layout pass -- text textures
+        # are owned by UIManager.panel_labels and freed in clear_panel_labels.
+        self.ui.clear_panel_labels()
+
         btn_by_label = {b.label: b for b in self.ui.buttons}
-        for label, (col, row) in button_grid.items():
-            btn = btn_by_label.get(label)
-            if not btn:
-                continue
-            btn.x = BTN_PAD_X + col * (BTN_W + BTN_GAP_X)
-            btn.y = BTN_PAD_Y + row * (BTN_H + BTN_GAP_Y)
-            # Wide buttons span multiple columns
-            if label == 'Set Paths':
-                btn.w = BTN_W * 2 + BTN_GAP_X
-            elif label == 'Import':
-                # Import spans cols 0..1
-                btn.w = BTN_W * 2 + BTN_GAP_X
-            elif label == 'Flip':
-                # Flip spans cols 0..1 to mirror Import directly above it
-                btn.w = BTN_W * 2 + BTN_GAP_X
-            # Export and Compare stay single-column at col 2
+        # Walk groups from top to bottom, packing rows into the column grid
+        # within each group.  Tracks an explicit "next_y" so we can
+        # interleave headers + button rows without computing a global
+        # row index.
+        next_y = BTN_PAD_Y
+        for section_name, rows in button_groups:
+            # Header label: small, slightly indented to align with the
+            # first column.  Drawn at the current cursor; cursor then
+            # advances past it before the first row.
+            self.ui.add_panel_label(section_name,
+                                    x=BTN_PAD_X, y=next_y,
+                                    color=(150, 165, 200))
+            next_y += SECTION_LABEL_H + SECTION_GAP_AFTER
+
+            # Pack rows: each entry is (label, col, span).  When a span
+            # would overflow the next column boundary, that row sits on
+            # its own line; consecutive single-cell entries stack
+            # left-to-right and only bump y when the column wraps.
+            row_y    = next_y
+            cur_col  = 0
+            for label, col, span in rows:
+                btn = btn_by_label.get(label)
+                if not btn:
+                    continue
+                # If this entry's start column is to the LEFT of where
+                # the cursor currently sits, that means the previous
+                # entry filled the row -- start a new row.
+                if col < cur_col:
+                    row_y += BTN_H + BTN_GAP_Y
+                    cur_col = 0
+                btn.x = BTN_PAD_X + col * (BTN_W + BTN_GAP_X)
+                btn.y = row_y
+                btn.w = BTN_W * span + BTN_GAP_X * (span - 1)
+                cur_col = col + span
+                # Saturated row -> next entry will be on a new line.
+                if cur_col >= 3:
+                    row_y += BTN_H + BTN_GAP_Y
+                    cur_col = 0
+
+            # `row_y` is now pointing at the line *after* the last row
+            # if cur_col == 0, or AT the last row's line if not.  Make
+            # sure we land at the start of the next free line either
+            # way before adding the inter-group gap.
+            if cur_col != 0:
+                row_y += BTN_H + BTN_GAP_Y
+            next_y = row_y + BTN_GAP_Y * 2     # extra breathing room
+                                                # between groups
 
         # Lighting sliders inside the left panel.  Slider value text sits
         # to the right of the track.  NMap/AO checkboxes get their own
@@ -3308,10 +4345,11 @@ class Viewer:
         L_TRACK_X = 56
         L_TRACK_W = 160   # ~10% narrower for cleaner panel fit
         L_VAL_X   = L_TRACK_X + L_TRACK_W + 6
-        # 5 button rows now (Grid/Axes/Light, Orbit/Skybox/Wireframe,
-        # Set Paths/Meshes, Import/Export, Flip/Compare) -- sliders
-        # sit below them.
-        slider_y0 = BTN_PAD_Y + 5 * (BTN_H + BTN_GAP_Y) + 12
+        # Sliders sit below the grouped button block.  `next_y` from the
+        # group-packing loop above is already pointing at the first free
+        # line after the Tools group, so we just add a small breathing
+        # gap and use it directly.
+        slider_y0 = next_y + 12
         ROW_H     = 25
 
         if self._metal_slider:
@@ -3338,8 +4376,13 @@ class Viewer:
         # ---- RIGHT PANEL -------------------------------------------------
         right_x   = self.width - self.TREE_PANEL_W
         right_top = self.height - self.RIGHT_CONTROLS_H
-        R_TRACK_X = right_x + 56
-        R_TRACK_W = 135   # ~10% narrower for cleaner panel fit
+        # Right panel slider geometry.  Label sits at `right_x + 6`;
+        # we need ~60+ px for the longest labels ('Sm FadeE',
+        # 'Normals') at 13pt Calibri Bold.  Track starts at +72 so the
+        # label has room to breathe without overlapping the track.
+        # Track width unchanged; value text follows automatically.
+        R_TRACK_X = right_x + 72
+        R_TRACK_W = 135
         R_VAL_X   = R_TRACK_X + R_TRACK_W + 6
         smoke_y0  = right_top + 14
 
@@ -3349,6 +4392,7 @@ class Viewer:
             self._smoke_speed_slider,
             self._smoke_fade_slider,
             self._smoke_fade_end_slider,
+            self._normals_slider,
         ]
         for i, sl in enumerate(smoke_sliders):
             if not sl:
@@ -3360,11 +4404,21 @@ class Viewer:
             sl.value_x  = R_VAL_X
             sl.visible  = True
 
-        # Show-HP checkbox: row below the smoke sliders
+        # PerVtx + Show HP share one row BELOW the smoke sliders.
+        # PerVtx sits on the LEFT (where Show HP used to be); Show HP
+        # moves OVER to the right side of the same row so both
+        # toggles fit without adding another row to the panel.
+        cb_row_y = (smoke_y0 + len(smoke_sliders) * ROW_H
+                    - 14 // 2)    # 14 = checkbox size
+        if self._normals_mode_cb:
+            self._normals_mode_cb.x = right_x + 8
+            self._normals_mode_cb.y = cb_row_y
+            self._normals_mode_cb.visible = True
         if self._show_hp_cb:
-            self._show_hp_cb.x = right_x + 8
-            self._show_hp_cb.y = (smoke_y0 + len(smoke_sliders) * ROW_H
-                                  - self._show_hp_cb.size // 2)
+            # Right side of the row -- past the slider value column so
+            # the labels don't crowd each other.
+            self._show_hp_cb.x = right_x + 150
+            self._show_hp_cb.y = cb_row_y
             self._show_hp_cb.visible = True
 
         # All other widgets stay visible
@@ -3372,6 +4426,59 @@ class Viewer:
             if not hasattr(w, 'visible'):
                 continue
             w.visible = True
+
+    # ------------------------------------------------------------------
+    # Logging helpers (mirror to stdout AND the in-app console)
+    # ------------------------------------------------------------------
+
+    def log(self, msg, color=None):
+        """Print to stdout AND append a line to the bottom console.
+
+        Args:
+            msg (str): the line to log.
+            color (tuple | None): optional (r, g, b) 0-255; None falls
+                back to the console's default light-grey.
+        """
+        try:
+            print(msg)
+        except Exception:
+            pass
+        try:
+            if self.ui and getattr(self.ui, 'console', None):
+                self.ui.console.add_line(msg, color)
+        except Exception:
+            # Don't let a logging failure ever crash the running app.
+            pass
+
+    def log_error(self, msg):
+        """Same as log() but red-tinted -- for missing textures, parse
+        failures, etc.
+        """
+        self.log(msg, color=(255, 110, 110))
+
+    def log_status(self, status):
+        """Update the console header's status string (the "what we're
+        currently doing" tag).  Doesn't add a line; pair it with a
+        clear() at the start of a fresh action and add_line() calls
+        below.
+        """
+        try:
+            if self.ui and getattr(self.ui, 'console', None):
+                self.ui.console.set_status(status)
+        except Exception:
+            pass
+
+    def log_clear(self, status=None):
+        """Empty the console buffer + optionally retag the status.
+        Called at the start of every user-driven action (tank load,
+        Import, Export, Save Prim) so the resulting log is focused
+        on that action only.
+        """
+        try:
+            if self.ui and getattr(self.ui, 'console', None):
+                self.ui.console.clear(status=status)
+        except Exception:
+            pass
 
     def handle_input(self):
         """Process all queued SDL events and mouse state."""
@@ -3391,8 +4498,9 @@ class Viewer:
                     self.running = False
                 elif event.key == K_w:
                     self.wireframe = not self.wireframe
-                    glPolygonMode(GL_FRONT_AND_BACK,
-                                  GL_LINE if self.wireframe else GL_FILL)
+                    # Don't call glPolygonMode here -- the next render
+                    # pass owns the overlay-vs-solid switch.  The W key
+                    # just flips the flag.
                     self._sync_button_state('wireframe', self.wireframe)
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
@@ -3467,6 +4575,14 @@ class Viewer:
 
         self.mouse_last = list(mouse_pos)
 
+        # If the console's collapsed state OR drag-resize height
+        # changed during this tick, re-run the layout pass so the 3D
+        # camera viewport reflects the new console size.  Cheap (just
+        # re-computes a few rects); only fires when the flag is set.
+        if getattr(self.ui, '_console_geometry_dirty', False):
+            self.ui._console_geometry_dirty = False
+            self._on_resize(self.width, self.height)
+
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -3485,25 +4601,49 @@ class Viewer:
         glViewport(0, 0, self.width, self.height)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        # 3D scene draws into the area between the two side panels.
-        # When the info panel is collapsed, only the spine (~18 px) is
-        # reserved on the left.  UI pass at the end resets the viewport.
+        # 3D scene draws into the area between the two side panels and
+        # ABOVE the bottom console panel.  When the info panel is
+        # collapsed, only the spine (~18 px) is reserved on the left.
+        # UI pass at the end resets the viewport.
         scene_x = self.ui.info_left_inset(self.INFO_PANEL_W)
         scene_w = max(1, self.width - scene_x - self.TREE_PANEL_W)
-        glViewport(scene_x, 0, scene_w, self.height)
+        console_h = (self.ui.console.height_for_layout()
+                     if self.ui.console else 0)
+        scene_h = max(1, self.height - console_h)
+        # GL viewport y is bottom-up: the console sits at y=0..console_h
+        # at the BOTTOM of the window in screen-space, so the 3D scene
+        # starts at GL y = console_h and extends up to the top.
+        glViewport(scene_x, console_h, scene_w, scene_h)
 
-        # Restore wireframe state (UIManager forces GL_FILL each frame)
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE if self.wireframe else GL_FILL)
+        # 3D pass always starts in GL_FILL.  When the Wireframe toggle
+        # is on we run TWO passes in sequence:
+        #   1) solid pass with GL_POLYGON_OFFSET_FILL enabled, which
+        #      nudges every filled triangle SLIGHTLY AWAY from the
+        #      camera in depth.  The pixels still cover the same
+        #      screen area; only their depth values move.
+        #   2) line pass at normal Z (no offset), so the line draws
+        #      win the depth test against the offset-back fills.
+        # Standard "wireframe over solid" recipe -- one polygon-offset
+        # call before solid draws, disable + GL_LINE for the overlay.
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        if self.wireframe:
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            # Positive factor / units pushes filled tris AWAY from
+            # camera in depth-buffer space.  Tuned to a stable
+            # value across Intel/NVIDIA/AMD; bigger numbers can
+            # produce visible gaps where adjacent tris meet.
+            glPolygonOffset(1.0, 1.0)
 
         view = self.camera.get_view_matrix()
         proj = self.camera.get_projection_matrix()
 
         # Skybox -- rendered first; depth trick (xyww) places it at far plane
-        # Wireframe is forced off so the sky isn't drawn as lines
         if self.skybox and self.show_skybox:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             self.skybox.render(view, proj)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE if self.wireframe else GL_FILL)
+            # Stay in GL_FILL for the main mesh pass; the wireframe
+            # overlay (if any) fires after the solid render.
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
@@ -3566,7 +4706,10 @@ class Viewer:
         # WoT data uses GA-encoded normals; imported FBX has standard RGB
         active.set_int('is_GA_normal',
                        0 if self.source_type == 'fbx' else 1)
-        active.set_int('wireframe_mode', 1 if self.wireframe else 0)
+        # Main mesh pass is ALWAYS solid -- the wireframe (if enabled)
+        # is a separate overlay pass after this one, with polygon-offset
+        # so the lines don't z-fight against the surface they ride on.
+        active.set_int('wireframe_mode', 0)
 
         active.set_float('metal_scale',
             self._metal_slider.value if self._metal_slider else 1.0)
@@ -3655,6 +4798,85 @@ class Viewer:
             mesh.render(active)
 
         glEnable(GL_CULL_FACE)
+
+        # ---- Wireframe overlay (rides on top of the solid pass) -------
+        # When the Wireframe toggle is on, do a SECOND pass over every
+        # visible mesh in GL_LINE mode using the same shader / VAO
+        # setup.  No polygon-offset on this pass -- the SOLID pass
+        # was already pushed back via GL_POLYGON_OFFSET_FILL above,
+        # so lines drawn at normal depth automatically win the depth
+        # test against the offset-back triangles.
+        #
+        # The shader's `wireframe_mode` uniform is flipped to 1 here
+        # so the fragment stage outputs a flat dark colour rather
+        # than re-running PBR for the line draws.
+        if self.wireframe:
+            # First, disable the FILL offset we enabled at the start
+            # of the solid pass.  Lines render at their natural Z so
+            # they sit IN FRONT of the offset-back surface.
+            glDisable(GL_POLYGON_OFFSET_FILL)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            glLineWidth(1.0)
+            # Force the wireframe colour path in the fragment shader.
+            active.set_int('wireframe_mode', 1)
+            # Disable face culling for the overlay so back-edges are
+            # visible too -- a wireframe overlay that hides anything
+            # the user can't see "through" the front faces feels broken.
+            glDisable(GL_CULL_FACE)
+            for mesh in self.meshes:
+                if not getattr(mesh, 'visible', True):
+                    continue
+                active.set_mat4('model', mesh.model_matrix)
+                mesh.render(active)
+            # Restore everything we touched
+            glEnable(GL_CULL_FACE)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            active.set_int('wireframe_mode', 0)
+
+        # Surface-normal debug lines.  Skipped entirely when the
+        # slider is at zero -- otherwise we re-bind each mesh's VAO
+        # and draw GL_TRIANGLES so the geometry shader can see each
+        # face's three vertex normals at once.  Wireframe mode also
+        # forces GL_FILL here so the lines render solid even when
+        # the main mesh pass is in line mode.
+        #
+        # Two modes available, driven by the PerVtx checkbox:
+        #   * by-face   (default)  -- 1 cyan line per triangle from
+        #                             centroid along the AVERAGED
+        #                             3-vertex normal
+        #   * by-vertex (PerVtx on) -- 3 axes-coloured lines per
+        #                             triangle, one per vertex
+        normals_len = (self._normals_slider.value
+                       if self._normals_slider else 0.0)
+        # Mirror the PerVtx checkbox state for the render pass.  Save
+        # to instance var so the config-persist path picks it up too.
+        if self._normals_mode_cb is not None:
+            self._normals_per_vertex = bool(self._normals_mode_cb.checked)
+        if normals_len > 0.0 and self.normals_shader is not None:
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glLineWidth(1.5)
+            self.normals_shader.use()
+            self.normals_shader.set_mat4('view',       view)
+            self.normals_shader.set_mat4('projection', proj)
+            self.normals_shader.set_float('u_normal_length', normals_len)
+            self.normals_shader.set_int(
+                'u_mode', 1 if self._normals_per_vertex else 0)
+            for mesh in self.meshes:
+                if not getattr(mesh, 'visible', True):
+                    continue
+                if mesh.vao is None:
+                    continue
+                self.normals_shader.set_mat4('model', mesh.model_matrix)
+                glBindVertexArray(mesh.vao)
+                # Triangles via the EBO -- the GS gets all 3 vertex
+                # positions + normals per primitive and decides
+                # itself how many lines to emit (1 for face-mode,
+                # 3 for vertex-mode).
+                glDrawElements(GL_TRIANGLES, mesh.index_count,
+                               GL_UNSIGNED_INT, ctypes.c_void_p(0))
+            glBindVertexArray(0)
+            # The wireframe overlay (above) already restored GL_FILL,
+            # so no global polygon-mode reset is needed here.
 
         # Light position indicators (one sphere per light)
         if self.show_light:
@@ -3749,7 +4971,7 @@ class Viewer:
             if self.fps_samples:
                 avg_fps = sum(self.fps_samples) / len(self.fps_samples)
                 pygame.display.set_caption(
-                    f"Tank Exporter PY  v{self._app_version} -- "
+                    f"TEPY  v{self._app_version} -- "
                     f"{avg_fps:.1f} FPS  |  "
                     f"dist={self.camera.distance:.2f}  meshes={len(self.meshes)}"
                 )
@@ -3773,6 +4995,10 @@ class Viewer:
                 self._cfg['smoke_fade_start_frame']  = float(self._smoke_fade_slider.value)
             if self._smoke_fade_end_slider:
                 self._cfg['smoke_fade_end_frame']    = float(self._smoke_fade_end_slider.value)
+            if self._normals_slider:
+                self._cfg['normals_length']          = float(self._normals_slider.value)
+            if self._normals_mode_cb is not None:
+                self._cfg['normals_per_vertex']      = bool(self._normals_mode_cb.checked)
             # Hardpoint marker visibility (Show HP checkbox in smoke panel)
             self._cfg['show_hardpoints']     = bool(self._show_hardpoints)
             _config.save(self._cfg)

@@ -1,0 +1,15 @@
+# Tank Exporter PY -- runtime Python package dependencies.
+#
+# tkinter ships with the standard Windows / macOS Python installer, so
+# it is NOT listed here.  Blender's `bpy` is also intentionally absent
+# -- the FBX / glTF / OBJ runners execute INSIDE Blender's bundled
+# Python, not ours, so we never pip-install bpy.
+#
+# Versions are floor-only ('>=') so a fresh install gets the current
+# stable release of each.  The viewer is exercised against these
+# major versions; pin tighter only if a regression turns up.
+
+pygame>=2.5
+PyOpenGL>=3.1
+numpy>=1.24
+Pillow>=10.0
