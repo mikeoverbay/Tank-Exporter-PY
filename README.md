@@ -80,7 +80,53 @@ them with PBR + IBL lighting, and round-trips back out as
 
 ## Install
 
-### Windows -- just double-click
+### 1. Download
+
+Pick whichever you're comfortable with -- both produce the same
+working tree.
+
+**Option A: Git clone** (preferred if you have Git -- makes
+`git pull` updates trivial):
+
+```
+git clone https://github.com/mikeoverbay/Tank-Exporter-PY.git
+```
+
+**Option B: Download ZIP** (no Git required):
+
+1. Open <https://github.com/mikeoverbay/Tank-Exporter-PY> in a
+   browser.
+2. Click the green **Code** button -> **Download ZIP**.
+3. Extract the ZIP somewhere with write access (see step 2 below).
+
+### 2. Where to put it
+
+TEPY reads and writes inside its own project folder
+(`TheItemList.xml`, the requirements backup, your saved
+`tankviewer.json` config, etc.), so put it somewhere your user
+account can write without UAC prompts.  Recommended:
+
+```
+C:\Users\<you>\Documents\Tank-Exporter-PY\
+```
+
+or
+
+```
+C:\Tools\Tank-Exporter-PY\
+```
+
+**Avoid** `C:\Program Files\` and `C:\Program Files (x86)\` --
+Windows blocks normal write access to those directories and the
+first-run rebuild of `TheItemList.xml` will fail with a permission
+error.
+
+It does not have to live next to your WoT install -- TEPY finds
+the game via the path you pick in the **Set Paths** dialog (or
+the `--pkg-dir` / `--res-mods` CLI flags).  Anywhere on any drive
+you can write to is fine.
+
+### 3. Run it -- Windows just double-click
 
 ```
 go.bat
@@ -92,6 +138,10 @@ installs them, makes a permanent backup of the requirements at
 `resources/requirements_backup/`, deletes the live `requirements/`
 folder, and launches the viewer.  Subsequent runs skip the install
 step entirely and go straight to launch.
+
+On the first launch TEPY also auto-builds `TheItemList.xml` from
+your WoT pkgs (~3 seconds) -- you'll see progress in the console
+panel.  After that, every later launch is fast.
 
 Companion bats:
 - `start.bat` -- minimal launcher (no install dance, just launch).
