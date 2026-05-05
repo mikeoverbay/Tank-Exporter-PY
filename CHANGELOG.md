@@ -15,6 +15,34 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Banner re-skin: bottom-centred + edge-weathered + 1876 postcard palette (1.35.2)
+
+`resources/tepy_banner.png` re-rendered with new layout and
+colours.  Three iterations boiled down to:
+
+* Title + subtitle now anchored to the BOTTOM-CENTRE of the
+  splash (above: top-centre then upper-right corner -- both
+  fought the existing scene composition).
+* Title in vivid burnt orange `(228, 132, 64)`, subtitle in
+  warm cream-gold `(232, 200, 142)`.  Earlier muted-brown
+  attempts vanished into the dirt; pushing the chroma up until
+  the title reads as "paint on a stagecoach side panel" was
+  the right move for the 1876-postcard look the user asked for.
+* Subtitle bumped to ~55 % of title cap height (was ~42 %) so
+  the tagline carries weight.
+* No drop shadow.  Glyph rims weathered via edge-only alpha
+  jitter -- a body-vs-edge mask gates jitter to pixels in the
+  blurred-alpha transition band, so glyph interiors stay solid
+  (legible) while the rims erode into the substrate (looks
+  painted-on, not sticker-applied).
+* Frozen RNG seed so two regen runs at the same settings give
+  byte-identical PNG output -- clean git diffs of a generated
+  asset.
+
+Generator: `cust_tools/make_banner.py`.  Knobs at the top of the
+file: `TITLE_HEIGHT_FRAC`, `BOTTOM_PAD_FRAC`, `COLOR_TITLE`,
+`WEATHER_FADE_BAND`, `EDGE_LOW` / `EDGE_HIGH`, etc.
+
 ### Damaged-variant `_damaged` filename tag (1.35.0)
 
 When a tank is loaded with the "Load Damaged" checkbox ticked

@@ -6,10 +6,10 @@
   "info_panel_collapsed": false,
   "light_value": 0.25,
   "ambient_value": 0.5,
-  "smoke_start_size": 0.1,
+  "smoke_start_size": 0.3333333333333333,
   "smoke_end_size": 0.6592592592592592,
-  "smoke_speed": 2.785185185185185,
-  "smoke_fade_start_frame": 0.0,
-  "smoke_fade_end_frame": 38.422222222222224,
-  "show_hardpoints": true
+  "smoke_speed": 2.903703703703704,
+  "smoke_fade_start_frame": 2.696296296296296,
+  "smoke_fade_end_frame": 77.51851851851852,
+  "show_hardpoints": false
 }
