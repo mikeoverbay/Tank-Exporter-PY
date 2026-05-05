@@ -15,6 +15,91 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Left-panel height is now auto-computed (light sliders fix)
+
+`LEFT_CONTROLS_H` was a fixed `274` magic number that went stale
+when the button block grew (display toggles -> +UI/IO/Tools section
+headers -> +ItemList button).  Symptom: the lighting sliders +
+NMap/AO checkboxes dropped past the 274 px boundary and visibly
+overlapped the tank-info tree below.
+
+Fix: `_layout_widgets` now measures the actual bottom of the last
+checkbox row and writes the result back into `self.LEFT_CONTROLS_H`
+(instance attr shadows the class constant).  `_on_resize` was
+reordered so `_layout_widgets()` runs BEFORE the info-panel
+positioning, and the info-tree below reads the freshly-computed
+value.  The class constant stays as a `max()` floor, so the panel
+never shrinks below the original 274 px even on a hypothetical
+zero-button layout.
+
+Knock-on benefit: future button-group reshuffles no longer need a
+matching `LEFT_CONTROLS_H` bump -- the layout self-adjusts.
+
+### Force vsync on (`vsync=1` on every `set_mode`)
+
+Both `set_mode` call sites (initial window create + the
+`VIDEORESIZE` handler) now pass `vsync=1`, which pygame forwards to
+`SDL_GL_SetSwapInterval(1)`.  Without this, `pygame.display.flip()`
+returns the instant the swap is SCHEDULED, the driver can drop
+or coalesce frames, and the wall-clock between flips is jittery
+enough to make the FPS readout look like noise.  Drivers that
+refuse vsync (some remote-desktop / virtualised GPUs) silently
+ignore the request -- no fallback code needed.
+
+The resize path matters because some platforms treat every
+`set_mode` as a fresh window-create and reset the swap interval
+to 0 unless we ask again.
+
+### GPU-time profiling via `GL_TIME_ELAPSED` timer queries
+
+Real GPU work-time now reads alongside the wall-clock FPS in the
+title bar.  Pattern: ping-pong pool of two GL timer queries
+(`glGenQueries(2)`); each frame `glBeginQuery(GL_TIME_ELAPSED, ...)`
+at the start of the scene draw and `glEndQuery` right before
+`pygame.display.flip()`.  On the SAME frame we then read the OTHER
+query's result -- by definition that frame's GPU work is done,
+so `GL_QUERY_RESULT_AVAILABLE` returns true and the fetch never
+stalls.
+
+Result is in nanoseconds; we convert to ms and accumulate in
+`_gpu_accum_ms` parallel with the wall-clock accumulator, then
+publish on the same 5-frame block boundary.  Title bar reads:
+
+    TEPY  v1.34.0 -- 60.1 FPS  (cpu 16.65 ms / gpu  3.21 ms)  | ...
+
+making "am I CPU-bound or vsync-bound?" trivially answerable.
+
+Lazy init -- queries are created on the first `render()` call (GL
+context exists by then).  Drivers without `GL_TIME_ELAPSED` support
+fall through silently: `_gl_query_ids` becomes `[]` and the caption
+collapses back to the wall-clock-only form.  Cleanup deletes the
+queries on shutdown.
+
+Note: PyOpenGL spells the result getter `glGetQueryObjectui64v`
+(with trailing `v`), not `glGetQueryObjectui64`.  Caught the
+import error before the runtime would have.
+
+### Custom FPS counter -- 5-frame block average
+
+The viewer no longer leans on `pygame.time.Clock` for FPS.  That
+number was just the rate cap we asked for (60 with vsync), not what
+the app actually achieved.  Now we measure wall-clock time between
+successive `pygame.display.flip()` returns and average it over a
+5-frame block:
+
+  * Per frame, add `frame_ms` to a running accumulator.
+  * On the 5th frame, divide -> mean ms, then `1000 / mean ms` ->
+    FPS.  Refresh the title-bar caption with both numbers.
+  * Reset accumulator and counter; start the next block.
+
+Title bar now reads e.g. `TEPY  v1.33.0 -- 60.1 FPS  (16.65 ms)`,
+which makes "am I CPU-bound or vsync-bound?" answerable at a glance.
+
+A comment block at the FPS-init site documents the three OpenGL
+"frame done" signals (`pygame.display.flip()` implicit, `glFinish()`
+explicit blocking, `glFenceSync` non-blocking) for the next time
+someone wants to add real GPU-time profiling.
+
 ### `TheItemList.xml` is now auto-built on first run
 
 The file is `.gitignored` -- it's 70+ MB, machine-specific to whichever

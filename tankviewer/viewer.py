@@ -227,7 +227,13 @@ class Viewer:
     # lighting sliders + checkboxes.  Below it sits the info-tree.
     # Right panel: bottom block holds smoke sliders + HP-marker toggle.
     # Above it sits the tab-bar + tank-list tree.
-    LEFT_CONTROLS_H  = 274      # 6 button rows + 2 slider rows + cb row
+    # Floor / fallback height of the left controls block.  At runtime
+    # `_layout_widgets` overwrites this on the instance with the actual
+    # height the button-group + slider + checkbox stack ends up
+    # claiming, so the info-tree below sits cleanly under whatever the
+    # layout produced.  This class-level value is just the lower bound
+    # used before the first layout pass runs.
+    LEFT_CONTROLS_H  = 274      # default floor; instance value computed
     RIGHT_CONTROLS_H = 200      # 5 smoke sliders + Normals slider + Show HP checkbox
 
     # Tier-filter tab labels (strings).  '1' .. '11' for WoT tiers I-XI.
@@ -412,9 +418,19 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] icon skipped: {exc}")
 
+        # vsync=1 -- ask SDL to enable vertical sync (one swap per
+        # refresh).  Without this, pygame.display.flip() returns the
+        # instant the swap is SCHEDULED, the driver can drop or
+        # coalesce frames, and the wall-clock interval between flips
+        # is jittery enough to make the FPS readout misleading.
+        # Falls back gracefully on drivers that refuse vsync (some
+        # remote-desktop / virtualised GPUs) -- pygame just ignores
+        # the request.  Pygame 2.0+ required for the kwarg; we're on
+        # >= 2.5 already (see requirements/requirements.txt).
         pygame.display.set_mode(
             (self.width, self.height),
-            DOUBLEBUF | OPENGL | RESIZABLE
+            DOUBLEBUF | OPENGL | RESIZABLE,
+            vsync=1,
         )
         pygame.display.set_caption(f"TEPY  v{_APP_VERSION}")
 
@@ -680,10 +696,67 @@ class Viewer:
         self._scene_bbox         = None   # set in load_mesh; used by 'R' camera reset
         self._min_zoom_distance  = 0.5   # updated after mesh load to 5 % of mesh radius
 
-        # FPS: measure actual wall-clock frame time, average over 15 frames
-        self.fps_clock      = pygame.time.Clock()
-        self.fps_samples    = deque(maxlen=15)
-        self._last_frame_t  = time.perf_counter()
+        # ---- Frame timing ---------------------------------------------
+        # We measure FPS ourselves rather than relying on pygame's
+        # `Clock.tick` machinery -- pygame's number is the rate-cap
+        # we asked for (60 with vsync), not what we actually achieved.
+        # Our reading is wall-clock time between successive
+        # `pygame.display.flip()` returns, averaged over a ring of
+        # the last ~120 frames (~2 s at 60 Hz, smooths out one-frame
+        # hiccups without lagging the display).
+        #
+        # ON RENDER-DONE SIGNALS in OpenGL / pygame:
+        #   * `pygame.display.flip()` -- with vsync on (the SDL
+        #     default for DOUBLEBUF), flip blocks until the next
+        #     vertical refresh.  By the time it returns the previous
+        #     frame's swap has been scheduled.  This is what we use
+        #     for "frame done" timing here -- closest to what the
+        #     USER perceives as a presented frame.
+        #   * `glFinish()` -- explicit, blocks the CPU until every
+        #     queued GPU command has completed.  Stronger sync than
+        #     flip's "swap scheduled".  Stalls the pipeline; only call
+        #     it when you specifically need a hard sync point (e.g.
+        #     to time GPU work for a profiler).
+        #   * `glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)` +
+        #     `glClientWaitSync` -- non-blocking; insert a fence after
+        #     your draw calls, query/wait it on a later frame to know
+        #     when the GPU finished THAT frame.  Modern engines use
+        #     this for accurate GPU-time profiling without a stall.
+        # We're going with option 1 -- it answers the question every
+        # user actually cares about ("is the app running smoothly?").
+        # Block-average over 5 consecutive frames.  Each frame's wall
+        # time goes into `_fps_accum_ms`; on the 5th frame we divide
+        # to get the mean, refresh the caption, and reset both
+        # counter and accumulator to zero for the next block.  In
+        # between blocks (counter < 5) the caption stays put -- the
+        # display only updates 12x/sec at 60 fps, which is faster
+        # than a human reads a number anyway.
+        self._fps_block_count = 0      # 0..4 -- frames accumulated this block
+        self._fps_accum_ms    = 0.0    # running sum of frame times
+        self._fps_display     = 0.0    # last published average for the caption
+        self._fps_avg_ms      = 0.0    # last published mean ms / frame
+        self._last_frame_end  = time.perf_counter()
+
+        # ---- GPU-time profiling (GL_TIME_ELAPSED queries) -----------------
+        # Ping-pong pool of two GL timer queries.  Each frame we
+        # BEGIN/END one of them; on the next frame we READ the
+        # OTHER one's result.  By that point the GPU is guaranteed
+        # to have finished frame N-1's work, so the read never
+        # stalls.  The reported number is true GPU work time --
+        # independent of any vsync stall, so wall-clock vs GPU ms
+        # makes "am I CPU-bound or vsync-bound?" trivially readable.
+        #
+        # Queries are lazy-init: GL context exists by the time
+        # `render()` runs but not in `__init__`, so we create them
+        # on the first render call instead.  Failed init (driver
+        # without GL 3.3 timer queries) silently disables the path
+        # -- `_gl_query_ids` stays None and every accessor short-
+        # circuits.
+        self._gl_query_ids       = None        # [qid_a, qid_b] | None
+        self._gl_query_idx       = 0           # index of THIS frame's query
+        self._gl_query_in_flight = [False, False]
+        self._gpu_accum_ms       = 0.0         # parallel block accumulator
+        self._gpu_avg_ms         = 0.0         # last published GPU ms
         # Computed in run() each frame -- read by render() (notably the
         # particle system) for time-step-correct integration.  Initial
         # value of 0 means the first frame does no simulation step.
@@ -964,6 +1037,15 @@ class Viewer:
             self.ui.tree.w = tree_w
             self.ui.tree.h = tree_h
 
+        # Position every widget inside its panel BEFORE we set the
+        # info-panel rect below -- _layout_widgets computes the actual
+        # height the button + slider stack needs and writes it back
+        # into self.LEFT_CONTROLS_H, so the info-tree positioning
+        # that follows reads the freshly computed value.  Moving this
+        # call earlier avoids a fixed-constant LEFT_CONTROLS_H going
+        # stale every time the button-group structure changes.
+        self._layout_widgets()
+
         # ---- Left panel: control block on top, info tree below ----------
         if self.ui.info_panel:
             self.ui.info_panel.x = 0
@@ -986,9 +1068,6 @@ class Viewer:
             self.TREE_PANEL_W,
             self.RIGHT_CONTROLS_H,
         )
-
-        # Position every widget inside its panel
-        self._layout_widgets()
 
         # Hide left-panel widgets when the info-panel is collapsed.
         # Identifies "left panel" widgets by their x position falling
@@ -4430,6 +4509,22 @@ class Viewer:
             self._invert_shine_cb.x = 110
             self._invert_shine_cb.y = cb_row_cy - self._invert_shine_cb.size // 2
 
+        # Update LEFT_CONTROLS_H to fit whatever the layout above
+        # actually produced.  The button-group structure has expanded
+        # over time (display toggles -> + UI / IO / Tools section
+        # headers -> + ItemList button), and a fixed constant kept
+        # going stale and pushing the lighting sliders into the info-
+        # tree below.  Now we measure: bottom of the last checkbox
+        # row + a small bottom margin = the height the controls block
+        # needs to claim.  The info-panel positioning in _on_resize
+        # reads `self.LEFT_CONTROLS_H` AFTER this method runs, so the
+        # tree below sits cleanly under whatever we computed here.
+        cb_size_default = 14    # UICheckbox default; tolerable approx
+        cb_bottom = cb_row_cy + cb_size_default // 2 + 1
+        BOTTOM_MARGIN = 10
+        self.LEFT_CONTROLS_H = max(self.__class__.LEFT_CONTROLS_H,
+                                    cb_bottom + BOTTOM_MARGIN)
+
         # ---- RIGHT PANEL -------------------------------------------------
         right_x   = self.width - self.TREE_PANEL_W
         right_top = self.height - self.RIGHT_CONTROLS_H
@@ -4544,9 +4639,14 @@ class Viewer:
                 self.running = False
 
             elif event.type == VIDEORESIZE:
+                # Carry vsync=1 through every set_mode call -- SDL
+                # treats each set_mode as a fresh window-create on
+                # some platforms and resets the swap interval to 0
+                # if we don't ask for vsync explicitly here too.
                 pygame.display.set_mode(
                     (event.w, event.h),
-                    DOUBLEBUF | OPENGL | RESIZABLE
+                    DOUBLEBUF | OPENGL | RESIZABLE,
+                    vsync=1,
                 )
                 self._on_resize(event.w, event.h)
 
@@ -4653,6 +4753,26 @@ class Viewer:
             self.splash.render()
             pygame.display.flip()
             return
+
+        # ---- GPU timer query: begin -------------------------------------
+        # Lazy-create the two-query pool the first time we render the
+        # real scene.  Failure (old driver, missing GL_TIME_ELAPSED)
+        # leaves _gl_query_ids None and every later GPU-timing call
+        # short-circuits on the same `is None` check.
+        if self._gl_query_ids is None:
+            try:
+                self._gl_query_ids = list(glGenQueries(2))
+            except Exception as exc:
+                print(f"[viewer] GPU timer queries unavailable: {exc}")
+                self._gl_query_ids = []   # truthy distinct from None so
+                                          # we don't retry on every frame
+        if self._gl_query_ids:
+            try:
+                qid = self._gl_query_ids[self._gl_query_idx]
+                glBeginQuery(GL_TIME_ELAPSED, qid)
+            except Exception:
+                # Driver hiccup -- disable for the rest of the session.
+                self._gl_query_ids = []
 
         # Full-window clear (so the right-side panel area is also wiped)
         glViewport(0, 0, self.width, self.height)
@@ -4989,6 +5109,42 @@ class Viewer:
         glViewport(0, 0, self.width, self.height)
         self.ui.render(self.width, self.height)
 
+        # ---- GPU timer query: end + read previous frame ------------------
+        # Close THIS frame's timer query first (everything queued
+        # between glBeginQuery and here counts).  Then attempt a
+        # non-blocking read of the OTHER query -- by now its frame's
+        # GPU work is done, so GL_QUERY_RESULT_AVAILABLE returns true
+        # and the result fetch is essentially free.  If the result
+        # isn't ready yet (unlikely with vsync but possible on a
+        # really fast GPU + low-latency driver), we just skip this
+        # frame's accumulation -- one missed sample in a 5-frame
+        # block isn't worth the stall a blocking GL_QUERY_RESULT
+        # would cost.
+        if self._gl_query_ids:
+            try:
+                glEndQuery(GL_TIME_ELAPSED)
+                self._gl_query_in_flight[self._gl_query_idx] = True
+
+                prev_idx = 1 - self._gl_query_idx
+                if self._gl_query_in_flight[prev_idx]:
+                    prev_qid = self._gl_query_ids[prev_idx]
+                    available = glGetQueryObjectiv(
+                        prev_qid, GL_QUERY_RESULT_AVAILABLE)
+                    if available:
+                        # PyOpenGL spells the 64-bit getter with the
+                        # trailing `v` (so does the GL spec; many docs
+                        # drop it).  Result is in nanoseconds for a
+                        # GL_TIME_ELAPSED query.
+                        ns = glGetQueryObjectui64v(
+                            prev_qid, GL_QUERY_RESULT)
+                        self._gpu_accum_ms += ns / 1_000_000.0
+
+                # Swap so next frame uses the slot we just read from.
+                self._gl_query_idx = 1 - self._gl_query_idx
+            except Exception:
+                # Driver hiccup -- disable for the rest of the session.
+                self._gl_query_ids = []
+
         pygame.display.flip()
 
     # ------------------------------------------------------------------
@@ -5010,28 +5166,69 @@ class Viewer:
         while self.running:
             self.handle_input()
 
-            # Frame timing -- computed BEFORE render so the particle
-            # update inside render() can use it.  Clamped at 0.1 s to
-            # absorb pauses (window drag, debugger, etc.) without
-            # spawning a wall of catch-up particles in one frame.
+            # Particle-integration dt -- time since the previous frame
+            # finished presenting.  Clamped at 0.1 s so pauses (window
+            # drag, debugger, full-tank load) don't spawn a wall of
+            # catch-up particles in one frame.
             now = time.perf_counter()
-            dt  = now - self._last_frame_t
-            self._last_frame_t = now
-            if dt > 0.0:
-                self.fps_samples.append(1.0 / dt)
-            self._frame_dt = max(0.0, min(dt, 0.1))
+            self._frame_dt = max(0.0, min(now - self._last_frame_end, 0.1))
 
+            # ---- Render the frame ----------------------------------
+            # `self.render()` ends with `pygame.display.flip()`, which
+            # with vsync on stalls until the next vertical refresh.
+            # When flip() returns, the swap has been scheduled (and
+            # in practice already committed at the next refresh edge);
+            # that's the moment we treat as "frame done" for FPS.
             self.render()
             self.frame_count += 1
-            self.fps_clock.tick(60)   # cap at 60 Hz
 
-            if self.fps_samples:
-                avg_fps = sum(self.fps_samples) / len(self.fps_samples)
-                pygame.display.set_caption(
-                    f"TEPY  v{self._app_version} -- "
-                    f"{avg_fps:.1f} FPS  |  "
-                    f"dist={self.camera.distance:.2f}  meshes={len(self.meshes)}"
-                )
+            # ---- Frame-time accounting (5-frame block average) -----
+            # Add this frame's wall time to the running accumulator.
+            # When the 5th frame in the block lands, divide and
+            # refresh the title bar; reset for the next block.
+            # Until then, just keep accumulating -- caption stays put.
+            frame_end = time.perf_counter()
+            frame_ms  = (frame_end - self._last_frame_end) * 1000.0
+            self._last_frame_end = frame_end
+
+            self._fps_accum_ms    += frame_ms
+            self._fps_block_count += 1
+
+            if self._fps_block_count >= 5:
+                # Wall-clock side: mean ms / frame and derived FPS.
+                avg_ms = self._fps_accum_ms / self._fps_block_count
+                self._fps_avg_ms  = avg_ms
+                self._fps_display = (1000.0 / avg_ms) if avg_ms > 0.0 else 0.0
+
+                # GPU side: same 5-frame block, lagged by one frame
+                # (we read frame N's query on frame N+1).  When timer
+                # queries are unavailable (`_gl_query_ids` empty),
+                # gpu_accum stays 0 and we just hide the GPU number
+                # in the caption below.
+                self._gpu_avg_ms = (self._gpu_accum_ms / 5.0
+                                     if self._gpu_accum_ms > 0.0 else 0.0)
+
+                self._fps_block_count = 0
+                self._fps_accum_ms    = 0.0
+                self._gpu_accum_ms    = 0.0
+
+                if self._gpu_avg_ms > 0.0:
+                    pygame.display.set_caption(
+                        f"TEPY  v{self._app_version} -- "
+                        f"{self._fps_display:5.1f} FPS  "
+                        f"(cpu {self._fps_avg_ms:5.2f} ms / "
+                        f"gpu {self._gpu_avg_ms:5.2f} ms)  |  "
+                        f"dist={self.camera.distance:.2f}  "
+                        f"meshes={len(self.meshes)}"
+                    )
+                else:
+                    pygame.display.set_caption(
+                        f"TEPY  v{self._app_version} -- "
+                        f"{self._fps_display:5.1f} FPS  "
+                        f"({self._fps_avg_ms:5.2f} ms)  |  "
+                        f"dist={self.camera.distance:.2f}  "
+                        f"meshes={len(self.meshes)}"
+                    )
 
         # Persist slider values so the next session restores them.
         # Done before GPU cleanup so a crash inside cleanup doesn't lose the
@@ -5096,4 +5293,11 @@ class Viewer:
         self.ui.cleanup()
         if self._pkg_extractor:
             self._pkg_extractor.cleanup()
+        # GL timer queries -- only present if the driver supported
+        # them and lazy-init succeeded on the first render call.
+        if self._gl_query_ids:
+            try:
+                glDeleteQueries(len(self._gl_query_ids), self._gl_query_ids)
+            except Exception:
+                pass
         pygame.quit()
