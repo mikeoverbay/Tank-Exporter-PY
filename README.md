@@ -96,8 +96,32 @@ git clone https://github.com/mikeoverbay/Tank-Exporter-PY.git
 
 1. Open <https://github.com/mikeoverbay/Tank-Exporter-PY> in a
    browser.
-2. Click the green **Code** button -> **Download ZIP**.
-3. Extract the ZIP somewhere with write access (see step 2 below).
+2. Above the file list, click the green **`<> Code`** button.  A
+   small dropdown panel opens.
+3. At the bottom of that panel, click **Download ZIP**.  Your
+   browser starts a download named
+   `Tank-Exporter-PY-master.zip` (~tens of MB; varies with the
+   resources baked into the current commit).
+4. Open the downloaded file (it usually lands in
+   `C:\Users\<you>\Downloads\`).  In Windows Explorer, right-click
+   the ZIP -> **Extract All...** -> choose where to extract (see
+   "Where to put it" below) -> **Extract**.
+5. Windows extracts into a folder named
+   `Tank-Exporter-PY-master/` by default.  Rename it to
+   `Tank-Exporter-PY/` if you want it to match the Git-clone name
+   -- everything else works identically either way.
+
+> **Tip.**  Built-in Windows extraction works fine.  7-Zip /
+> WinRAR / similar tools also work; just point them at the same
+> destination folder.
+
+> **Updates.**  The ZIP path doesn't auto-update.  When a new
+> version lands you can either re-download the ZIP and replace
+> the old folder, or switch to **Option A** so `git pull` does
+> the update for you.  If you replace the folder, keep your
+> `tankviewer.json` config and `resources/requirements_backup/`
+> from the old install -- the first preserves your WoT paths,
+> the second saves the requirements re-download.
 
 ### 2. Where to put it
 
