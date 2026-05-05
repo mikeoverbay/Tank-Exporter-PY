@@ -714,6 +714,17 @@ class Viewer:
         else:
             self.log_error("PkgExtractor not configured -- open Set Paths")
 
+        # Auto-rebuild TheItemList.xml when it's missing.  The file is
+        # .gitignored (70+ MB, machine-specific to the user's WoT
+        # install) so a fresh checkout always lands here on first run.
+        # Done LAST in __init__ so the UI is fully up by the time we
+        # start streaming "scanning N pkg archives" into the console
+        # -- otherwise the user just sees a hang on the splash.
+        try:
+            self._ensure_itemlist()
+        except Exception as exc:
+            self.log_error(f"ItemList auto-rebuild failed: {exc}")
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -1963,44 +1974,38 @@ class Viewer:
               f"{os.path.basename(in_path)}")
 
     # ------------------------------------------------------------------
-    def _on_rebuild_itemlist_clicked(self):
-        """Action-button callback for the 'ItemList' tool button.
+    def _rebuild_itemlist_now(self):
+        """Run the ItemList rebuild + reload in-process, in the
+        current thread.  Used by both the user-clicked path
+        (`_on_rebuild_itemlist_clicked`) and the auto-rebuild-on-
+        missing path (`_ensure_itemlist`) so the diagnostic logging
+        is identical between them.
 
-        Rebuilds `TheItemList.xml` from scratch by walking every kept
-        pkg in the configured WoT install.  After a successful write,
-        re-parses the new file into the running PkgExtractor so the
-        current session sees every freshly-discovered entry without
-        needing a restart.
-
-        Same logic as `cust_tools/rebuild_itemlist.py` -- imported
-        directly so we don't shell out to a subprocess.  The user sees
-        per-pkg progress in the in-app console; total wall time is
-        ~3 seconds on a typical install.
+        Returns True on full success, False on any failure (caller
+        decides whether to keep going or bail).  Logs to the in-app
+        console either way -- the user sees what happened.
         """
-        # Fresh console buffer for this action.
-        self.log_clear(status='ItemList')
-
         ext = self._pkg_extractor
         if ext is None:
             self.log_error("ItemList: PkgExtractor not configured -- "
                            "open Set Paths first.")
-            return
+            return False
 
         pkg_dir  = getattr(ext, 'pkg_dir', None)
         out_path = getattr(ext, '_lookup_xml_path', None)
         if not pkg_dir or not os.path.isdir(pkg_dir):
             self.log_error(f"ItemList: pkg dir not found: {pkg_dir}")
-            return
+            return False
         if not out_path:
             self.log_error("ItemList: no lookup XML path on PkgExtractor.")
-            return
+            return False
 
         try:
             from cust_tools.rebuild_itemlist import (
                 list_pkgs, build_index, write_itemlist)
         except Exception as exc:
             self.log_error(f"ItemList: rebuild module import failed: {exc}")
-            return
+            return False
 
         self.log(f"Rebuilding {os.path.basename(out_path)} from "
                  f"{pkg_dir} ...")
@@ -2026,7 +2031,7 @@ class Viewer:
             self.log(f"  -> {size_mb:.1f} MB in {wsec:.2f} s")
         except Exception as exc:
             self.log_error(f"ItemList: rebuild failed: {exc}")
-            return
+            return False
 
         # Refresh the running PkgExtractor's in-memory lookup so the
         # next extract() call sees the freshly-indexed entries without
@@ -2037,6 +2042,58 @@ class Viewer:
                      f"{len(ext._file_to_pkg):,} entries indexed")
         except Exception as exc:
             self.log_error(f"ItemList: lookup reload failed: {exc}")
+            return False
+        return True
+
+    def _on_rebuild_itemlist_clicked(self):
+        """Action-button callback for the 'ItemList' tool button.
+
+        Clears the console for a fresh trace and runs the rebuild.
+        Same exact code path as the auto-rebuild that fires on a
+        missing TheItemList.xml at startup -- see
+        `_rebuild_itemlist_now`.
+        """
+        self.log_clear(status='ItemList')
+        self._rebuild_itemlist_now()
+
+    def _ensure_itemlist(self):
+        """Auto-rebuild the lookup table if it's missing or empty.
+
+        Called once at the end of `__init__`, AFTER the UI has been
+        built, so the user sees the rebuild progress stream into the
+        in-app console rather than wondering why the splash is hung.
+        Skipped silently when the lookup is healthy.
+
+        Triggers in two cases:
+          * the lookup XML path doesn't exist on disk (fresh checkout
+            -- the file is .gitignored because it's machine-specific
+            and 70+ MB, so first-run users always hit this branch),
+          * the file exists but parsed to zero entries (corrupted /
+            wrong-version file, anything that means the runtime dict
+            is empty).
+        """
+        ext = self._pkg_extractor
+        if ext is None:
+            return
+
+        out_path = getattr(ext, '_lookup_xml_path', None)
+        if not out_path:
+            return
+
+        has_file    = os.path.isfile(out_path)
+        has_entries = bool(getattr(ext, '_file_to_pkg', None))
+
+        if has_file and has_entries:
+            return
+
+        self.log_status('ItemList missing -- auto-rebuild')
+        if not has_file:
+            self.log(f"{os.path.basename(out_path)} not found -- "
+                     f"building from pkgs (one-time, ~3 s).")
+        else:
+            self.log(f"{os.path.basename(out_path)} parsed empty -- "
+                     f"rebuilding.")
+        self._rebuild_itemlist_now()
 
     # ------------------------------------------------------------------
     def _on_compare_clicked(self):

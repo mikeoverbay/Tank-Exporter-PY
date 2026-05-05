@@ -14,6 +14,12 @@ Thumbs.db
 # without overwriting it.
 TheItemList.NEW.xml
 
+# Generated cache, machine-specific (depends on which WoT version /
+# platform pkgs the user has installed) and 70+ MB.  TEPY auto-builds
+# this on first launch when it's missing -- see viewer.py's
+# `_ensure_itemlist` post-UI hook.  Never commit.
+TheItemList.xml
+
 # Local user config -- the viewer writes pkg / res_mods paths in
 # here on first run; they're machine-specific and shouldn't ship.
 # Comment out if you want to commit a default config.

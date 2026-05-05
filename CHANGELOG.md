@@ -15,6 +15,27 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### `TheItemList.xml` is now auto-built on first run
+
+The file is `.gitignored` -- it's 70+ MB, machine-specific to whichever
+WoT version / platform pkgs the user has installed, and trivially
+regenerable from those pkgs.  Shipping it in the repo bloated the
+download for no benefit.
+
+When `viewer.py.__init__` finishes building the UI, it calls
+`_ensure_itemlist()`, which:
+
+1. Skips silently when `TheItemList.xml` exists AND parsed to a
+   non-empty `_file_to_pkg` dict (steady-state).
+2. Otherwise calls `_rebuild_itemlist_now()` -- the same code path the
+   ItemList button uses.  The user sees per-step progress
+   (`scanning N pkg archives`, `unique files: NNN,NNN`, etc.) stream
+   into the in-app console instead of a silent hang on the splash.
+
+Refactor: the rebuild logic was lifted out of
+`_on_rebuild_itemlist_clicked` into a shared `_rebuild_itemlist_now`
+helper so the button-click and auto-rebuild paths log identically.
+
 ### README.md + banner
 
 `README.md` lands at the repo root (the GitHub-rendered front
