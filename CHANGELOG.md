@@ -15,6 +15,33 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Damaged-variant `_damaged` filename tag (1.35.0)
+
+When a tank is loaded with the "Load Damaged" checkbox ticked
+(destroyed/crashed model variant), the variant info now propagates
+through every export / import / save-prim path so writes don't
+silently land in the wrong res_mods folder:
+
+* `load_vehicle(damaged=True)` stores `self._loaded_damaged = True`.
+* `_on_export_clicked` appends `_damaged` to the default save name
+  (e.g. `G102_Pz_III_damaged.fbx`).  Idempotent -- a re-export of
+  an already-tagged set doesn't double the suffix.
+* `_on_import_clicked` checks the input filename's stem for the
+  `_damaged` suffix (case-insensitive) and restores
+  `self._loaded_damaged` accordingly so the round-trip is loss-less.
+* `_on_save_prim_clicked` swaps `/normal/` -> `/crash/` in the
+  canonical pkg path before writing, so a damaged-variant save
+  lands at `res_mods/<ver>/vehicles/<nation>/<tank>/crash/lod0/...`
+  instead of overwriting the normal-variant file.  The visual-file
+  lookup (used to copy referenced textures) follows the same
+  redirect so the cracked/damaged textures get pulled.
+
+Without this, the variant info dropped at the first hand-off and
+the user had no way to tell from the FBX filename alone whether
+they had the damaged or normal variant -- and a reflexive Save
+Prim could overwrite the live normal-variant primitives with the
+modified damaged geometry.
+
 ### Particle-integration `dt` regression fix (1.34.3)
 
 Side effect of the FPS rewrite: `_frame_dt` was being computed as

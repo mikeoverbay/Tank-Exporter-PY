@@ -11,5 +11,5 @@
   "smoke_speed": 2.785185185185185,
   "smoke_fade_start_frame": 0.0,
   "smoke_fade_end_frame": 38.422222222222224,
-  "show_hardpoints": false
+  "show_hardpoints": true
 }

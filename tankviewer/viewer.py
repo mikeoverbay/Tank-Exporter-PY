@@ -347,6 +347,12 @@ class Viewer:
         # load_mesh keep this as 'pkg'; load_imported_payload switches
         # to 'fbx' for the duration of the import.
         self._active_set_name = 'pkg'
+        # Damaged-variant flag.  Set by load_vehicle (when the user
+        # checks "Load Damaged" in the load dialog) and by FBX import
+        # if the input filename ends with `_damaged`.  Read by
+        # _on_export_clicked to tag the default save name and by
+        # Save Prim to route writes to crash/ instead of normal/.
+        self._loaded_damaged = False
         # Merge supplied config with defaults so callers can omit it
         self._cfg = _config.load()
         if cfg:
@@ -1530,6 +1536,17 @@ class Viewer:
         # underscore, dash -- the basename uses only those anyway).
         default_stem = ''.join(
             c for c in default_stem if c.isalnum() or c in ' _-')
+        # Tag damaged-variant exports so a later round-trip
+        # (FBX -> Blender -> FBX -> Save Prim) doesn't lose the
+        # variant info and silently overwrite the normal-variant
+        # files in res_mods.  The importer reads the tag back off
+        # the filename to restore `self._loaded_damaged`.  Idempotent
+        # -- if the user is exporting an already-damaged-tagged set
+        # (re-export of an imported `_damaged` FBX), we don't double
+        # the suffix.
+        if (getattr(self, '_loaded_damaged', False)
+                and not default_stem.lower().endswith('_damaged')):
+            default_stem = f"{default_stem}_damaged"
 
         # 5. Prompt for the filename + spawn Blender.  The loop runs
         # exactly once today (radio = single format) but kept as a
@@ -1861,8 +1878,36 @@ class Viewer:
                       f"skipped")
                 continue
 
-            # 1. Compose .primitives_processed output and call writer
-            rel = pkg_path.replace('/', os.sep).lstrip(os.sep)
+            # 1. Compose .primitives_processed output and call writer.
+            # When the loaded set is the damaged variant -- either
+            # because the user ticked "Load Damaged" in the load
+            # dialog OR because the imported FBX filename ended in
+            # `_damaged` -- redirect the canonical `/normal/` path
+            # segment to `/crash/`.  WoT puts the destroyed model
+            # variant under the same tree with that one folder
+            # swap (e.g. `vehicles/german/G102_Pz_III/normal/lod0/...`
+            # vs `.../G102_Pz_III/crash/lod0/...`).  Without this
+            # the write would land on the normal-variant file in
+            # res_mods and silently overwrite the wrong primitives.
+            zip_path = pkg_path
+            if getattr(self, '_loaded_damaged', False):
+                # Use a literal slash match (canonical pkg paths
+                # always use forward slashes) and only swap when
+                # the path actually contains `/normal/`, so we
+                # never accidentally rewrite a path that's already
+                # damaged or that uses some other folder we
+                # haven't seen.
+                if '/normal/' in zip_path:
+                    zip_path = zip_path.replace('/normal/', '/crash/')
+                else:
+                    self.log_error(
+                        f"{label}: damaged flag is set but path "
+                        f"{pkg_path!r} has no '/normal/' segment "
+                        f"-- writing to canonical path as-is.  "
+                        f"Verify the result lands in the right "
+                        f"folder before reusing this file.")
+
+            rel = zip_path.replace('/', os.sep).lstrip(os.sep)
             out_path = os.path.join(res_mods, rel)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -1884,8 +1929,13 @@ class Viewer:
             #    primitives writer succeeded -- worth doing the texture
             #    copy now so the user has a partial mod skeleton even
             #    while the encoder is being built.
-            visual_zip = pkg_path.replace('.primitives_processed',
-                                          '.visual_processed')
+            #
+            #    Use `zip_path` (post-redirect) so a damaged-variant
+            #    save reads the matching damaged visual_processed
+            #    (which references the cracked / damaged textures)
+            #    rather than the normal one.
+            visual_zip = zip_path.replace('.primitives_processed',
+                                           '.visual_processed')
             self._save_component_textures(
                 label, visual_zip, res_mods,
                 texture_mode, custom_dir)
@@ -2055,6 +2105,20 @@ class Viewer:
             return
         # `result` is the payload dict
         n = self.load_imported_payload(result)
+
+        # Recover damaged-variant flag from the filename suffix.  The
+        # exporter writes `<tank>_damaged.<ext>` for crashed variants
+        # (see `_on_export_clicked`); detect that here so a later
+        # Save Prim routes the write to res_mods/.../crash/ instead
+        # of /normal/.  Case-insensitive so `_DAMAGED` works too.
+        in_stem = os.path.splitext(os.path.basename(in_path))[0]
+        if in_stem.lower().endswith('_damaged'):
+            self._loaded_damaged = True
+            self.log(f"[import] detected '_damaged' suffix -- "
+                     f"variant=CRASHED")
+        else:
+            self._loaded_damaged = False
+
         print(f"[import] DONE -- loaded {n} mesh(es) from "
               f"{os.path.basename(in_path)}")
 
@@ -3968,6 +4032,13 @@ class Viewer:
         # consult for engine-exhaust hardpoints.
         self.source_tank_name = os.path.splitext(
             os.path.basename(xml_path))[0]
+        # Stash the variant so the FBX exporter can tag the default
+        # output filename, the FBX importer can recover the flag from
+        # that tag on a round trip, and Save Prim can route the
+        # write to res_mods/.../crash/ instead of /normal/.  Without
+        # this the variant info gets dropped at the first hand-off
+        # and writes silently land in the wrong folder.
+        self._loaded_damaged = bool(damaged)
         variant = 'CRASHED' if damaged else 'undamaged'
         print(f"\nLoading vehicle from {xml_path} ({variant}) ...")
 
