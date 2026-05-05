@@ -1250,6 +1250,43 @@ class VisualLoader:
         out.sort(key=lambda item: item[0])
         return out
 
+    # Hardpoint-name fragments that mark a FIRE / damage spawn point.
+    # Independent of the engine-exhaust set so we can route them to a
+    # separate particle system (smoke vs fire).  WoT mostly ships
+    # `HP_Fire_*` -- substring match so we catch the rare `HP_fire_pt_*`
+    # / `firepoint_*` variants too.
+    _FIRE_KEYWORDS = (
+        'fire',
+    )
+
+    @staticmethod
+    def find_fire_nodes(visual_path):
+        """Open a .visual_processed file and return its fire / damage
+        hardpoints (the spawn points for burning-tank flames).
+
+        Sibling of `find_exhaust_nodes` -- same return shape, different
+        keyword filter.  Forward vector is read from the visual but
+        callers should generally OVERRIDE it to (0, 1, 0) on the GL
+        side; fire goes up regardless of how the artist oriented the
+        node in 3DS Max.
+        """
+        xml_root = VehicleXMLLoader._read_visual_nodes(visual_path)
+        if xml_root is None:
+            return []
+        transforms = VisualLoader.get_node_world_transforms(xml_root)
+        out = []
+        for name_lower, (pos, fwd) in transforms.items():
+            # Skip exhaust matches that happen to contain "fire" in
+            # some weird mod -- if the node also matches an exhaust
+            # keyword, exhaust wins.  In practice no live tank does
+            # this; the guard is defensive.
+            if any(k in name_lower for k in VisualLoader._EXHAUST_KEYWORDS):
+                continue
+            if any(k in name_lower for k in VisualLoader._FIRE_KEYWORDS):
+                out.append((name_lower, pos, fwd))
+        out.sort(key=lambda item: item[0])
+        return out
+
     @staticmethod
     def resolve_hd_path(rel_path, res_mods_root, pkg_extractor=None):
         """Try HD version first, fall back to SD.  Searches res_mods then res/.

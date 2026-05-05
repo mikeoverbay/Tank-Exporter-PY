@@ -234,7 +234,12 @@ class Viewer:
     # layout produced.  This class-level value is just the lower bound
     # used before the first layout pass runs.
     LEFT_CONTROLS_H  = 274      # default floor; instance value computed
-    RIGHT_CONTROLS_H = 200      # 5 smoke sliders + Normals slider + Show HP checkbox
+    # Right panel: floor / fallback height.  Auto-computed at runtime
+    # in _layout_widgets (same pattern as LEFT_CONTROLS_H) so the
+    # tank-list tree above tracks however many sliders the panel
+    # ends up with -- adding more sliders later doesn't need a
+    # matching constant bump.
+    RIGHT_CONTROLS_H = 280      # default floor; instance value computed
 
     # Tier-filter tab labels (strings).  '1' .. '11' for WoT tiers I-XI.
     TREE_TIER_TABS = [str(t) for t in range(1, 12)]
@@ -536,6 +541,58 @@ class Viewer:
             self.smoke_flipbook  = None
             self.smoke_particles = None
 
+        # Fire flipbook + particle system -- shares the ParticleShader
+        # already compiled above.  Only spawns when the loaded tank is
+        # the damaged variant (set by load_vehicle); a normal-variant
+        # load leaves fire_particles silent (no emitters, no draws).
+        # Default tunables tuned for "burning hulk", not exhaust:
+        #   * smaller spawn footprint
+        #   * faster vertical drift (fire rises)
+        #   * no drag on the upward velocity
+        # Sliders below override start_size / end_size / speed.
+        self._splash_status('Loading fire flipbook (91 frames)...')
+        self.fire_flipbook  = None
+        self.fire_particles = None
+        if self.particle_shader is not None:
+            try:
+                fire_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources', 'fire')
+                self.fire_flipbook  = FlipbookTexture(fire_dir)
+                self.fire_particles = ParticleSystem(self.fire_flipbook,
+                                                      max_particles=512)
+                # Tweak defaults for fire vs smoke before slider restore.
+                self.fire_particles.start_size = 0.20
+                self.fire_particles.end_size   = 0.55
+                self.fire_particles.speed      = 1.4    # m/s upward
+                self.fire_particles.drag       = 0.6    # less drag than smoke
+                self.fire_particles.lifetime   = 1.6    # s
+                self.fire_particles.spawn_rate = 45.0   # /s/emitter
+                # Restore persisted slider values when present.
+                self.fire_particles.start_size = float(
+                    self._cfg.get('fire_start_size', self.fire_particles.start_size))
+                self.fire_particles.end_size   = float(
+                    self._cfg.get('fire_end_size',   self.fire_particles.end_size))
+                self.fire_particles.speed      = float(
+                    self._cfg.get('fire_speed',      self.fire_particles.speed))
+                # Fade range -- fire's own values, not shared with smoke.
+                self.fire_particles.fade_start_frame = float(
+                    self._cfg.get('fire_fade_start_frame', 70.0))
+                self.fire_particles.fade_end_frame   = float(
+                    self._cfg.get('fire_fade_end_frame',   91.0))
+            except Exception as exc:
+                print(f"[viewer] Fire particles disabled: {exc}")
+                self.fire_flipbook  = None
+                self.fire_particles = None
+
+        # Fire spawn points -- populated by load_vehicle when the
+        # damaged variant is loaded; empty otherwise.  Same dict shape
+        # as `_exhaust_points` ({component, name, pos, fwd}) so the
+        # particle system can reuse `set_emitters` unchanged, but the
+        # `fwd` vector is always (0, 1, 0) -- fire goes UP regardless
+        # of the artist's HP_Fire_* node orientation.
+        self._fire_points = []
+
         # Skybox / environment cubemap
         self._splash_status('Building skybox + IBL maps (irradiance, BRDF, prefilter)...')
         _env_dir  = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -589,6 +646,9 @@ class Viewer:
         self._smoke_speed_slider    = None
         self._smoke_fade_slider     = None
         self._smoke_fade_end_slider = None
+        self._fire_start_slider     = None
+        self._fire_end_slider       = None
+        self._fire_speed_slider     = None
         self._normals_slider        = None
         self._normals_mode_cb       = None
         self._invert_metal_cb    = None
@@ -950,6 +1010,25 @@ class Viewer:
             'Sm FadeE', tx, cy6 + 25,   tw, value=smoke_fade_end_init,
             value_max=91.0, group_id='smoke')
 
+        # Fire-particle sliders -- mirror the Sm Start/End/Speed
+        # widgets so the controls feel parallel.  No fade-range
+        # sliders for fire (less visual interest in tweaking those
+        # for a stationary burning hulk; the defaults look right).
+        # Final geometry is set in `_layout_widgets`; we register
+        # them here on the same dummy y so add_slider can index.
+        fire_start_init = float(self._cfg.get('fire_start_size', 0.20))
+        fire_end_init   = float(self._cfg.get('fire_end_size',   0.55))
+        fire_speed_init = float(self._cfg.get('fire_speed',      1.4))
+        self._fire_start_slider = self.ui.add_slider(
+            'Fire Start', tx, cy6 + 75, tw, value=fire_start_init,
+            value_max=0.8, group_id='smoke')
+        self._fire_end_slider   = self.ui.add_slider(
+            'Fire End',   tx, cy6 + 100, tw, value=fire_end_init,
+            value_max=1.5, group_id='smoke')
+        self._fire_speed_slider = self.ui.add_slider(
+            'Fire Speed', tx, cy6 + 125, tw, value=fire_speed_init,
+            value_max=6.0, group_id='smoke')
+
         # Surface-normal debug lines.  Slider drives world-space line
         # length; 0 = off.  Default loaded from the persisted config
         # so the user's preferred setting survives across sessions.
@@ -1030,6 +1109,19 @@ class Viewer:
         # keep their stale x/y/w/h and visibly jump when clicked.
         # self.ui.tree is one of the cached trees too; the loop below
         # covers it as a side effect.
+        # Position every widget inside its panel FIRST -- _layout_widgets
+        # computes the actual heights both the LEFT (button block +
+        # sliders + checkboxes) AND the RIGHT (sliders + checkboxes)
+        # control regions claim, and writes them back into
+        # self.LEFT_CONTROLS_H / self.RIGHT_CONTROLS_H.  Every consumer
+        # below (info-tree positioning, tank-list tree height, control
+        # rects for hit-testing) reads those instance values, so we
+        # have to compute them BEFORE the trees and rects are sized.
+        self._layout_widgets()
+
+        # Tank-list tree (right panel) -- height fits between the tab
+        # bar at the top and the auto-computed slider block at the
+        # bottom.
         tree_x = self.width - self.TREE_PANEL_W
         tree_w = self.TREE_PANEL_W
         tree_y = tab_h
@@ -1048,15 +1140,6 @@ class Viewer:
             self.ui.tree.y = tree_y
             self.ui.tree.w = tree_w
             self.ui.tree.h = tree_h
-
-        # Position every widget inside its panel BEFORE we set the
-        # info-panel rect below -- _layout_widgets computes the actual
-        # height the button + slider stack needs and writes it back
-        # into self.LEFT_CONTROLS_H, so the info-tree positioning
-        # that follows reads the freshly computed value.  Moving this
-        # call earlier avoids a fixed-constant LEFT_CONTROLS_H going
-        # stale every time the button-group structure changes.
-        self._layout_widgets()
 
         # ---- Left panel: control block on top, info tree below ----------
         if self.ui.info_panel:
@@ -4099,6 +4182,10 @@ class Viewer:
             self.meshes   = []
             all_positions = []
             self._exhaust_points = []   # filled per-component below
+            # Fire/damage spawn points reset to empty too -- only get
+            # populated below when `damaged=True` and the per-component
+            # walk finds HP_Fire_* nodes.
+            self._fire_points    = []
 
             # Engine-exhaust spec from the def XML.  Tells us which named
             # nodes WoT actually treats as the engine exhaust (vs HP_Fire,
@@ -4171,6 +4258,40 @@ class Viewer:
                                 'name':      name,
                                 'pos':       world_pos,
                                 'fwd':       fwd_gl,
+                            })
+
+                # ---- Fire / damage spawn points (damaged tanks only) ----
+                # HP_Fire_* nodes only matter when the user loaded the
+                # crashed variant; on a normal-variant load we walk for
+                # them anyway (cheap; one substring filter on the node
+                # name list) but the fire ParticleSystem stays silent
+                # because we don't call set_emitters with anything until
+                # the damaged check below.
+                if vis and damaged:
+                    fire_hits = VisualLoader.find_fire_nodes(vis)
+                    if fire_hits:
+                        print(f"    fire nodes ({len(fire_hits)}):")
+                        for name, pos_bw, _fwd_bw in fire_hits:
+                            # Same BW -> GL Z-flip on position.  Forward
+                            # vector is REPLACED with world-up (0, 1, 0)
+                            # -- fire goes UP regardless of the artist's
+                            # node orientation in 3DS Max.  This is the
+                            # whole point of the fire path: there's no
+                            # meaningful direction other than up.
+                            pos_gl = np.array([pos_bw[0], pos_bw[1], -pos_bw[2]],
+                                              dtype=np.float32)
+                            world_pos = pos_gl + np.asarray(offset, dtype=np.float32)
+                            up_gl = np.array([0.0, 1.0, 0.0],
+                                             dtype=np.float32)
+                            print(f"      {name:24s}"
+                                  f"  pos=({world_pos[0]:+.3f}, "
+                                  f"{world_pos[1]:+.3f}, {world_pos[2]:+.3f})"
+                                  f"  fwd=(0, 1, 0)  [forced up]")
+                            self._fire_points.append({
+                                'component': label,
+                                'name':      name,
+                                'pos':       world_pos,
+                                'fwd':       up_gl,
                             })
 
                 # Build translation matrix for this component
@@ -4392,6 +4513,18 @@ class Viewer:
                 self.smoke_particles.reset()
                 self.smoke_particles.set_emitters(self._exhaust_points)
 
+            # Fire emitters -- only populated when the damaged variant
+            # is loaded (see the per-component fire-walk above).  When
+            # the user loads a normal-variant tank, _fire_points stays
+            # empty and the fire system goes idle (no emitters means
+            # spawn() does nothing).
+            if self.fire_particles is not None:
+                self.fire_particles.reset()
+                self.fire_particles.set_emitters(self._fire_points)
+                if self._fire_points:
+                    print(f"\n  Fire enabled: {len(self._fire_points)} "
+                          f"HP_Fire emitter(s)")
+
             _status("Done.")
 
         except Exception as exc:
@@ -4603,27 +4736,45 @@ class Viewer:
                                     cb_bottom + BOTTOM_MARGIN)
 
         # ---- RIGHT PANEL -------------------------------------------------
-        right_x   = self.width - self.TREE_PANEL_W
-        right_top = self.height - self.RIGHT_CONTROLS_H
-        # Right panel slider geometry.  Label sits at `right_x + 6`;
-        # we need ~60+ px for the longest labels ('Sm FadeE',
-        # 'Normals') at 13pt Calibri Bold.  Track starts at +72 so the
-        # label has room to breathe without overlapping the track.
-        # Track width unchanged; value text follows automatically.
-        R_TRACK_X = right_x + 72
-        R_TRACK_W = 135
-        R_VAL_X   = R_TRACK_X + R_TRACK_W + 6
-        smoke_y0  = right_top + 14
-
-        smoke_sliders = [
+        # Build the slider list FIRST -- we need its length to compute
+        # the panel's required height, which then drives `right_top`.
+        # Same auto-compute pattern as the left panel: the class-level
+        # RIGHT_CONTROLS_H is just a floor; the instance value scales
+        # with however many sliders end up registered.
+        right_sliders = [
             self._smoke_start_slider,
             self._smoke_end_slider,
             self._smoke_speed_slider,
             self._smoke_fade_slider,
             self._smoke_fade_end_slider,
+            self._fire_start_slider,
+            self._fire_end_slider,
+            self._fire_speed_slider,
             self._normals_slider,
         ]
-        for i, sl in enumerate(smoke_sliders):
+
+        TOP_PAD       = 14
+        CB_ROW_H      = 16     # checkbox cell + tiny gap
+        BOTTOM_MARGIN_R = 10
+        n_sliders     = sum(1 for sl in right_sliders if sl)
+        required_h    = (TOP_PAD + n_sliders * ROW_H
+                         + CB_ROW_H + BOTTOM_MARGIN_R)
+        self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
+                                     required_h)
+
+        right_x   = self.width - self.TREE_PANEL_W
+        right_top = self.height - self.RIGHT_CONTROLS_H
+        # Right panel slider geometry.  Label sits at `right_x + 6`;
+        # we need ~60+ px for the longest labels ('Sm FadeE',
+        # 'Fire Speed', 'Normals') at 13pt Calibri Bold.  Track starts
+        # at +72 so the label has room to breathe without overlapping
+        # the track.  Track width unchanged; value text follows.
+        R_TRACK_X = right_x + 72
+        R_TRACK_W = 135
+        R_VAL_X   = R_TRACK_X + R_TRACK_W + 6
+        smoke_y0  = right_top + TOP_PAD
+
+        for i, sl in enumerate(right_sliders):
             if not sl:
                 continue
             sl.track_x  = R_TRACK_X
@@ -4633,11 +4784,11 @@ class Viewer:
             sl.value_x  = R_VAL_X
             sl.visible  = True
 
-        # PerVtx + Show HP share one row BELOW the smoke sliders.
+        # PerVtx + Show HP share one row BELOW the slider stack.
         # PerVtx sits on the LEFT (where Show HP used to be); Show HP
         # moves OVER to the right side of the same row so both
         # toggles fit without adding another row to the panel.
-        cb_row_y = (smoke_y0 + len(smoke_sliders) * ROW_H
+        cb_row_y = (smoke_y0 + len(right_sliders) * ROW_H
                     - 14 // 2)    # 14 = checkbox size
         if self._normals_mode_cb:
             self._normals_mode_cb.x = right_x + 8
@@ -5181,6 +5332,23 @@ class Viewer:
             self.smoke_particles.update(self._frame_dt)
             self.smoke_particles.render(self.particle_shader, view, proj)
 
+        # ---- Fire particles (damaged tanks only) -------------------------
+        # Same flipbook-billboard machinery as smoke, separate
+        # ParticleSystem instance so size / speed tunables don't fight
+        # the smoke ones.  No emitters means update/render are essentially
+        # free -- so this block is safe to run unconditionally even when
+        # the loaded tank is undamaged.
+        if self.fire_particles is not None:
+            if self._fire_start_slider:
+                self.fire_particles.start_size = self._fire_start_slider.value
+            if self._fire_end_slider:
+                self.fire_particles.end_size   = self._fire_end_slider.value
+            if self._fire_speed_slider:
+                self.fire_particles.speed      = self._fire_speed_slider.value
+
+            self.fire_particles.update(self._frame_dt)
+            self.fire_particles.render(self.particle_shader, view, proj)
+
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
         glViewport(0, 0, self.width, self.height)
@@ -5333,6 +5501,12 @@ class Viewer:
                 self._cfg['smoke_fade_start_frame']  = float(self._smoke_fade_slider.value)
             if self._smoke_fade_end_slider:
                 self._cfg['smoke_fade_end_frame']    = float(self._smoke_fade_end_slider.value)
+            if self._fire_start_slider:
+                self._cfg['fire_start_size']         = float(self._fire_start_slider.value)
+            if self._fire_end_slider:
+                self._cfg['fire_end_size']           = float(self._fire_end_slider.value)
+            if self._fire_speed_slider:
+                self._cfg['fire_speed']              = float(self._fire_speed_slider.value)
             if self._normals_slider:
                 self._cfg['normals_length']          = float(self._normals_slider.value)
             if self._normals_mode_cb is not None:
@@ -5362,6 +5536,10 @@ class Viewer:
             self.smoke_particles.cleanup()
         if self.smoke_flipbook is not None:
             self.smoke_flipbook.cleanup()
+        if self.fire_particles is not None:
+            self.fire_particles.cleanup()
+        if self.fire_flipbook is not None:
+            self.fire_flipbook.cleanup()
         if self.skybox:
             self.skybox.cleanup()
         # Free every cached tier tree (UIManager.cleanup will also try to

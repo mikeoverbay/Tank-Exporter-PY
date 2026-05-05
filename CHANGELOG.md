@@ -15,6 +15,62 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Burn the damaged tanks (1.36.0) -- HP_Fire_* particle system
+
+When the user loads a tank with the "Load Damaged" checkbox ticked,
+TEPY now spawns a flipbook-billboard fire plume from every
+`HP_Fire_*` hardpoint the tank's visual_processed files declare.
+Sibling system to the existing engine-exhaust smoke; the same
+ParticleShader, the same flipbook-on-an-array-texture pattern,
+just routed to a separate ParticleSystem instance with its own
+emitter list and tunables.
+
+Implementation:
+
+* New `VisualLoader.find_fire_nodes(visual_path)` -- mirrors
+  `find_exhaust_nodes` but filters on the `_FIRE_KEYWORDS` set
+  (currently just `'fire'`) and explicitly skips any node that
+  also matches an exhaust keyword (defensive against weird
+  `HP_engineExhaust_fire_*` mod names; live tanks don't do this).
+* `Viewer.fire_flipbook` / `Viewer.fire_particles` -- separate
+  `FlipbookTexture` (`resources/fire/`, 91 frames) +
+  `ParticleSystem(max_particles=512)`.  Default tunables tuned
+  for "burning hulk" not exhaust: smaller spawn footprint,
+  faster vertical drift, less drag, shorter lifetime.
+* `Viewer._fire_points` -- list of {component, name, pos, fwd}
+  populated by `load_vehicle` ONLY when `damaged=True`.  Walks
+  every component visual (hull, chassis, turret, gun) for
+  HP_Fire_* nodes and applies the standard BW->GL Z-flip on
+  the position.  The forward vector is REPLACED with world-up
+  `(0, 1, 0)` regardless of what the artist's node oriented to
+  in 3DS Max -- fire goes UP, period.  No other vector makes
+  sense for damaged-tank flames.
+* New left-panel sliders in the existing right-panel slider
+  block: **Fire Start**, **Fire End**, **Fire Speed**.
+  Persisted to `tankviewer.json`.  Live values are pushed onto
+  the ParticleSystem each frame from the slider widgets, same
+  as the smoke sliders.
+* Render-loop pass parallel to smoke: update by `_frame_dt`,
+  then alpha-blended draw via the existing ParticleShader.
+  Free when no emitters are registered (undamaged load), so
+  the block is safe to run every frame unconditionally.
+
+### Right panel auto-computes its height too (1.36.0)
+
+`RIGHT_CONTROLS_H` is now computed from the actual slider count
+in `_layout_widgets`, same instance-shadows-class-constant
+pattern the LEFT panel got in 1.34.2.  Adding the three fire
+sliders (5 smoke + 3 fire + Normals = 9 total) would have
+overflowed the previous fixed `200 px` cap; now the panel
+self-adjusts and the tank-list tree above resizes to match.
+The class-level `RIGHT_CONTROLS_H = 280` stays as a `max()`
+floor.
+
+`_on_resize` was reordered so `_layout_widgets()` runs FIRST.
+The right-side tree-height computation and both control rects
+now read the freshly-computed instance heights, so a future
+slider addition needs zero constant-bumping.
+
 ### Banner re-skin: bottom-centred + edge-weathered + 1876 postcard palette (1.35.2)
 
 `resources/tepy_banner.png` re-rendered with new layout and
