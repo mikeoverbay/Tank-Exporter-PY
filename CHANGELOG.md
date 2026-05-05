@@ -15,6 +15,22 @@ button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
 
+### Particle-integration `dt` regression fix (1.34.3)
+
+Side effect of the FPS rewrite: `_frame_dt` was being computed as
+`perf_counter() - _last_frame_end`, but `_last_frame_end` is set
+AFTER `pygame.display.flip()` returns, so that delta was just the
+`handle_input()` cost -- tens of microseconds, not the ~16 ms the
+particle integrator needs.  Symptom: particles appeared to "update
+every 5th frame" because each per-frame integration step advanced
+the simulation by next to nothing, and the visible motion only
+crossed a pixel boundary every several frames.
+
+Fix: standard game-loop pattern -- carry the PREVIOUS frame's
+measured wall time forward in `_prev_frame_ms` and feed it as `dt`
+for the next frame's simulation step.  Initialised to one 60 Hz
+frame so the very first iteration doesn't get `dt=0`.
+
 ### Left-panel height is now auto-computed (light sliders fix)
 
 `LEFT_CONTROLS_H` was a fixed `274` magic number that went stale

@@ -757,6 +757,12 @@ class Viewer:
         self._gl_query_in_flight = [False, False]
         self._gpu_accum_ms       = 0.0         # parallel block accumulator
         self._gpu_avg_ms         = 0.0         # last published GPU ms
+
+        # Previous frame's measured wall-clock time, fed back as the
+        # particle-integration `dt` for the next frame.  Initialised
+        # to one 60 Hz frame so the very first iteration doesn't
+        # advance simulation by zero (particles would never spawn).
+        self._prev_frame_ms      = 1000.0 / 60.0
         # Computed in run() each frame -- read by render() (notably the
         # particle system) for time-step-correct integration.  Initial
         # value of 0 means the first frame does no simulation step.
@@ -5166,12 +5172,16 @@ class Viewer:
         while self.running:
             self.handle_input()
 
-            # Particle-integration dt -- time since the previous frame
-            # finished presenting.  Clamped at 0.1 s so pauses (window
-            # drag, debugger, full-tank load) don't spawn a wall of
-            # catch-up particles in one frame.
-            now = time.perf_counter()
-            self._frame_dt = max(0.0, min(now - self._last_frame_end, 0.1))
+            # Particle-integration dt -- the PREVIOUS frame's measured
+            # wall-clock time (in seconds).  Standard game-loop
+            # pattern: simulate this frame using how long the last one
+            # took.  An earlier draft tried `now - _last_frame_end`,
+            # but `_last_frame_end` is set AFTER flip() returns, so
+            # that delta was just the handle_input() cost (tens of
+            # microseconds) -- particles barely moved.  Clamped at
+            # 0.1 s so pauses (window drag, debugger, full-tank load)
+            # don't spawn a wall of catch-up particles in one frame.
+            self._frame_dt = max(0.0, min(self._prev_frame_ms / 1000.0, 0.1))
 
             # ---- Render the frame ----------------------------------
             # `self.render()` ends with `pygame.display.flip()`, which
@@ -5187,9 +5197,12 @@ class Viewer:
             # When the 5th frame in the block lands, divide and
             # refresh the title bar; reset for the next block.
             # Until then, just keep accumulating -- caption stays put.
+            # `_prev_frame_ms` carries this frame's value forward so
+            # the next iteration's particle dt is correct.
             frame_end = time.perf_counter()
             frame_ms  = (frame_end - self._last_frame_end) * 1000.0
             self._last_frame_end = frame_end
+            self._prev_frame_ms  = frame_ms
 
             self._fps_accum_ms    += frame_ms
             self._fps_block_count += 1
