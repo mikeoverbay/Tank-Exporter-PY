@@ -764,23 +764,29 @@ class Viewer:
         self._normals_mode_cb       = None
         self._invert_metal_cb    = None
         self._invert_shine_cb    = None
-        self._show_hp_cb         = None
-        # Debug: outline the fire billboards as yellow rectangles
-        # tracing each card's four corners.  Off by default; persisted
-        # in config under 'show_fire_cards'.  See render() for the
-        # per-frame outline build.
-        self._show_fire_cb       = None
+        # Master "Debug" checkbox.  When checked, EVERY on-screen
+        # debug overlay lights up: HP markers, fire-card outlines,
+        # and anything else we add later.  The convention going
+        # forward: if you're rendering geometry that's only useful
+        # for diagnosing what's loaded (NOT something a normal user
+        # ever wants to see), gate it on `self._debug`.  Persisted
+        # in config under `debug`.  Default off.
+        self._debug_cb           = None
 
-        # New: hardpoint-marker visibility (orange spheres + cyan
-        # direction vectors at exhaust nodes).  Persisted in config.
-        # Default off -- the data is still populated on every load so
-        # the toggle just gates the rendering.
-        self._show_hardpoints = bool(self._cfg.get('show_hardpoints', False))
-        # Debug-overlay flag for fire billboard outlines.  Mirrored
-        # into / out of self._show_fire_cb each frame so the checkbox
-        # state and the rendering decision stay in sync (same
-        # pattern as `_show_hardpoints` <-> `_show_hp_cb`).
-        self._show_fire_cards = bool(self._cfg.get('show_fire_cards', False))
+        # Master debug-overlay flag.  Gated by the right-panel
+        # `Debug` checkbox; mirrored into / out of `self._debug_cb`
+        # each frame so the checkbox state and rendering decisions
+        # stay in sync.  When True, every on-screen debug overlay
+        # lights up (HP markers, fire-card outlines, ...).
+        # Backward compat: pre-v1.50 used two separate keys
+        # (`show_hardpoints`, `show_fire_cards`).  If either was
+        # true in the old config, we start in debug mode so the
+        # user doesn't lose their preference.  cleanup() drops the
+        # legacy keys on save.
+        self._debug = bool(
+            self._cfg.get('debug', False)
+            or self._cfg.get('show_hardpoints', False)
+            or self._cfg.get('show_fire_cards', False))
 
         # Per-engine-class smoke / fire settings.  Loaded from config
         # (each class is a dict of float fields) and merged with the
@@ -1371,16 +1377,14 @@ class Viewer:
         self._invert_shine_cb = self.ui.add_checkbox(
             'AO',   cx, cy2 - cb_size // 2, cb_size, checked=True,
             group_id='lighting')
-        # Hardpoint-marker visibility toggle, lives in the smoke control
-        # block on the right panel.  Position is finalised in _layout_widgets.
-        self._show_hp_cb = self.ui.add_checkbox(
-            'Show HP', cx, cy6 - cb_size // 2, cb_size,
-            checked=self._show_hardpoints, group_id='smoke')
-        # Fire-card outline toggle (debug).  Same panel + same row
-        # pattern as Show HP; final position set by _layout_widgets.
-        self._show_fire_cb = self.ui.add_checkbox(
-            'Show Fire', cx, cy6 - cb_size // 2, cb_size,
-            checked=self._show_fire_cards, group_id='smoke')
+        # Master Debug checkbox.  Replaces the previous Show HP +
+        # Show Fire pair.  When checked, every on-screen debug
+        # overlay lights up at once -- see `self._debug` for the
+        # convention going forward.  Position finalised in
+        # `_layout_widgets`.
+        self._debug_cb = self.ui.add_checkbox(
+            'Debug', cx, cy6 - cb_size // 2, cb_size,
+            checked=self._debug, group_id='smoke')
 
     # ------------------------------------------------------------------
     # Window / GL state
@@ -5263,9 +5267,10 @@ class Viewer:
         CB_ROW_H      = 16     # checkbox cell + tiny gap
         BOTTOM_MARGIN_R = 10
         n_sliders     = sum(1 for sl in right_sliders if sl)
-        # Two checkbox rows: row 1 = PerVtx + Show HP, row 2 = Show Fire.
+        # One checkbox row: PerVtx + Debug share it (Debug replaces
+        # the old Show HP / Show Fire pair as a single master toggle).
         required_h    = (TOP_PAD + n_sliders * ROW_H
-                         + 2 * CB_ROW_H + BOTTOM_MARGIN_R)
+                         + CB_ROW_H + BOTTOM_MARGIN_R)
         self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
                                      required_h)
 
@@ -5291,28 +5296,23 @@ class Viewer:
             sl.value_x  = R_VAL_X
             sl.visible  = True
 
-        # PerVtx + Show HP share one row BELOW the slider stack.
-        # PerVtx sits on the LEFT (where Show HP used to be); Show HP
-        # moves OVER to the right side of the same row so both
-        # toggles fit without adding another row to the panel.
+        # PerVtx (normals shader mode) + Debug (master debug-overlay
+        # toggle) share one row BELOW the slider stack.  PerVtx is
+        # NOT a debug toggle -- it picks the normals shader's
+        # by-face vs by-vertex visualisation -- so it stays alongside
+        # Debug rather than getting folded into it.
         cb_row_y = (smoke_y0 + len(right_sliders) * ROW_H
                     - 14 // 2)    # 14 = checkbox size
         if self._normals_mode_cb:
             self._normals_mode_cb.x = right_x + 8
             self._normals_mode_cb.y = cb_row_y
             self._normals_mode_cb.visible = True
-        if self._show_hp_cb:
+        if self._debug_cb:
             # Right side of the row -- past the slider value column so
             # the labels don't crowd each other.
-            self._show_hp_cb.x = right_x + 150
-            self._show_hp_cb.y = cb_row_y
-            self._show_hp_cb.visible = True
-        # Show Fire sits on its own row below the PerVtx / Show HP
-        # row.  Same left margin as PerVtx; CB_ROW_H below.
-        if self._show_fire_cb:
-            self._show_fire_cb.x = right_x + 8
-            self._show_fire_cb.y = cb_row_y + CB_ROW_H
-            self._show_fire_cb.visible = True
+            self._debug_cb.x = right_x + 150
+            self._debug_cb.y = cb_row_y
+            self._debug_cb.visible = True
 
         # All other widgets stay visible
         for w in self.ui.sliders + self.ui.checkboxes:
@@ -5805,15 +5805,16 @@ class Viewer:
                 light_model[2, 3] = lz
                 self.light_sphere.render(self.color_shader, light_model, view, proj)
 
-        # Mirror the Show HP checkbox into the visibility flag so the
-        # marker rendering below respects it without an event callback.
-        if self._show_hp_cb is not None:
-            self._show_hardpoints = bool(self._show_hp_cb.checked)
+        # Mirror the Debug checkbox into the master flag so every
+        # on-screen debug overlay below respects it without an
+        # event callback.  Convention: any new debug-only render
+        # should gate on `self._debug`.
+        if self._debug_cb is not None:
+            self._debug = bool(self._debug_cb.checked)
 
         # Hardpoint markers -- orange sphere at each discovered exhaust
-        # node + 0.5-unit cyan direction vector.  Gated by the "Show HP"
-        # checkbox in the smoke panel (mirrors self._show_hardpoints).
-        if self._show_hardpoints:
+        # node + 0.5-unit cyan direction vector.  Debug-only.
+        if self._debug:
             for hp in self._exhaust_points:
                 hp_model = np.eye(4, dtype=np.float32)
                 hp_model[0, 3] = float(hp['pos'][0])
@@ -5898,11 +5899,10 @@ class Viewer:
             self.fire_billboards.render(self.particle_shader, view, proj)
 
         # ---- Fire-card outlines (debug) ----------------------------------
-        # Mirror the Show Fire checkbox into the boolean each frame so
-        # toggling it lights up the outlines without an event hook.
-        if self._show_fire_cb is not None:
-            self._show_fire_cards = bool(self._show_fire_cb.checked)
-        if (self._show_fire_cards
+        # Gated on the master Debug flag (set above).  Same convention
+        # as the HP markers -- if you're adding a new on-screen debug
+        # overlay, check `self._debug` here.
+        if (self._debug
                 and self.fire_billboards is not None
                 and self.fire_billboards.emitters):
             # Mirror the bottom-anchored offsets the textured pass uses
@@ -6096,9 +6096,12 @@ class Viewer:
                 self._cfg['normals_length']          = float(self._normals_slider.value)
             if self._normals_mode_cb is not None:
                 self._cfg['normals_per_vertex']      = bool(self._normals_mode_cb.checked)
-            # Hardpoint marker visibility (Show HP checkbox in smoke panel)
-            self._cfg['show_hardpoints']     = bool(self._show_hardpoints)
-            self._cfg['show_fire_cards']     = bool(self._show_fire_cards)
+            # Master debug-overlay flag (Debug checkbox).  Replaces
+            # the pre-v1.50 split keys; both old keys are dropped
+            # so the JSON ends up with only `debug`.
+            self._cfg['debug'] = bool(self._debug)
+            self._cfg.pop('show_hardpoints', None)
+            self._cfg.pop('show_fire_cards', None)
             _config.save(self._cfg)
         except Exception as exc:
             print(f"[viewer] config save (sliders) failed: {exc}")

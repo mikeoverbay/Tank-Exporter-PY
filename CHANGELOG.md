@@ -9,6 +9,29 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Single Debug master toggle (1.50.0)
+
+Replaced the **Show HP** + **Show Fire** checkboxes with a single
+**Debug** master toggle in the right control panel.  When checked,
+every on-screen debug overlay lights up at once -- HP markers, fire-
+billboard outlines, and anything else we add later.
+
+The convention going forward: any new diagnostic-only render gets
+gated on `self._debug`.  Comment in `_debug_cb`'s declaration spells
+this out so future overlays don't grow their own one-off toggles.
+
+Backward-compat: pre-v1.50 split the state across `show_hardpoints`
+and `show_fire_cards` keys.  Startup OR's both keys with the new
+`debug` key, so a user who had either enabled comes up in debug
+mode.  cleanup() drops both legacy keys at save time so the JSON
+ends up with only `debug`.
+
+`PerVtx` stays where it was (it's a normals-shader visualisation
+mode, not debug per se).  Right panel is back to one checkbox row
+(`PerVtx | Debug`); `RIGHT_CONTROLS_H` shrinks accordingly.
+
+Files: `tankviewer/viewer.py`.
+
 ### Show Fire debug outlines (1.49.0)
 
 New checkbox in the right control panel: **Show Fire** -- when on,
