@@ -3553,6 +3553,18 @@ class Viewer:
             print(f"[viewer] tanks.txt: "
                   f"{len(self._tanks_display_map)} active tanks")
         tanks_txt_map = self._tanks_display_map
+        # Fallback: if tanks.txt is missing OR parsed empty (file
+        # got deleted, fresh checkout where the tracked file is
+        # gone, etc.), don't collapse the tree to nothing.  Treat
+        # EVERY list.xml entry as in-scope, using the basename as
+        # the display name.  Loses the curated short labels
+        # ('T-34-85' instead of 'A14_T_34_85') but the tree is
+        # usable instead of empty.
+        no_tanks_txt = not tanks_txt_map
+        if no_tanks_txt:
+            print(f"[viewer] tanks.txt missing/empty -- using "
+                  f"list.xml for the tree (no curated display "
+                  f"names; basename used instead)")
 
         skipped = 0
         for nation in sorted(nations.keys()):
@@ -3561,13 +3573,13 @@ class Viewer:
             for entry in entries:
                 xml_name = entry['xml']
                 base     = xml_name[:-4]
-                if base not in tanks_txt_map:
+                if not no_tanks_txt and base not in tanks_txt_map:
                     skipped += 1
                     continue
                 tier = entry.get('tier')
                 if tier_filter is not None and tier != tier_filter:
                     continue
-                display = tanks_txt_map[base]
+                display = tanks_txt_map.get(base, base)
                 vclass  = entry.get('vclass')
                 tier_str   = f"T{tier:>2}" if tier is not None else "T--"
                 tank_label = f"{tier_str}  {base}"

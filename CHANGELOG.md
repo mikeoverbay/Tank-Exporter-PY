@@ -9,6 +9,25 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Tree fallback when tanks.txt is missing (1.52.1)
+
+The tier-tree builder filtered against `_tanks_display_map`
+(loaded from `tanks.txt`).  When that file went missing, the map
+came back empty and EVERY tank got skipped -- empty tree across
+every tier, no useful UI.
+
+Now the builder detects an empty `tanks_txt_map` and treats every
+`list.xml` entry as in-scope, using the basename as the display
+name.  Loses the curated short labels (`T-34-85` instead of
+`A14_T_34_85`) but the tree is usable.  A console line tells the
+user what happened.
+
+The `tanks_txt_map[base]` lookup further down also got a `.get`
+with a basename fallback so a partial map (some entries missing)
+no longer KeyErrors.
+
+Files: `tankviewer/viewer.py`.
+
 ### Fuzzy tank-name match + auto tank-list rebuild (1.52.0)
 
 Two related FBX-import quality-of-life fixes:
