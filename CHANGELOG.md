@@ -9,6 +9,27 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Rename `_active_group` -> `_active_engine_class` (1.50.3)
+
+Cosmetic-only rename for clarity.  The field tracks which WoT
+engine class (`gas_small`, `diesel_large`, ...) is currently
+selected for slider editing; the old name was a holdover from when
+the radio-checkbox UI also used the term "group" and could be
+mistaken for "tier" or "selection group" by anyone reading the
+code cold.
+
+Two methods that ended in `_active_group` came along for the ride:
+
+* `_load_active_group` -> `_load_active_engine_class`
+* `_set_active_group`  -> `_set_active_engine_class`
+
+No behavioural change.  All 24 references in `viewer.py` updated
+in one sweep + the `ARCHITECTURE.md` Viewer-method table line.
+Historical `CHANGELOG.md` entries left untouched -- they describe
+what the code said at the time.
+
+Files: `tankviewer/viewer.py`, `ARCHITECTURE.md`.
+
 ### Single-source-of-truth slider persist (1.50.2)
 
 Refactored slider persistence into one routine, `_persist_all_sliders`,

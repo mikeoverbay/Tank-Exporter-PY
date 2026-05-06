@@ -791,7 +791,7 @@ class Viewer:
         # Per-engine-class smoke / fire settings.  Loaded from config
         # (each class is a dict of float fields) and merged with the
         # built-in defaults so a missing field falls through to the
-        # default rather than crashing.  `self._active_group` tracks
+        # default rather than crashing.  `self._active_engine_class` tracks
         # which class's values are currently mirrored into the
         # sliders -- it's auto-wired to the loaded tank's
         # `<exhaust><pixie>` value by load_vehicle / load_mesh, so
@@ -815,7 +815,7 @@ class Viewer:
         self._migrate_legacy_smoke_fire_config()
         # Default editing target = the fallback class (gas_medium)
         # until a tank loads and tells us its real engine class.
-        self._active_group = self._DEFAULT_PIXIE_CLASS
+        self._active_engine_class = self._DEFAULT_PIXIE_CLASS
 
         self._build_ui()
 
@@ -1137,9 +1137,9 @@ class Viewer:
 
         Snapshots EVERY slider's current value onto `self._cfg`.
         Per-engine-class sliders (smoke / fire) get routed into
-        `self._smoke_groups[self._active_group]` /
-        `self._fire_groups[self._active_group]` -- the routing key
-        is `self._active_group` (the engine-class auto-wired from
+        `self._smoke_groups[self._active_engine_class]` /
+        `self._fire_groups[self._active_engine_class]` -- the routing key
+        is `self._active_engine_class` (the engine-class auto-wired from
         the loaded tank's `<exhaust><pixie>` value, e.g. `gas_small`,
         `diesel_large`).  Global sliders (Light / Ambient / Normals)
         land in flat config keys regardless of engine class.
@@ -1151,7 +1151,7 @@ class Viewer:
                pass `write_json=True` so tweaks persist instantly.
             2. Per-frame mirror in `render()` -- `write_json=False`
                (no disk I/O on every frame; just keeps the dicts
-               in sync so a `_set_active_group` swap doesn't lose
+               in sync so a `_set_active_engine_class` swap doesn't lose
                in-progress edits).
             3. `cleanup()` on window close -- `write_json=False`
                since cleanup writes its own JSON after also
@@ -1163,9 +1163,9 @@ class Viewer:
                 raised -- a missed mid-session save still leaves
                 cleanup()'s on-exit save as a fallback.
         """
-        # ---- Per-engine-class sliders -- route by self._active_group
+        # ---- Per-engine-class sliders -- route by self._active_engine_class
         # (the engine level) into the matching slot.
-        engine = self._active_group
+        engine = self._active_engine_class
         g = self._smoke_groups.get(engine)
         if g is not None:
             if self._smoke_start_slider:
@@ -1201,9 +1201,9 @@ class Viewer:
             except Exception as exc:
                 print(f"[viewer] slider persist write failed: {exc}")
 
-    def _load_active_group(self):
+    def _load_active_engine_class(self):
         """Push the active group's stored values onto the sliders."""
-        g = self._smoke_groups.get(self._active_group)
+        g = self._smoke_groups.get(self._active_engine_class)
         if g is not None:
             if self._smoke_start_slider:
                 self._smoke_start_slider.value = g['start_size']
@@ -1215,11 +1215,11 @@ class Viewer:
                 self._smoke_fade_slider.value = g['fade_start_frame']
             if self._smoke_fade_end_slider:
                 self._smoke_fade_end_slider.value = g['fade_end_frame']
-        gf = self._fire_groups.get(self._active_group)
+        gf = self._fire_groups.get(self._active_engine_class)
         if gf is not None and self._fire_size_slider:
             self._fire_size_slider.value = gf['size']
 
-    def _set_active_group(self, group):
+    def _set_active_engine_class(self, group):
         """Switch which engine-class the smoke / fire sliders edit.
 
         Auto-wired by load_vehicle / load_mesh from the loaded tank's
@@ -1235,15 +1235,15 @@ class Viewer:
         """
         if not group or group not in self._smoke_groups:
             group = self._DEFAULT_PIXIE_CLASS
-        if group == self._active_group:
+        if group == self._active_engine_class:
             return
         # Capture the OUTGOING engine class's slider values into its
         # group slot before we re-key.  No JSON write here -- the
         # mouse-up handler already persisted on release; this is just
         # the in-memory snapshot.
         self._persist_all_sliders(write_json=False)
-        self._active_group = group
-        self._load_active_group()
+        self._active_engine_class = group
+        self._load_active_engine_class()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1359,11 +1359,11 @@ class Viewer:
         # settings table -- one set of values for small / medium /
         # large engines.  The radio-checkbox row below selects which
         # group the sliders edit; default editing target is 'medium'
-        # (matches `self._active_group` in __init__).  Per-tank live
+        # (matches `self._active_engine_class` in __init__).  Per-tank live
         # render uses the loaded tank's own group based on its
-        # <exhaust><pixie> value -- see _set_active_group / load_vehicle.
-        active_smoke = self._smoke_groups[self._active_group]
-        active_fire  = self._fire_groups[self._active_group]
+        # <exhaust><pixie> value -- see _set_active_engine_class / load_vehicle.
+        active_smoke = self._smoke_groups[self._active_engine_class]
+        active_fire  = self._fire_groups[self._active_engine_class]
 
         # Fade-range slider value_max scales with the actual loaded
         # flipbook frame count -- otherwise swapping in a shorter set
@@ -1721,8 +1721,8 @@ class Viewer:
         # newly-loaded tank's class.  Tweaks the user makes from here
         # on save into THIS tank's class (e.g. 'gas_small') instead of
         # whatever was active before (likely 'gas_medium' from the
-        # default).  See _set_active_group for the swap mechanics.
-        self._set_active_group(self._exhaust_pixie)
+        # default).  See _set_active_engine_class for the swap mechanics.
+        self._set_active_engine_class(self._exhaust_pixie)
 
         # 3: Hull visual file -> walk for hardpoints
         hull_vis_path = (f'vehicles/{nation}/{tank_basename}/'
@@ -4723,9 +4723,9 @@ class Viewer:
             exhaust_spec = VehicleXMLLoader.find_engine_exhaust(xml_path)
             self._exhaust_pixie = (exhaust_spec or {}).get('pixie')
             # Auto-wire the per-engine-class smoke / fire sliders to
-            # this tank's class.  See _set_active_group / cleanup for
+            # this tank's class.  See _set_active_engine_class / cleanup for
             # the persistence side.
-            self._set_active_group(self._exhaust_pixie)
+            self._set_active_engine_class(self._exhaust_pixie)
             exhaust_node_names  = set(
                 n.lower() for n in (exhaust_spec or {}).get('nodes', []))
             if exhaust_spec:
@@ -5885,7 +5885,7 @@ class Viewer:
         # ---- Mirror live slider values back into the active engine
         # class.  Single-source-of-truth sub: routing logic lives
         # inside `_persist_all_sliders`, which uses
-        # `self._active_group` (the engine class) as the routing
+        # `self._active_engine_class` (the engine class) as the routing
         # ref.  No JSON write here -- mouse-up handles that.
         self._persist_all_sliders(write_json=False)
 

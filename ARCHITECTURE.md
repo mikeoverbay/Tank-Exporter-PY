@@ -389,7 +389,8 @@ Main application class.
 | `_apply_button_action(btn)` / `_sync_button_state(attr, value)` | Bar-button ↔ flag mirroring | — |
 | `_init_pkg_extractor_early()` | Build `PkgExtractor` from config or default WoT NA path before any mesh load | — |
 | `_prewarm_first_load_caches()` | Splash-time pre-warm of the three "lazy on first tank load" caches: `ArmorColorLoader`, `VehicleXMLLoader._shared_xml_cache`, and (the big one) Pillow's DDS codec + GL driver tex-upload pools via one real `Details_map.dds` upload | — |
-| `_set_active_group(pixie)` | Switch which engine-class slot (`gas_small` / `diesel_large` / etc.) the smoke + fire sliders edit; auto-called from `load_vehicle` with the loaded tank's `<exhaust><pixie>` value | str\|None |
+| `_set_active_engine_class(pixie)` | Switch which engine-class slot (`gas_small` / `diesel_large` / etc.) the smoke + fire sliders edit; auto-called from `load_vehicle` with the loaded tank's `<exhaust><pixie>` value | str\|None |
+| `_persist_all_sliders(write_json)` | Single source of truth for slider persistence -- routes per-engine sliders into `self._smoke_groups[self._active_engine_class]` / `self._fire_groups[...]`, global sliders into flat keys, optionally writes the JSON.  Called from mouse-up release (write), per-frame mirror (no write), and `cleanup()` (no write -- cleanup folds in checkboxes + drops legacy keys before its own save) | bool |
 | `_build_tree_panel()` | Populate the tank-browser tree (filtered by `tanks.txt`) | — |
 | `_load_tanks_txt(valid_basenames)` | Parse Tank Exporter's `tanks.txt` → `{xml_basename: display_name}`; resolves 30-char truncations by prefix | set of names |
 | `_on_tree_tank_selected(node)` | Open the load-confirm dialog | UITreeNode |
