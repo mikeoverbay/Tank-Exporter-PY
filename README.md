@@ -126,7 +126,7 @@ git clone https://github.com/mikeoverbay/Tank-Exporter-PY.git
 > version lands you can either re-download the ZIP and replace
 > the old folder, or switch to **Option A** so `git pull` does
 > the update for you.  If you replace the folder, keep your
-> `tankviewer.json` config and `resources/requirements_backup/`
+> `tankExporterPy.json` config and `resources/requirements_backup/`
 > from the old install -- the first preserves your WoT paths,
 > the second saves the requirements re-download.
 
@@ -134,7 +134,7 @@ git clone https://github.com/mikeoverbay/Tank-Exporter-PY.git
 
 TEPY reads and writes inside its own project folder
 (`TheItemList.xml`, the requirements backup, your saved
-`tankviewer.json` config, etc.), so put it somewhere your user
+`tankExporterPy.json` config, etc.), so put it somewhere your user
 account can write without UAC prompts.  Recommended:
 
 ```
@@ -190,7 +190,7 @@ python tankExporterPy.py
 ### First-time setup
 
 Point TEPY at your WoT install once (paths get saved to
-`tankviewer.json` and reused forever):
+`tankExporterPy.json` and reused forever):
 
 ```
 python tankExporterPy.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
@@ -211,7 +211,7 @@ confirm in the load dialog, and the viewer assembles the full vehicle
 
 | Button       | What it does                                                   |
 | ------------ | -------------------------------------------------------------- |
-| **Set Paths**| Configure WoT install paths (saved to `tankviewer.json`).      |
+| **Set Paths**| Configure WoT install paths (saved to `tankExporterPy.json`).      |
 | **Import**   | Read FBX / GLB / OBJ back into the viewer (Blender bridge).    |
 | **Export**   | Write the loaded tank as FBX / GLB / GLTF / OBJ.               |
 | **Save Prim**| Write hull / chassis / turret / gun back as `.primitives_processed` into `res_mods/`. |

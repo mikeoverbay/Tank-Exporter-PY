@@ -62,7 +62,7 @@ Argparse-driven entry point.
 |-----|----------|---------|
 | `filepath` | optional | `.primitives_processed` or vehicle `.xml` to load.  Omit to start with an empty scene and pick a tank from the tree panel. |
 
-**Options** (each persists into `tankviewer.json`)
+**Options** (each persists into `tankExporterPy.json`)
 
 | Flag | Effect |
 |------|--------|
@@ -89,7 +89,7 @@ Shared utilities with no OpenGL dependency.
 
 ## `tankviewer/config.py`
 
-Tiny persistent-config helper backed by `tankviewer.json` next to
+Tiny persistent-config helper backed by `tankExporterPy.json` next to
 `tankExporterPy.py`.
 
 | Symbol | Purpose |

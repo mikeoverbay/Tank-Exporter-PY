@@ -16,7 +16,7 @@ sourced from the WoT install and Tank Exporter's tank list.
 ✓ **Texture / AO / GMM channel handling** — auto-detects skinned vs non-skinned alpha & AO routing
 ✓ **Interactive camera** — right-click orbit, middle-click pan, scroll-wheel zoom
 ✓ **2-D overlay** — toggle bar for Grid / Axes / Light / Skybox / Wireframe, sliders for Light & Ambient, NMap / AO check-boxes
-✓ **Persistent config** — CLI overrides for `--pkg-dir` / `--res-mods` / `--lookup-xml` are saved to `tankviewer.json`
+✓ **Persistent config** — CLI overrides for `--pkg-dir` / `--res-mods` / `--lookup-xml` are saved to `tankExporterPy.json`
 
 ## Requirements
 
@@ -53,7 +53,7 @@ python tankExporterPy.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
 python tankExporterPy.py --res-mods "C:\Games\World_of_Tanks_NA\res_mods\<version>"
 ```
 
-The paths are written to `tankviewer.json` (next to `tankExporterPy.py`)
+The paths are written to `tankExporterPy.json` (next to `tankExporterPy.py`)
 and reused on every subsequent run.
 
 **Examples:**

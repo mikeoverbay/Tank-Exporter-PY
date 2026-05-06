@@ -9,6 +9,40 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Config rename + key-whitelist removal (1.48.2)
+
+Two related fixes that explain why users were still seeing old-format
+config files even after running v1.46+:
+
+**Filename rename**: `tankviewer.json` -> `tankExporterPy.json` so
+the config matches the launcher (`tankExporterPy.py`), the GitHub
+repo (`Tank-Exporter-PY`), and the TEPY brand.  `config.py` does
+a one-time `os.rename` on first run when the new file is missing
+and the old one exists -- the user's existing settings carry over
+unchanged.  Both filenames are now gitignored.  Untracked the old
+`tankviewer.json` from the repo so a fresh clone doesn't ship one
+user's machine paths.
+
+**Key-whitelist removal**: `config.load()` and `config.save()` used
+to filter against `_DEFAULTS` -- a defensive measure that turned
+into a bug when the schema grew nested dicts.  Result: the new
+`smoke_groups` / `fire_groups` keys we added in v1.46.0 were
+silently dropped during both load AND save, so the JSON never
+showed the new structure no matter how cleanly the user exited.
+Now `load()` reads + `save()` writes whatever the dict carries;
+`_DEFAULTS` is just the floor for missing-key fill-in.  The
+viewer's `_migrate_legacy_smoke_fire_config` and the cleanup()
+key-drop list (added in 1.48.1) now actually have a path to run.
+
+After one clean exit on v1.48.2, your `tankExporterPy.json` will
+finally show the per-engine-class structure -- with whatever you
+had tuned in the old flat keys folded into `gas_medium`.
+
+Files touched: `tankviewer/config.py`, `.gitignore`,
+`tankExporterPy.py`, `cust_tools/extract_wot_fire_atlas.py`,
+`uninstall.bat`, `README.md`, `README_TANK_VIEWER.md`,
+`ARCHITECTURE.md`, plus the on-disk file rename.
+
 ### Migrate + drop legacy smoke/fire config keys (1.48.1)
 
 A bug from the v1.46.0 per-engine-class refactor: cleanup() wrote

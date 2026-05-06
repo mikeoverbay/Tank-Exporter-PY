@@ -4,7 +4,7 @@
 ::
 ::  Removes every Python package go.bat installs.  Leaves the project
 ::  source tree, the permanent backup at
-::  `resources\requirements_backup\`, and the user's tankviewer.json
+::  `resources\requirements_backup\`, and the user's tankExporterPy.json
 ::  config alone -- this script ONLY un-pip's the dependencies.
 ::
 ::  Companion to go.bat / reinstall.bat.

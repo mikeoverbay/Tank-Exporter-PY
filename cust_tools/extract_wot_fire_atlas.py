@@ -180,7 +180,7 @@ def _locate_pkg(extra_paths=()):
     """Find particles.pkg.  Search order:
 
         1. Any extra paths the caller supplied (e.g. the user's
-           configured `pkg_dir` from tankviewer.json).
+           configured `pkg_dir` from tankExporterPy.json).
         2. The hardcoded NA / EU / RU / standalone candidates.
 
     Returns the absolute path to the pkg, or None if no candidate
@@ -286,7 +286,7 @@ def ensure_runtime_flipbooks(resources_dir, pkg_path=None,
         pkg_path        (str|None) : explicit particles.pkg
         extra_pkg_paths (iterable) : additional pkg search paths
                                      (typically the user's configured
-                                     pkg_dir from tankviewer.json)
+                                     pkg_dir from tankExporterPy.json)
         force           (bool)     : re-slice even if folders are
                                      already populated
 

@@ -12,7 +12,7 @@ Options:
     --pkg-dir  <path>     Path to WoT res/packages/ folder (saved to config)
     --res-mods <path>     Path to res_mods/<version>/ folder (saved to config)
 
-    Supplied paths are written to tankviewer.json so you only need to set
+    Supplied paths are written to tankExporterPy.json so you only need to set
     them once; subsequent runs use them automatically.
 
 Controls:
@@ -56,19 +56,19 @@ def main():
         '--pkg-dir',
         metavar='DIR',
         default=None,
-        help='Path to WoT res/packages/ folder (persisted to tankviewer.json)',
+        help='Path to WoT res/packages/ folder (persisted to tankExporterPy.json)',
     )
     parser.add_argument(
         '--res-mods',
         metavar='DIR',
         default=None,
-        help='Path to res_mods/<version>/ folder (persisted to tankviewer.json)',
+        help='Path to res_mods/<version>/ folder (persisted to tankExporterPy.json)',
     )
     parser.add_argument(
         '--lookup-xml',
         metavar='FILE',
         default=None,
-        help='Path to TheItemList.xml pkg lookup file (persisted to tankviewer.json)',
+        help='Path to TheItemList.xml pkg lookup file (persisted to tankExporterPy.json)',
     )
     args = parser.parse_args()
 
