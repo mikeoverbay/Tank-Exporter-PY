@@ -1681,13 +1681,32 @@ class UIConsole:
             self._copy_tex, self._copy_w, self._copy_h = (
                 ui_manager._make_tex('Copy', (235, 240, 250)))
 
-        chev = '+' if self.collapsed else '-'
+        # Up / down chevron matching the left-panel info spine's
+        # visual treatment (Segoe UI 16 bold, white-ish).  Direction
+        # follows where the click sends the panel:
+        #   * collapsed -> arrow up   (click expands UPWARD into view)
+        #   * expanded  -> arrow down (click collapses DOWNWARD out of view)
+        # Triangle glyphs render bigger / heavier than ASCII v / ^,
+        # matching the spine's `<` / `>` weight.
+        chev = '▲' if self.collapsed else '▼'
         if chev != self._chev_text_cached:
             if self._chev_tex:
                 try: glDeleteTextures(1, [self._chev_tex])
                 except Exception: pass
-            self._chev_tex, self._chev_w, self._chev_h = (
-                ui_manager._make_tex(chev, (235, 240, 250)))
+            big_font = pygame.font.SysFont('Segoe UI', 16, bold=True)
+            surf = big_font.render(chev, True, (220, 220, 230))
+            data = pygame.image.tostring(surf, 'RGBA', False)
+            w, h = surf.get_width(), surf.get_height()
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tid)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, data)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            self._chev_tex, self._chev_w, self._chev_h = tid, w, h
             self._chev_text_cached = chev
 
         # ---- header bar -----------------------------------------------

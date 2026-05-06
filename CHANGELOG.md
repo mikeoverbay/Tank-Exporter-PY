@@ -9,6 +9,21 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Console chevron matches the left-panel spine style (1.56.1)
+
+The bottom console's collapse / expand button used `+` / `-`
+glyphs in the small Calibri 13 font.  Switched to `▲` (up) and
+`▼` (down) triangles in Segoe UI 16 bold, the same weight the
+left info-panel spine uses for its `<` / `>` chevrons.  Direction
+follows the click action: collapsed -> arrow up (click expands
+upward into view), expanded -> arrow down (click collapses
+downward out of view).
+
+The two toggles now read consistently: spine left/right for the
+side panel, console up/down for the bottom panel.
+
+Files: `tankExporterPy/ui.py`.
+
 ### Seed real translations into all 20 languages (1.56.0)
 
 The 1.55.0 framework shipped 20 stub catalogs that fell back to
