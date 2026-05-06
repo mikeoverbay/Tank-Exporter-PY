@@ -121,16 +121,16 @@ See **`ARCHITECTURE.md`** for a per-module / per-class reference.  At a glance:
 
 | Module | What lives there |
 |--------|------------------|
-| `tankviewer/loaders.py` | `MeshParser`, `VisualLoader`, `TextureLoader`, `PkgExtractor`, `VehicleXMLLoader` |
-| `tankviewer/mesh.py` | `Mesh` (VAO + 4 material textures, idempotent `cleanup()`) |
-| `tankviewer/scene.py` | `Camera`, `Grid`, `Axes`, `Sphere` (orbit-light indicator) |
-| `tankviewer/shaders.py` | `ShaderProgram` (PBR), `UIShader`, `SimpleColorShader`, `SkyboxShader`, `IBLPrefilterShader` |
-| `tankviewer/skybox.py` | `Skybox` — also bakes `irradiance_id` / `prefiltered_id` / `brdf_lut_id` for IBL |
-| `tankviewer/ui.py` | `UIButton`, `UISlider`, `UICheckbox`, `UITreeView` / `UITreeNode`, `UIConfirmDialog`, `UIManager` |
-| `tankviewer/viewer.py` | `Viewer` (event loop, scene lifecycle, tank-browser wiring) |
-| `tankviewer/common.py` | bit-packed normal decoders, BWXML decoder, shader-source loader |
-| `tankviewer/config.py` | persistent JSON config (`pkg_dir`, `res_mods`, `lookup_xml`) |
-| `tankviewer/xloader.py` | text-format DirectX `.x` parser (skybox cube only) |
+| `tankExporterPy/loaders.py` | `MeshParser`, `VisualLoader`, `TextureLoader`, `PkgExtractor`, `VehicleXMLLoader` |
+| `tankExporterPy/mesh.py` | `Mesh` (VAO + 4 material textures, idempotent `cleanup()`) |
+| `tankExporterPy/scene.py` | `Camera`, `Grid`, `Axes`, `Sphere` (orbit-light indicator) |
+| `tankExporterPy/shaders.py` | `ShaderProgram` (PBR), `UIShader`, `SimpleColorShader`, `SkyboxShader`, `IBLPrefilterShader` |
+| `tankExporterPy/skybox.py` | `Skybox` — also bakes `irradiance_id` / `prefiltered_id` / `brdf_lut_id` for IBL |
+| `tankExporterPy/ui.py` | `UIButton`, `UISlider`, `UICheckbox`, `UITreeView` / `UITreeNode`, `UIConfirmDialog`, `UIManager` |
+| `tankExporterPy/viewer.py` | `Viewer` (event loop, scene lifecycle, tank-browser wiring) |
+| `tankExporterPy/common.py` | bit-packed normal decoders, BWXML decoder, shader-source loader |
+| `tankExporterPy/config.py` | persistent JSON config (`pkg_dir`, `res_mods`, `lookup_xml`) |
+| `tankExporterPy/xloader.py` | text-format DirectX `.x` parser (skybox cube only) |
 
 ## Technical Details
 

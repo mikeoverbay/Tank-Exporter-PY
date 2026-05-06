@@ -542,7 +542,7 @@ If section_name contains "indices":
 
 ### Current Python rewrite (Tank Exporter PY)
 
-- **Load entry point:** `tankviewer/loaders.py :: MeshParser.parse_primitives_processed()`
+- **Load entry point:** `tankExporterPy/loaders.py :: MeshParser.parse_primitives_processed()`
 - **Section grouping & sidecar discovery:** the inner `_strip_known_suffix`
   helper claims `.vertices` / `.indices` / `.uv2` (with spelling
   variants) / `.colour` (with spelling variants).
@@ -640,10 +640,10 @@ be respected if we ever drive a Blender skin cluster from this data.
 
 ## Writing the format
 
-The encoder lives at `tankviewer/writers/_primitive_encoder.py`; the
+The encoder lives at `tankExporterPy/writers/_primitive_encoder.py`; the
 public entry point is `encode_file(meshes, want_uv2=True)` and the
 public wrapper that drops it on disk atomically is
-`tankviewer.writers.write_primitives()`.
+`tankExporterPy.writers.write_primitives()`.
 
 ### Two layouts the encoder must support
 
@@ -706,4 +706,4 @@ round-trip fidelity.
 * `ARCHITECTURE.md` — per-module / per-class reference.
 * `README_TANK_VIEWER.md` — user-facing feature list and controls.
 * `shaders/formats/` inside `res/packages/shaders.pkg` — authoritative
-  WoT format definitions (BWXML; decode with `tankviewer.common.decode_bwxml`).
+  WoT format definitions (BWXML; decode with `tankExporterPy.common.decode_bwxml`).

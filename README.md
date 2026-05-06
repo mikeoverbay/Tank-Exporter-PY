@@ -283,7 +283,7 @@ If TEPY is useful to you, consider supporting development:
 
 ```
 tankExporterPy.py              entry point
-tankviewer/                 main package (loaders, writers, UI, render)
+tankExporterPy/                 main package (loaders, writers, UI, render)
 cust_tools/                 diagnostic + asset-generation scripts
 shaders/                    GLSL 330 shader sources
 resources/                  splash, banner, icons, environment maps

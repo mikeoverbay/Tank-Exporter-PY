@@ -24,7 +24,7 @@ Controls:
     R                 — reset camera
     ESC               — quit
 
-All application logic lives in the tankviewer/ package.
+All application logic lives in the tankExporterPy/ package.
 
 History: this file was previously named `tank_viewer.py`; renamed to
 `tankExporterPy.py` so the entry-point matches the GitHub repo name
@@ -77,7 +77,7 @@ def main():
         sys.exit(1)
 
     # Load config and apply any CLI overrides (then persist)
-    from tankviewer import config
+    from tankExporterPy import config
     cfg = config.load()
     changed = False
 
@@ -99,7 +99,7 @@ def main():
     print(f"[config] pkg_dir  : {cfg['pkg_dir']  or '(auto-detect)'}")
     print(f"[config] res_mods : {cfg['res_mods'] or '(auto-detect)'}")
 
-    from tankviewer.viewer import Viewer
+    from tankExporterPy.viewer import Viewer
     Viewer(args.filepath, cfg).run()
 
 

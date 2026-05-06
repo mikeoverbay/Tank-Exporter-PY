@@ -1,7 +1,7 @@
 """
 Blender-side runner: builds a scene from a JSON payload and exports it.
 
-Invoked by tankviewer.exporters.blender_bridge as:
+Invoked by tankExporterPy.exporters.blender_bridge as:
 
     blender --background --python <this file> -- \\
         --input  <payload.json> \\
@@ -15,7 +15,7 @@ material with texture filenames (relative to a sidecar 'tex_dir').
 
 NOTE: This file is executed by Blender's Python interpreter, not by the
 Tank Viewer's interpreter, so `bpy` is available here but the rest of
-the tankviewer package is NOT importable.  Keep imports minimal.
+the tankExporterPy package is NOT importable.  Keep imports minimal.
 """
 
 import os

@@ -1489,7 +1489,7 @@ class PkgExtractor:
         self._pending_persists = []
         self.wot_root  = wot_root
         self.pkg_dir   = pkg_dir or os.path.join(wot_root, 'res', 'packages')
-        self._temp_dir = tempfile.mkdtemp(prefix='tankviewer_pkg_')
+        self._temp_dir = tempfile.mkdtemp(prefix='tankExporterPy_pkg_')
         self._extracted = {}   # zip_path -> local path (already extracted)
         self._index     = {}   # pkg_path -> frozenset of names (lazy, scan-fallback only)
         # Open ZipFile handles per pkg.  Reading a single .primitives_processed
@@ -2177,7 +2177,7 @@ class PkgExtractor:
             # userString is a localization reference, format
             # `#<catalog>:<key>` (e.g. `#usa_vehicles:A37_M40M43`).
             # Resolved to a friendly localized name by
-            # tankviewer.localization.WoTLocalizer at consumption
+            # tankExporterPy.localization.WoTLocalizer at consumption
             # time.  We just carry the raw ref through here.
             user_str = None
             us_el = tank_el.find('userString')

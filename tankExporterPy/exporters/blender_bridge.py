@@ -6,7 +6,7 @@ launches Blender headless with `_blender_runner.py` to build the scene
 and write the requested format (FBX / GLB / GLTF / OBJ).
 
 This file holds the EXPORT path only.  The mirror import path lives at
-`tankviewer/importers/blender_bridge.py`; the two stay symmetric.
+`tankExporterPy/importers/blender_bridge.py`; the two stay symmetric.
 
 Public API:
     export_vehicle(viewer, output_path, blender_exe=None)
@@ -71,7 +71,7 @@ def export_vehicle(viewer, output_path, blender_exe=None, on_log=None):
     log(f"  tex_dir:  {payload['tex_dir']}")
 
     # 5. Stage the payload to a temp JSON file (Blender reads it)
-    fd, payload_path = tempfile.mkstemp(prefix='tankviewer_export_',
+    fd, payload_path = tempfile.mkstemp(prefix='tankExporterPy_export_',
                                          suffix='.json')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as fh:

@@ -6,7 +6,7 @@ subprocess to convert the in-memory tank into FBX / GLB / GLTF / OBJ.
 That gives us every format Blender supports for free without copying
 any GPL'd code.
 
-The mirror IMPORT path lives in `tankviewer.importers` (separate
+The mirror IMPORT path lives in `tankExporterPy.importers` (separate
 subpackage so each direction has its own home).
 
 Public API:
@@ -16,7 +16,7 @@ Public API:
     find_blender_executable(override=None)
         -- re-exported for convenience.  Locates blender.exe via
            registry / PATH / install-dir scan.  Lives in
-           `tankviewer.blender_locator`; both importers and exporters
+           `tankExporterPy.blender_locator`; both importers and exporters
            pull from there so there's a single source of truth.
 """
 

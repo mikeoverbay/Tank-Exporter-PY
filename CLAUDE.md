@@ -30,9 +30,9 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 * **Pygame** for the window / input / UI rendering.
 * **Tkinter** for modal file dialogs and the format / component pickers.
 * **Blender headless** is the bridge for FBX / GLB / GLTF / OBJ I/O.
-  Two runner scripts (`tankviewer/exporters/_blender_runner.py` and
-  `tankviewer/importers/_blender_importer.py`) execute inside Blender's
-  Python (`bpy` available, `tankviewer` package NOT) -- imports there
+  Two runner scripts (`tankExporterPy/exporters/_blender_runner.py` and
+  `tankExporterPy/importers/_blender_importer.py`) execute inside Blender's
+  Python (`bpy` available, `tankExporterPy` package NOT) -- imports there
   must stay minimal.
 
 ---
@@ -83,7 +83,7 @@ Tangents, binormals, bone indices, and bone weights ride through FBX
 / glTF as named `FLOAT_COLOR` attributes
 (`WoTTangent`, `WoTBinormal`, `WoTBoneIdx`, `WoTBoneWeight`) so the
 round trip is loss-less.  Decoders are documented in
-`tankviewer/importers/_blender_importer.py`.
+`tankExporterPy/importers/_blender_importer.py`.
 
 ### `.fbm` folders on FBX export are bad
 
@@ -142,7 +142,7 @@ the second.
 
 ## Build / version conventions
 
-* Version lives in `tankviewer/__init__.py` (`__version__`).
+* Version lives in `tankExporterPy/__init__.py` (`__version__`).
 * Bump it via `python cust_tools/bump_version.py {minor|major|patch}`
   after every meaningful change (the user wants this discipline kept).
 * The "minor" digit climbs for "we added something or fixed a real

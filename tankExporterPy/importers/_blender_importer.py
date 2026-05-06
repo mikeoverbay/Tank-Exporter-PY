@@ -1,7 +1,7 @@
 """
 Blender-side import runner.  Reverse of _blender_runner.
 
-Invoked by tankviewer.exporters.blender_bridge as:
+Invoked by tankExporterPy.exporters.blender_bridge as:
 
     blender --background --python <this file> -- \\
         --input  <tank.fbx | tank.glb | tank.gltf | tank.obj> \\
@@ -22,7 +22,7 @@ this importer leaves data in Blender Z-up and lets the consumer
 swizzle.
 
 NOTE: This runs inside Blender's Python -- bpy is available, the
-tankviewer package is NOT.  Keep imports minimal.
+tankExporterPy package is NOT.  Keep imports minimal.
 """
 
 import os

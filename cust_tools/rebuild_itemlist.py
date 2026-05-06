@@ -1,6 +1,6 @@
 """Rebuild TheItemList.xml from scratch by scanning every kept pkg.
 
-The runtime lookup table (`tankviewer/../TheItemList.xml`) is normally
+The runtime lookup table (`tankExporterPy/../TheItemList.xml`) is normally
 grown incrementally -- `PkgExtractor._persist_entry` adds rows when
 scan-fallback discovers a new file.  That means the table only ever
 contains files we've LOOKED UP, so freshly-needed file kinds (e.g.
@@ -51,13 +51,13 @@ import time
 import zipfile
 from xml.sax.saxutils import escape as xml_escape
 
-# Project root contains TheItemList.xml; tankviewer package contains
+# Project root contains TheItemList.xml; tankExporterPy package contains
 # the runtime PkgExtractor we borrow the exclusion filter from.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _PROJECT_ROOT)
 
-from tankviewer.loaders import PkgExtractor    # noqa: E402
+from tankExporterPy.loaders import PkgExtractor    # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Bump tankviewer/__init__.py's __version__ in place.
+Bump tankExporterPy/__init__.py's __version__ in place.
 
 The version follows the project's own convention (NOT strict SemVer):
     MAJOR.MINOR.PATCH
@@ -32,7 +32,7 @@ import sys
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INIT_PATH    = os.path.join(PROJECT_ROOT, 'tankviewer', '__init__.py')
+INIT_PATH    = os.path.join(PROJECT_ROOT, 'tankExporterPy', '__init__.py')
 
 # Match  __version__ = "MAJOR.MINOR.PATCH"  (single OR double quotes,
 # whitespace-tolerant).  Captures the three integers individually so we
@@ -53,7 +53,7 @@ def read_version():
     when it can't find the version line.
     """
     if not os.path.isfile(INIT_PATH):
-        raise SystemExit(f"tankviewer/__init__.py not found at {INIT_PATH}")
+        raise SystemExit(f"tankExporterPy/__init__.py not found at {INIT_PATH}")
     with open(INIT_PATH, 'r', encoding='utf-8') as fh:
         text = fh.read()
     m = _VERSION_RE.search(text)

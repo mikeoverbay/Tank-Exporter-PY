@@ -9,6 +9,30 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Rename `tankviewer/` package -> `tankExporterPy/` (1.54.0)
+
+Final naming alignment.  The package directory was the last thing
+still called by the old project name; everything else (entry-point
+script, config JSON, GitHub repo, brand) had already migrated to
+`tankExporterPy`.
+
+`git mv tankviewer tankExporterPy` for the directory; bulk
+search-and-replace of `tankviewer` -> `tankExporterPy` across
+every `.py`, `.md`, and `.bat` file with a reference, EXCEPT
+`CHANGELOG.md` (historical entries describe what files were
+called at the time).  20 files updated, ~100 line edits in total.
+Smoke-tested via `python -c "from tankExporterPy.viewer import Viewer"`
+and `python tankExporterPy.py --help` -- both clean.
+
+The launcher script `tankExporterPy.py` and the package directory
+`tankExporterPy/` now share a name.  Python resolves
+`import tankExporterPy` to the package (it's a directory with
+`__init__.py`); the script remains directly runnable as
+`python tankExporterPy.py`.  No collision in practice -- nothing
+imports the launcher script.
+
+Files: every reference outside `CHANGELOG.md`.
+
 ### Refresh tank tree after ItemList rebuild (1.53.1)
 
 `_rebuild_itemlist_now` used to leave the in-memory tier-tree

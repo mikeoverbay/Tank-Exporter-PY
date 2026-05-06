@@ -47,7 +47,7 @@ from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 # ---------------------------------------------------------------------------
 # The per-nation default tint colour used to live here as a hardcoded
 # table guessed from the legacy VB Tank Exporter source.  It now comes
-# from `tankviewer.armor_colors.ArmorColorLoader`, which parses the
+# from `tankExporterPy.armor_colors.ArmorColorLoader`, which parses the
 # authoritative WoT data file `scripts/item_defs/customization/paints/
 # base_paints.xml` and also honours its per-tank exclusion list (Type
 # 59 Gold, Skorpion BF, etc. ship with their unique colour baked into
@@ -296,7 +296,7 @@ class Viewer:
     INFO_PANEL_W = 280
 
     # Folder of tank-thumbnail PNGs (filename = <tank_xml_basename>.png).
-    # Located at the project root, sibling to the tankviewer package.
+    # Located at the project root, sibling to the tankExporterPy package.
     THUMB_DIR = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         'thumb_nails')
@@ -2304,7 +2304,7 @@ class Viewer:
                 # Output goes EXACTLY where the user picked it.  The
                 # texture sidecar folder lives next to the file, named
                 # '<stem>_textures/' (configured by collect_payload --
-                # see tankviewer/exporters/common.py).  This is the
+                # see tankExporterPy/exporters/common.py).  This is the
                 # convention the rest of our pipeline + Blender expect:
                 #     <user_dir>/A14_T30.fbx
                 #     <user_dir>/A14_T30_textures/<tex>.dds
@@ -2825,7 +2825,7 @@ class Viewer:
         # Blender 4.x rejects binary FBX < 7.1; the legacy WoT exporter
         # wrote 6.1, and so does anything else from the FBX SDK 2009 era.
         # Probe the header and, when needed, run Autodesk's free 2013
-        # converter to upgrade in place.  See `tankviewer.importers.
+        # converter to upgrade in place.  See `tankExporterPy.importers.
         # fbx_version` for the version-floor + converter-location logic.
         # `fbx_converter_exe` in tankExporterPy.json overrides the
         # default install-path search.
@@ -4635,7 +4635,7 @@ class Viewer:
 
     def load_imported_payload(self, payload):
         """Rebuild self.meshes from the dict produced by
-        tankviewer.exporters.import_vehicle.
+        tankExporterPy.exporters.import_vehicle.
 
         The payload's positions / normals / tangents / binormals are in
         Blender Z-up (the FBX importer leaves them there); we swizzle

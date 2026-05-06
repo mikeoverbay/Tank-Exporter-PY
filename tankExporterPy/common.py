@@ -219,7 +219,7 @@ def unpack_normal_bpvt(packed):
 
 # ---------------------------------------------------------------------------
 # Inverse pack functions -- used by the .primitives_processed writer
-# (tankviewer/writers/primitives_writer.py).  Each pack_* is the
+# (tankExporterPy/writers/primitives_writer.py).  Each pack_* is the
 # inverse of the matching unpack_* above so a write -> read round-trip
 # yields the same uint32 byte-for-byte (modulo the rounding step).
 

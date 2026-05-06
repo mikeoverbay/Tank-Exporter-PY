@@ -6,7 +6,7 @@ every mesh into a JSON payload via `_blender_importer.py`; we then
 swizzle the data back to OpenGL Y-up and rebuild Mesh objects.
 
 This file holds the IMPORT path only.  The mirror export path lives at
-`tankviewer/exporters/blender_bridge.py`; the two stay symmetric.
+`tankExporterPy/exporters/blender_bridge.py`; the two stay symmetric.
 
 Public API:
     import_vehicle(input_path, blender_exe=None, on_log=None)
@@ -89,7 +89,7 @@ def import_vehicle(input_path, blender_exe=None, on_log=None):
     log(f"using Blender: {blender}")
 
     # Stage a temp file for Blender to write the payload into
-    fd, payload_path = tempfile.mkstemp(prefix='tankviewer_import_',
+    fd, payload_path = tempfile.mkstemp(prefix='tankExporterPy_import_',
                                          suffix='.json')
     os.close(fd)
 

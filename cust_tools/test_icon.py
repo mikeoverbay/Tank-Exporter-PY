@@ -21,7 +21,7 @@ What it does
    user can sanity-check what got loaded.
 
 If the icon shows up in the title bar / taskbar of THIS test window
-but NOT in the main TEPY window, the bug is in `tankviewer/viewer.py`,
+but NOT in the main TEPY window, the bug is in `tankExporterPy/viewer.py`,
 not in the icon file or pygame's icon handling.
 """
 

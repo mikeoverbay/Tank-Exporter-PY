@@ -5,7 +5,7 @@ Settings are stored in tankExporterPy.json next to tankExporterPy.py.
 Any key can be overridden from the command line; the new value is
 written back to disk so subsequent runs use it automatically.
 
-Filename history: pre-v1.48.2 the file was called tankviewer.json
+Filename history: pre-v1.48.2 the file was called tankExporterPy.json
 (matching the package-internal name).  It was renamed for symmetry
 with the launcher script + GitHub repo (Tank-Exporter-PY) + the
 TEPY brand.  `load()` migrates the old name on first run if the
@@ -24,14 +24,14 @@ import json
 import os
 
 # Project root (where tankExporterPy.py lives) -- two dirs above this
-# file inside the tankviewer/ package.
+# file inside the tankExporterPy/ package.
 _PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))
 
 # Active config file (post-rename).  See _migrate_legacy_filename
-# for the one-time tankviewer.json -> tankExporterPy.json move.
+# for the one-time tankExporterPy.json -> tankExporterPy.json move.
 _CONFIG_PATH        = os.path.join(_PROJECT_ROOT, 'tankExporterPy.json')
-_LEGACY_CONFIG_PATH = os.path.join(_PROJECT_ROOT, 'tankviewer.json')
+_LEGACY_CONFIG_PATH = os.path.join(_PROJECT_ROOT, 'tankExporterPy.json')
 
 _DEFAULTS = {
     'pkg_dir':    '',     # e.g. C:\Games\World_of_Tanks_NA\res\packages
@@ -65,7 +65,7 @@ _DEFAULTS = {
 # ---------------------------------------------------------------------------
 
 def _migrate_legacy_filename():
-    """Move tankviewer.json -> tankExporterPy.json on first run after
+    """Move tankExporterPy.json -> tankExporterPy.json on first run after
     the rename.  Idempotent: skips if the new file already exists or
     if the legacy file doesn't.  Doesn't touch contents -- the viewer
     handles per-key migration (legacy smoke_* keys -> smoke_groups

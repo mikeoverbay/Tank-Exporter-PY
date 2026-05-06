@@ -13,7 +13,7 @@ Public API:
     find_blender_executable(override=None)
         -- re-exported for convenience.  Locates blender.exe via
            registry / PATH / install-dir scan.  Lives in
-           `tankviewer.blender_locator`; both importers and exporters
+           `tankExporterPy.blender_locator`; both importers and exporters
            pull from there so there's a single source of truth.
 """
 

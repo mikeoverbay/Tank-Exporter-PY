@@ -5,7 +5,7 @@ Only the text (ASCII) variant of the format is supported -- the format tag in
 the header must start with ``xof 0302txt`` or ``xof 0303txt``.
 
 The parser extracts the first ``Mesh`` block it finds and returns a dict
-compatible with the rest of the tankviewer pipeline:
+compatible with the rest of the tankExporterPy pipeline:
 
     {
         'positions' : np.ndarray  shape (N, 3)  float32

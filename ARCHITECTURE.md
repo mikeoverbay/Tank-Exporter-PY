@@ -2,7 +2,7 @@
 
 A Python + Pygame + PyOpenGL viewer for World of Tanks `.primitives_processed`
 mesh files and complete vehicle XMLs.  All application code lives in the
-`tankviewer/` package; `tankExporterPy.py` is a thin CLI entry point.
+`tankExporterPy/` package; `tankExporterPy.py` is a thin CLI entry point.
 
 ---
 
@@ -14,7 +14,7 @@ tanks.txt               Tank Exporter export of currently-active tanks (canonica
 thumb_nails/            Per-tank PNG thumbnails (filename = <xml_basename>.png)
 TheItemList.xml         File→pkg lookup index used by PkgExtractor (O(1) extraction)
 
-tankviewer/
+tankExporterPy/
     __init__.py         Package marker
     common.py           Shared low-level utilities (no GL): bit-packed normal
                         decoders, BWXML decoder, shader-source loader
@@ -72,7 +72,7 @@ Argparse-driven entry point.
 
 ---
 
-## `tankviewer/common.py`
+## `tankExporterPy/common.py`
 
 Shared utilities with no OpenGL dependency.
 
@@ -87,7 +87,7 @@ Shared utilities with no OpenGL dependency.
 
 ---
 
-## `tankviewer/config.py`
+## `tankExporterPy/config.py`
 
 Tiny persistent-config helper backed by `tankExporterPy.json` next to
 `tankExporterPy.py`.
@@ -100,7 +100,7 @@ Tiny persistent-config helper backed by `tankExporterPy.json` next to
 
 ---
 
-## `tankviewer/loaders.py`
+## `tankExporterPy/loaders.py`
 
 Binary parsers, GPU texture loader, .pkg extractor, vehicle-XML loader.
 
@@ -187,7 +187,7 @@ correct world-space offsets.
 
 ---
 
-## `tankviewer/mesh.py`
+## `tankExporterPy/mesh.py`
 
 GPU-side representation of one WoT primitive group.
 
@@ -210,7 +210,7 @@ GPU-side representation of one WoT primitive group.
 
 ---
 
-## `tankviewer/scene.py`
+## `tankExporterPy/scene.py`
 
 Camera + simple geometry helpers.
 
@@ -235,7 +235,7 @@ indicator).  Each has `__init__`, `render(shader, …)`, `cleanup()`.
 
 ---
 
-## `tankviewer/shaders.py`
+## `tankExporterPy/shaders.py`
 
 GLSL program wrappers; sources are loaded from `shaders/` at construction.
 
@@ -281,7 +281,7 @@ specular, 2 = Charlie sheen) and `u_isGeneratingLUT` (1 = render BRDF LUT).
 
 ---
 
-## `tankviewer/ui.py`
+## `tankExporterPy/ui.py`
 
 2-D overlay: top menu bar, right-hand tank-browser tree, and a centred
 modal load dialog.
@@ -370,7 +370,7 @@ mask, RGB from `u_color`) for fonts; `_draw_image_tex` uses mode 2
 
 ---
 
-## `tankviewer/viewer.py`
+## `tankExporterPy/viewer.py`
 
 Main application class.
 
@@ -417,7 +417,7 @@ Main application class.
 
 ---
 
-## `tankviewer/skybox.py`
+## `tankExporterPy/skybox.py`
 
 Skybox + IBL setup.
 
@@ -454,7 +454,7 @@ the same Y-flip when sampling, otherwise the sky and ground swap.
 
 ---
 
-## `tankviewer/xloader.py`
+## `tankExporterPy/xloader.py`
 
 Parses text-format DirectX `.x` files (used for the skybox cube).
 Binary `.x` is not supported.
