@@ -9,6 +9,75 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Multi-language UI via gettext catalogs (1.55.0)
+
+TEPY now ships its own `gettext` translation pipeline -- the same
+mechanism WoT uses for in-game text.  21 language stubs covering
+every locale WoT supports across all regions:
+
+```
+en, ru, de, fr, es, es_ar, pt_br, pl, cs, it, hu, bg, ro, tr,
+uk, ko, ja, zh_cn, zh_tw, vi, th
+```
+
+Each ships at `tankExporterPy/locale/<code>/LC_MESSAGES/tepy.po`
+(human-editable source) + `tepy.mo` (binary catalog the runtime
+reads).  English (`en/`) carries the canonical msgids -- 34
+strings spanning every button, slider, checkbox, section header,
+and popup title in the UI.  Other languages start as stubs (empty
+msgstrs); gettext echoes the msgid for any miss, so untranslated
+languages render as English.  French (`fr/`) seeded with full
+translations as a working demonstration.
+
+New module structure:
+
+* `tankExporterPy/localization.py` -- adds `Translator` class,
+  `set_active_language(code)`, `get_active_language()`, and the
+  conventional `_(msgid)` shorthand.  All UI strings call `_(...)`;
+  `_()` is deterministic per-session so widget-label lookups stay
+  consistent.
+* `cust_tools/build_locale_mo.py` -- pure-stdlib `.po` -> `.mo`
+  compiler (no `msgfmt` dependency).  Walks every `.po` under
+  `locale/` and writes the sibling `.mo`.  Run after editing any
+  translation.
+* `tankExporterPy/locale/<lang>/LC_MESSAGES/tepy.{po,mo}` -- 21
+  catalogs, ~840 KB total (the empty stubs are 60 bytes each).
+
+UI:
+
+* New **Language** button in the left-panel IO section.  Opens a
+  Tk dropdown picker (Combobox) listing every supported language
+  with its native-script name (`Français`, `日本語`, `Русский`,
+  ...).  Selection persists in `tankExporterPy.json` under the
+  `language` key.
+* Restart-to-apply: every label texture is built once at
+  `_build_ui` time, so the picker explains the change takes
+  effect on next launch.
+
+Wired:
+
+* Every left-panel button label (Grid / Axes / Light / Orbit /
+  Skybox / Wireframe / Meshes / Flip / Compare / Set Paths /
+  Import / Export / Save Prim / Language / ItemList).
+* Every right-panel slider label (Light / Ambient / Sm Start /
+  Sm End / Sm Speed / Sm FadeS / Sm FadeE / Fire Size / Normals).
+* Every right-panel checkbox label (NMap / AO / PerVtx / Debug).
+* Section headers (UI / IO / Tools).
+* `button_groups` table in `_layout_widgets` uses the same
+  `_('...')` form so `btn_by_label` lookups resolve correctly
+  in whichever language is active.
+
+Console log messages and dynamic strings (file paths, counts,
+status updates) are intentionally left in English -- they're
+diagnostic output, not UI.  Translations stop at the boundary
+between "thing the user clicks" and "thing scrolling past in the
+console pane."
+
+Files: new `cust_tools/build_locale_mo.py`,
+`tankExporterPy/locale/.../tepy.po` x 21, `tepy.mo` x 21.
+Edits to `tankExporterPy/localization.py`,
+`tankExporterPy/viewer.py`, `tankExporterPy/config.py`.
+
 ### Rename `tankviewer/` package -> `tankExporterPy/` (1.54.0)
 
 Final naming alignment.  The package directory was the last thing

@@ -1,0 +1,118 @@
+# TEPY - Italian -- stub.  msgstr empty == fall back to English.
+# This file is the master.  msgid is the in-code English label;
+# msgstr should equal msgid for the en build (so the gettext
+# pipeline returns the same string the code passed in).
+#
+# Other language `.po` files mirror this msgid list.  Translators
+# fill in msgstr; an empty msgstr means "fall back to msgid"
+# (i.e. show the English).
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+# ---- Left-panel section headers ---------------------------------------
+msgid "UI"
+msgstr ""
+
+msgid "IO"
+msgstr ""
+
+msgid "Tools"
+msgstr ""
+
+# ---- UI-section buttons ------------------------------------------------
+msgid "Grid"
+msgstr ""
+
+msgid "Axes"
+msgstr ""
+
+msgid "Light"
+msgstr ""
+
+msgid "Orbit"
+msgstr ""
+
+msgid "Skybox"
+msgstr ""
+
+msgid "Wireframe"
+msgstr ""
+
+msgid "Meshes"
+msgstr ""
+
+msgid "Flip"
+msgstr ""
+
+msgid "Compare"
+msgstr ""
+
+msgid "Language"
+msgstr ""
+
+# ---- IO-section buttons ------------------------------------------------
+msgid "Set Paths"
+msgstr ""
+
+msgid "Import"
+msgstr ""
+
+msgid "Export"
+msgstr ""
+
+msgid "Save Prim"
+msgstr ""
+
+# ---- Tools-section buttons --------------------------------------------
+msgid "ItemList"
+msgstr ""
+
+# ---- Right-panel sliders ----------------------------------------------
+msgid "Ambient"
+msgstr ""
+
+msgid "Sm Start"
+msgstr ""
+
+msgid "Sm End"
+msgstr ""
+
+msgid "Sm Speed"
+msgstr ""
+
+msgid "Sm FadeS"
+msgstr ""
+
+msgid "Sm FadeE"
+msgstr ""
+
+msgid "Fire Size"
+msgstr ""
+
+msgid "Normals"
+msgstr ""
+
+# ---- Right-panel checkboxes -------------------------------------------
+msgid "NMap"
+msgstr ""
+
+msgid "AO"
+msgstr ""
+
+msgid "PerVtx"
+msgstr ""
+
+msgid "Debug"
+msgstr ""
+
+# ---- Popup titles -----------------------------------------------------
+msgid "FBX upgraded"
+msgstr ""
+
+msgid "FBX import aborted"
+msgstr ""
+
+msgid "FBX import failed"
+msgstr ""

@@ -46,6 +46,13 @@ _DEFAULTS = {
                               # Blender's importer rejects outright.
                               # Empty = search the standard install
                               # paths under Program Files.
+    'language':   'en',       # UI language code -- one of the entries in
+                              # tankExporterPy.localization.SUPPORTED_LANGUAGES
+                              # (e.g. 'fr', 'de', 'ru', 'zh_cn').  Empty /
+                              # unknown falls back to 'en' (English msgids
+                              # are the canonical source).  Picker UI is
+                              # the 'Language' button in the IO section;
+                              # takes effect on next launch.
     'info_panel_collapsed': False,  # remember the left-panel collapse state
     'light_value':   0.10,  # Light slider (direct sun brightness)
     'ambient_value': 0.50,  # Ambient slider (flat ambient fill)

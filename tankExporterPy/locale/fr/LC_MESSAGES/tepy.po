@@ -1,0 +1,118 @@
+# TEPY - French -- stub.  msgstr empty == fall back to English.
+# This file is the master.  msgid is the in-code English label;
+# msgstr should equal msgid for the en build (so the gettext
+# pipeline returns the same string the code passed in).
+#
+# Other language `.po` files mirror this msgid list.  Translators
+# fill in msgstr; an empty msgstr means "fall back to msgid"
+# (i.e. show the English).
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+# ---- Left-panel section headers ---------------------------------------
+msgid "UI"
+msgstr "UI"
+
+msgid "IO"
+msgstr "E/S"
+
+msgid "Tools"
+msgstr "Outils"
+
+# ---- UI-section buttons ------------------------------------------------
+msgid "Grid"
+msgstr "Grille"
+
+msgid "Axes"
+msgstr "Axes"
+
+msgid "Light"
+msgstr "Lumière"
+
+msgid "Orbit"
+msgstr "Orbite"
+
+msgid "Skybox"
+msgstr "Ciel"
+
+msgid "Wireframe"
+msgstr "Filaire"
+
+msgid "Meshes"
+msgstr "Maillages"
+
+msgid "Flip"
+msgstr "Échanger"
+
+msgid "Compare"
+msgstr "Comparer"
+
+msgid "Language"
+msgstr "Langue"
+
+# ---- IO-section buttons ------------------------------------------------
+msgid "Set Paths"
+msgstr "Chemins"
+
+msgid "Import"
+msgstr "Importer"
+
+msgid "Export"
+msgstr "Exporter"
+
+msgid "Save Prim"
+msgstr "Enregistrer Prim"
+
+# ---- Tools-section buttons --------------------------------------------
+msgid "ItemList"
+msgstr "Liste d'objets"
+
+# ---- Right-panel sliders ----------------------------------------------
+msgid "Ambient"
+msgstr "Ambiant"
+
+msgid "Sm Start"
+msgstr "Fum Début"
+
+msgid "Sm End"
+msgstr "Fum Fin"
+
+msgid "Sm Speed"
+msgstr "Fum Vitesse"
+
+msgid "Sm FadeS"
+msgstr "Fum FadeD"
+
+msgid "Sm FadeE"
+msgstr "Fum FadeF"
+
+msgid "Fire Size"
+msgstr "Taille feu"
+
+msgid "Normals"
+msgstr "Normales"
+
+# ---- Right-panel checkboxes -------------------------------------------
+msgid "NMap"
+msgstr "NMap"
+
+msgid "AO"
+msgstr "AO"
+
+msgid "PerVtx"
+msgstr "ParSom"
+
+msgid "Debug"
+msgstr "Débug"
+
+# ---- Popup titles -----------------------------------------------------
+msgid "FBX upgraded"
+msgstr ""
+
+msgid "FBX import aborted"
+msgstr ""
+
+msgid "FBX import failed"
+msgstr ""

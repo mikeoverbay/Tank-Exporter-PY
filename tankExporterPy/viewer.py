@@ -40,6 +40,7 @@ from .shaders  import (ShaderProgram, SimpleColorShader,
 from .skybox   import Skybox
 from .particles import FlipbookTexture, ParticleSystem, AnimatedBillboard
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
+from .localization import _
 
 
 # ---------------------------------------------------------------------------
@@ -817,6 +818,18 @@ class Viewer:
         # until a tank loads and tells us its real engine class.
         self._active_engine_class = self._DEFAULT_PIXIE_CLASS
 
+        # ---- TEPY UI language ----------------------------------------
+        # Read the user's chosen language from config (default 'en')
+        # and wire `_()` to that catalog BEFORE _build_ui runs --
+        # button / slider / checkbox labels resolve through `_()`
+        # at construction time, so the catalog has to be active
+        # first.  Changing the language mid-session does NOT
+        # retro-translate already-built widgets; the picker dialog
+        # tells the user it takes effect on next launch.
+        from .localization import set_active_language as _set_lang
+        cfg_lang = (self._cfg.get('language', '') or 'en').strip() or 'en'
+        _set_lang(cfg_lang)
+
         self._build_ui()
 
         # Info-panel collapse state -- restore from config and register the
@@ -1270,13 +1283,19 @@ class Viewer:
         x = self.ui.BUTTON_PADDING
         y = 4
         h = 22
+        # NOTE on i18n: every visible label is wrapped in `_()`.  The
+        # button's `.label` attribute receives the translated string,
+        # so `btn_by_label` lookups in `_layout_widgets` need to use
+        # the same `_('...')` form.  When the language doesn't change
+        # mid-session, `_('Grid')` is deterministic so the lookups
+        # work identically to the pre-i18n code.
         for label, attr in [
-            ('Grid',      'show_grid'),
-            ('Axes',      'show_axes'),
-            ('Light',     'show_light'),
-            ('Orbit',     'orbit_lights'),
-            ('Skybox',    'show_skybox'),
-            ('Wireframe', 'wireframe'),
+            (_('Grid'),      'show_grid'),
+            (_('Axes'),      'show_axes'),
+            (_('Light'),     'show_light'),
+            (_('Orbit'),     'orbit_lights'),
+            (_('Skybox'),    'show_skybox'),
+            (_('Wireframe'), 'wireframe'),
         ]:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
@@ -1286,20 +1305,20 @@ class Viewer:
         # --- Action buttons (one-shot, no toggle attr) -------------------
         x       += self.ui.BUTTON_SPACING   # extra gap from toggle group
 
-        self.ui.add_button('Set Paths', x, y, 84, h, active=False,
+        self.ui.add_button(_('Set Paths'), x, y, 84, h, active=False,
                            action=self._show_paths_dialog)
         x       += 84 + self.ui.BUTTON_SPACING
 
         # 'Meshes' opens / closes the mesh-visibility window.  Always
         # available; population happens at load time.
-        self.ui.add_button('Meshes', x, y, 70, h, active=False,
+        self.ui.add_button(_('Meshes'), x, y, 70, h, active=False,
                            action=self._toggle_mesh_window)
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Export' opens a Save dialog and spawns Blender (--background)
         # to write FBX / GLB / GLTF / OBJ.  Disabled visually when no
         # tank is loaded -- the action callback also short-circuits.
-        self.ui.add_button('Export', x, y, 70, h, active=False,
+        self.ui.add_button(_('Export'), x, y, 70, h, active=False,
                            action=self._on_export_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
@@ -1307,7 +1326,7 @@ class Viewer:
         # FBX/GLB/OBJ back into the viewer's scene.  Round-trip companion
         # to Export -- decodes WoT* color attributes and reconstructs the
         # original per-vertex stream.
-        self.ui.add_button('Import', x, y, 70, h, active=False,
+        self.ui.add_button(_('Import'), x, y, 70, h, active=False,
                            action=self._on_import_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
@@ -1315,7 +1334,7 @@ class Viewer:
         # PKG (WoT-loaded).  No-op when the other set is empty.  Lets
         # the user A/B-compare an import against the in-game data
         # before exporting back out to .primitives_processed.
-        self.ui.add_button('Flip', x, y, 70, h, active=False,
+        self.ui.add_button(_('Flip'), x, y, 70, h, active=False,
                            action=self._flip_active_set)
         x       += 70 + self.ui.BUTTON_SPACING
 
@@ -1323,7 +1342,7 @@ class Viewer:
         # (face/vert/index counts, UV2 presence, vertex format) so the
         # user can verify the imported FBX matches the PKG data slot
         # for slot before re-export.
-        self.ui.add_button('Compare', x, y, 70, h, active=False,
+        self.ui.add_button(_('Compare'), x, y, 70, h, active=False,
                            action=self._on_compare_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
@@ -1332,8 +1351,15 @@ class Viewer:
         # WoT-native .primitives_processed files.  Companion to
         # Export (which writes FBX/GLB/OBJ) -- this one targets the
         # game's own format.
-        self.ui.add_button('Save Prim', x, y, 70, h, active=False,
+        self.ui.add_button(_('Save Prim'), x, y, 70, h, active=False,
                            action=self._on_save_prim_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+
+        # 'Language' opens a Tk dropdown picker.  Sister to Set Paths
+        # in the IO group.  Selection persists in tankExporterPy.json
+        # under `language` and applies on next launch.
+        self.ui.add_button(_('Language'), x, y, 70, h, active=False,
+                           action=self._on_language_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'ItemList' rebuilds TheItemList.xml from scratch by walking
@@ -1345,7 +1371,7 @@ class Viewer:
         # Position is the placeholder before _layout_widgets does the
         # real grid placement; the (x, y) here doesn't matter beyond
         # registration.
-        self.ui.add_button('ItemList', x, y, 70, h, active=False,
+        self.ui.add_button(_('ItemList'), x, y, 70, h, active=False,
                            action=self._on_rebuild_itemlist_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
@@ -1362,10 +1388,10 @@ class Viewer:
         # session is restored.  Falls back to _DEFAULTS if absent.
         light_init   = float(self._cfg.get('light_value',   0.10))
         ambient_init = float(self._cfg.get('ambient_value', 0.50))
-        self._metal_slider = self.ui.add_slider('Light',   tx, cy1, tw,
+        self._metal_slider = self.ui.add_slider(_('Light'),   tx, cy1, tw,
                                                 value=light_init,   value_max=0.25,
                                                 group_id='lighting')
-        self._shine_slider = self.ui.add_slider('Ambient', tx, cy2, tw,
+        self._shine_slider = self.ui.add_slider(_('Ambient'), tx, cy2, tw,
                                                 value=ambient_init, value_max=1.0,
                                                 group_id='lighting')
 
@@ -1387,20 +1413,20 @@ class Viewer:
         smoke_n_frames = (float(self.smoke_flipbook.frame_count)
                           if self.smoke_flipbook else 91.0)
         self._smoke_start_slider = self.ui.add_slider(
-            'Sm Start', tx, cy3, tw, value=active_smoke['start_size'],
+            _('Sm Start'), tx, cy3, tw, value=active_smoke['start_size'],
             value_max=0.5, group_id='smoke')
         self._smoke_end_slider   = self.ui.add_slider(
-            'Sm End',   tx, cy4, tw, value=active_smoke['end_size'],
+            _('Sm End'),   tx, cy4, tw, value=active_smoke['end_size'],
             value_max=1.0, group_id='smoke')
         self._smoke_speed_slider = self.ui.add_slider(
-            'Sm Speed', tx, cy5, tw, value=active_smoke['speed'],
+            _('Sm Speed'), tx, cy5, tw, value=active_smoke['speed'],
             value_max=8.0, group_id='smoke')
         # Fade range: alpha begins ramping at FadeS, hits zero at FadeE.
         self._smoke_fade_slider     = self.ui.add_slider(
-            'Sm FadeS', tx, cy6,        tw, value=active_smoke['fade_start_frame'],
+            _('Sm FadeS'), tx, cy6,        tw, value=active_smoke['fade_start_frame'],
             value_max=smoke_n_frames, group_id='smoke')
         self._smoke_fade_end_slider = self.ui.add_slider(
-            'Sm FadeE', tx, cy6 + 25,   tw, value=active_smoke['fade_end_frame'],
+            _('Sm FadeE'), tx, cy6 + 25,   tw, value=active_smoke['fade_end_frame'],
             value_max=smoke_n_frames, group_id='smoke')
 
         # Fire BILLBOARD slider -- size only.  FPS is hard-coded
@@ -1408,7 +1434,7 @@ class Viewer:
         # exposed; removed in favour of per-engine-class sizes.  Final
         # geometry set in _layout_widgets.
         self._fire_size_slider = self.ui.add_slider(
-            'Fire Size', tx, cy6 + 75, tw, value=active_fire['size'],
+            _('Fire Size'), tx, cy6 + 75, tw, value=active_fire['size'],
             value_max=4.0, group_id='smoke')
 
         # Surface-normal debug lines.  Slider drives world-space line
@@ -1420,7 +1446,7 @@ class Viewer:
         # _layout_widgets alongside the smoke sliders.
         normals_init = float(self._cfg.get('normals_length', 0.0))
         self._normals_slider = self.ui.add_slider(
-            'Normals', tx, cy6 + 50,   tw, value=normals_init,
+            _('Normals'), tx, cy6 + 50,   tw, value=normals_init,
             value_max=0.5, group_id='smoke')
         # Per-vertex toggle for the normals shader.  Unchecked (default)
         # = by-face mode (one cyan line per triangle from the centroid).
@@ -1431,15 +1457,15 @@ class Viewer:
         self._normals_per_vertex = bool(
             self._cfg.get('normals_per_vertex', False))
         self._normals_mode_cb = self.ui.add_checkbox(
-            'PerVtx', cx, cy6 + 50 - 7, 14,
+            _('PerVtx'), cx, cy6 + 50 - 7, 14,
             checked=self._normals_per_vertex, group_id='smoke')
 
         cb_size = 14
         self._invert_metal_cb = self.ui.add_checkbox(
-            'NMap', cx, cy1 - cb_size // 2, cb_size, checked=True,
+            _('NMap'), cx, cy1 - cb_size // 2, cb_size, checked=True,
             group_id='lighting')
         self._invert_shine_cb = self.ui.add_checkbox(
-            'AO',   cx, cy2 - cb_size // 2, cb_size, checked=True,
+            _('AO'),   cx, cy2 - cb_size // 2, cb_size, checked=True,
             group_id='lighting')
         # Master Debug checkbox.  Replaces the previous Show HP +
         # Show Fire pair.  When checked, every on-screen debug
@@ -1447,7 +1473,7 @@ class Viewer:
         # convention going forward.  Position finalised in
         # `_layout_widgets`.
         self._debug_cb = self.ui.add_checkbox(
-            'Debug', cx, cy6 - cb_size // 2, cb_size,
+            _('Debug'), cx, cy6 - cb_size // 2, cb_size,
             checked=self._debug, group_id='smoke')
 
     # ------------------------------------------------------------------
@@ -2045,6 +2071,112 @@ class Viewer:
             'lookup_xml': self._cfg.get('lookup_xml', ''),
         }
         self.ui.paths_dialog.show(initial, on_confirm=self._on_paths_saved)
+
+    # ------------------------------------------------------------------
+    def _on_language_clicked(self):
+        """Action-button callback: show a Tk dropdown for language choice.
+
+        WoT-style global language list (see
+        `tankExporterPy.localization.SUPPORTED_LANGUAGES`) -- each
+        choice maps to a `<lang>/LC_MESSAGES/tepy.mo` catalog
+        bundled with the package.  Selection persists in
+        tankExporterPy.json under the `language` key.
+
+        Restart-to-apply: every label texture is built once at
+        `_build_ui` time, so a mid-session language change wouldn't
+        retro-translate already-built buttons.  The picker dialog
+        explains this and offers to acknowledge.
+
+        No-ops cleanly when tkinter isn't available (headless
+        environments, etc.) -- logs and returns.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            self.log_error("Language picker: tkinter not available.")
+            return
+        from .localization import (
+            SUPPORTED_LANGUAGES, LANGUAGE_NAMES,
+            get_active_language)
+
+        cur = get_active_language() or 'en'
+        cur_label = LANGUAGE_NAMES.get(cur, cur)
+
+        root = tk.Tk()
+        root.title("TEPY -- Language")
+        try:
+            root.attributes('-topmost', True)
+        except Exception:
+            pass
+        # Center on screen
+        root.geometry("+400+250")
+        root.resizable(False, False)
+
+        frame = ttk.Frame(root, padding=12)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame,
+                  text="Choose UI language:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w')
+        ttk.Label(frame,
+                  text=f"Current: {cur_label}  ({cur})",
+                  foreground='gray').pack(anchor='w', pady=(0, 8))
+
+        # Dropdown -- show "Native name (code)" so even unfamiliar
+        # codes are recognisable from the script.
+        choices = [f"{name} ({code})"
+                   for code, name in SUPPORTED_LANGUAGES]
+        choice_var = tk.StringVar(value=f"{cur_label} ({cur})")
+        combo = ttk.Combobox(frame, values=choices, state='readonly',
+                             textvariable=choice_var, width=30)
+        combo.pack(fill='x', pady=(0, 8))
+
+        ttk.Label(frame,
+                  text="Takes effect on next launch.",
+                  foreground='gray').pack(anchor='w')
+
+        result = {'code': None}
+
+        def _ok():
+            picked = choice_var.get()
+            # Extract code from "Name (code)" format.
+            if '(' in picked and picked.endswith(')'):
+                code = picked.rsplit('(', 1)[1][:-1].strip()
+                result['code'] = code
+            root.destroy()
+
+        def _cancel():
+            root.destroy()
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill='x', pady=(8, 0))
+        ttk.Button(button_row, text='Save',   command=_ok).pack(side='right')
+        ttk.Button(button_row, text='Cancel', command=_cancel).pack(side='right',
+                                                                    padx=(0, 6))
+
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        root.mainloop()
+
+        chosen = result['code']
+        if chosen is None or chosen == cur:
+            return     # cancel, or no change
+
+        # Persist + log.  Do not call set_active_language here --
+        # that would split the UI between English (already-built
+        # widgets) and the new language (any future widget builds).
+        # Cleaner to persist and prompt for restart.
+        self._cfg['language'] = chosen
+        try:
+            _config.save(self._cfg)
+        except Exception as exc:
+            self.log_error(f"Language: config save failed: {exc}")
+            return
+        self.log(f"Language set to {chosen} -- restart TEPY to apply.")
+        self._show_info_popup(
+            "Language saved",
+            f"UI language set to {LANGUAGE_NAMES.get(chosen, chosen)} ({chosen}).\n\n"
+            f"Restart TEPY for the change to take effect.")
 
     # ------------------------------------------------------------------
     def _show_info_popup(self, title, message):
@@ -5452,26 +5584,32 @@ class Viewer:
         # Each row is (label, col, span).  span=3 means full-width
         # (cols 0..2), span=2 spans cols 0..1.  Group order in the
         # dict determines vertical stacking.
+        # i18n: section names AND button labels resolve through `_()`
+        # so the lookup keys match the translated strings the buttons
+        # were registered under in `_build_ui`.  When the language
+        # doesn't change mid-session, `_()` is deterministic so the
+        # `btn_by_label` lookup below finds every button.
         button_groups = [
-            ('UI', [
-                ('Grid',      0, 1),
-                ('Axes',      1, 1),
-                ('Light',     2, 1),
-                ('Orbit',     0, 1),
-                ('Skybox',    1, 1),
-                ('Wireframe', 2, 1),
-                ('Meshes',    0, 1),
-                ('Flip',      1, 1),
-                ('Compare',   2, 1),
+            (_('UI'), [
+                (_('Grid'),      0, 1),
+                (_('Axes'),      1, 1),
+                (_('Light'),     2, 1),
+                (_('Orbit'),     0, 1),
+                (_('Skybox'),    1, 1),
+                (_('Wireframe'), 2, 1),
+                (_('Meshes'),    0, 1),
+                (_('Flip'),      1, 1),
+                (_('Compare'),   2, 1),
             ]),
-            ('IO', [
-                ('Set Paths', 0, 3),
-                ('Import',    0, 2),
-                ('Export',    2, 1),
-                ('Save Prim', 0, 3),
+            (_('IO'), [
+                (_('Set Paths'), 0, 3),
+                (_('Import'),    0, 2),
+                (_('Export'),    2, 1),
+                (_('Save Prim'), 0, 3),
+                (_('Language'),  0, 3),
             ]),
-            ('Tools', [
-                ('ItemList',  0, 3),
+            (_('Tools'), [
+                (_('ItemList'),  0, 3),
             ]),
         ]
 

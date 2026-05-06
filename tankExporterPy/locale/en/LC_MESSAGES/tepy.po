@@ -1,0 +1,118 @@
+# TEPY - English (canonical msgid catalog).
+# This file is the master.  msgid is the in-code English label;
+# msgstr should equal msgid for the en build (so the gettext
+# pipeline returns the same string the code passed in).
+#
+# Other language `.po` files mirror this msgid list.  Translators
+# fill in msgstr; an empty msgstr means "fall back to msgid"
+# (i.e. show the English).
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+# ---- Left-panel section headers ---------------------------------------
+msgid "UI"
+msgstr "UI"
+
+msgid "IO"
+msgstr "IO"
+
+msgid "Tools"
+msgstr "Tools"
+
+# ---- UI-section buttons ------------------------------------------------
+msgid "Grid"
+msgstr "Grid"
+
+msgid "Axes"
+msgstr "Axes"
+
+msgid "Light"
+msgstr "Light"
+
+msgid "Orbit"
+msgstr "Orbit"
+
+msgid "Skybox"
+msgstr "Skybox"
+
+msgid "Wireframe"
+msgstr "Wireframe"
+
+msgid "Meshes"
+msgstr "Meshes"
+
+msgid "Flip"
+msgstr "Flip"
+
+msgid "Compare"
+msgstr "Compare"
+
+msgid "Language"
+msgstr "Language"
+
+# ---- IO-section buttons ------------------------------------------------
+msgid "Set Paths"
+msgstr "Set Paths"
+
+msgid "Import"
+msgstr "Import"
+
+msgid "Export"
+msgstr "Export"
+
+msgid "Save Prim"
+msgstr "Save Prim"
+
+# ---- Tools-section buttons --------------------------------------------
+msgid "ItemList"
+msgstr "ItemList"
+
+# ---- Right-panel sliders ----------------------------------------------
+msgid "Ambient"
+msgstr "Ambient"
+
+msgid "Sm Start"
+msgstr "Sm Start"
+
+msgid "Sm End"
+msgstr "Sm End"
+
+msgid "Sm Speed"
+msgstr "Sm Speed"
+
+msgid "Sm FadeS"
+msgstr "Sm FadeS"
+
+msgid "Sm FadeE"
+msgstr "Sm FadeE"
+
+msgid "Fire Size"
+msgstr "Fire Size"
+
+msgid "Normals"
+msgstr "Normals"
+
+# ---- Right-panel checkboxes -------------------------------------------
+msgid "NMap"
+msgstr "NMap"
+
+msgid "AO"
+msgstr "AO"
+
+msgid "PerVtx"
+msgstr "PerVtx"
+
+msgid "Debug"
+msgstr "Debug"
+
+# ---- Popup titles -----------------------------------------------------
+msgid "FBX upgraded"
+msgstr "FBX upgraded"
+
+msgid "FBX import aborted"
+msgstr "FBX import aborted"
+
+msgid "FBX import failed"
+msgstr "FBX import failed"
