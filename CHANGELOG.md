@@ -9,6 +9,48 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Pull tank names from WoT's localization catalogs (1.53.0)
+
+WoT stores user-facing strings -- tank names, descriptions,
+module labels -- in standard gettext binary catalogs at
+`<wot_root>/res/text/lc_messages/<catalog>.mo`.  Each tank's
+`list.xml` entry carries a `userString` of the form
+`#<catalog>:<key>` (e.g. `#usa_vehicles:A37_M40M43`), which
+resolves to the friendly localized display name (`M40/M43`).
+That's the same string the user sees in their WoT client, in
+whatever language they have it set to.
+
+New module `tankviewer/localization.py` with `WoTLocalizer`:
+* Lazy-loads each `.mo` catalog via Python's stdlib `gettext`
+* Caches every catalog after first hit
+* `lookup('#cat:key')` -> localized string, or bare key when the
+  catalog / key is missing (gettext's natural echo-on-miss
+  behaviour) so callers never have to special-case None
+* `lookup_basename(...)` for UI code that wants a guaranteed
+  non-empty label
+
+Threading the data through:
+* `PkgExtractor._read_tank_table` now captures `userString` from
+  each `<tank>` block in `list.xml`.
+* `list_vehicle_xmls(with_tier=True)` carries `user_string` in
+  every entry alongside `tier` / `vclass`.
+* `Viewer.__init__` constructs a `WoTLocalizer` from the
+  configured `pkg_dir` (parent's parent = WoT root).
+
+UI consumption:
+* When `tanks.txt` is missing, the tier-tree builder now resolves
+  each entry's `user_string` via the localizer instead of
+  falling back to the raw basename.  A tier-1 USA tank shows up
+  as "T1 Cunningham" (matching the in-game UI) instead of
+  "A01_T1_Cunningham".
+* `tanks_index.txt` (regenerated on every ItemList rebuild) gains
+  a 4th tab-separated column -- the friendly name -- so external
+  tooling can use it as a name lookup without re-parsing the
+  catalogs.
+
+Files: new `tankviewer/localization.py`; edits to
+`tankviewer/loaders.py`, `tankviewer/viewer.py`.
+
 ### Tree fallback when tanks.txt is missing (1.52.1)
 
 The tier-tree builder filtered against `_tanks_display_map`

@@ -2099,9 +2099,10 @@ class PkgExtractor:
             entries = []
             for tag, meta in tbl.items():
                 entries.append({
-                    'xml':    tag + '.xml',
-                    'tier':   meta.get('tier'),
-                    'vclass': meta.get('vclass'),
+                    'xml':         tag + '.xml',
+                    'tier':        meta.get('tier'),
+                    'vclass':      meta.get('vclass'),
+                    'user_string': meta.get('user_string'),
                 })
             entries.sort(key=lambda e: (
                 (e['tier'] is None, e['tier'] or 0),
@@ -2173,7 +2174,18 @@ class PkgExtractor:
                     cand = first[0]
                     vclass = cand if cand in self._VCLASSES else 'other'
 
-            out[tag] = {'tier': tier, 'vclass': vclass}
+            # userString is a localization reference, format
+            # `#<catalog>:<key>` (e.g. `#usa_vehicles:A37_M40M43`).
+            # Resolved to a friendly localized name by
+            # tankviewer.localization.WoTLocalizer at consumption
+            # time.  We just carry the raw ref through here.
+            user_str = None
+            us_el = tank_el.find('userString')
+            if us_el is not None and us_el.text:
+                user_str = us_el.text.strip() or None
+
+            out[tag] = {'tier': tier, 'vclass': vclass,
+                        'user_string': user_str}
         return out
 
     # ------------------------------------------------------------------
