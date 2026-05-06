@@ -1978,6 +1978,49 @@ class Viewer:
         self.ui.paths_dialog.show(initial, on_confirm=self._on_paths_saved)
 
     # ------------------------------------------------------------------
+    def _show_info_popup(self, title, message):
+        """Show a transient Tkinter info dialog ('OK' button only).
+
+        Used by import / export flows for status notifications that
+        the user should see but doesn't need to act on (e.g. "FBX
+        was auto-upgraded from 6.1 to 7.3 before loading").
+        Failures are swallowed -- a missing tkinter or display
+        shouldn't break the import flow.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            r = tk.Tk(); r.withdraw()
+            try:
+                r.attributes('-topmost', True)
+            except Exception:
+                pass
+            messagebox.showinfo(title, message, parent=r)
+            r.destroy()
+        except Exception as exc:
+            print(f"[viewer] info popup failed ({title!r}): {exc}")
+
+    def _show_error_popup(self, title, message):
+        """Show a transient Tkinter error dialog ('OK' button only).
+
+        Sibling of `_show_info_popup`; uses messagebox.showerror so
+        the icon + colour match the OS error style.  Same swallow-
+        on-failure behaviour.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            r = tk.Tk(); r.withdraw()
+            try:
+                r.attributes('-topmost', True)
+            except Exception:
+                pass
+            messagebox.showerror(title, message, parent=r)
+            r.destroy()
+        except Exception as exc:
+            print(f"[viewer] error popup failed ({title!r}): {exc}")
+
+    # ------------------------------------------------------------------
     def _show_format_picker(self, direction):
         """Modal tkinter form listing every Blender IO format as a
         radio button.  Supported formats are enabled; the rest are
@@ -2708,6 +2751,30 @@ class Viewer:
         if not in_path:
             print("[import] cancelled.")
             return
+
+        # ---- FBX-version auto-upgrade ------------------------------------
+        # Blender 4.x rejects binary FBX < 7.1; the legacy WoT exporter
+        # wrote 6.1, and so does anything else from the FBX SDK 2009 era.
+        # Probe the header and, when needed, run Autodesk's free 2013
+        # converter to upgrade in place.  See `tankviewer.importers.
+        # fbx_version` for the version-floor + converter-location logic.
+        # `fbx_converter_exe` in tankExporterPy.json overrides the
+        # default install-path search.
+        if in_path.lower().endswith('.fbx'):
+            from .importers.fbx_version import ensure_modern_fbx
+            converter_override = (self._cfg.get('fbx_converter_exe')
+                                  or '').strip() or None
+            new_path, action, message = ensure_modern_fbx(
+                in_path, converter_override=converter_override)
+            if action == 'converted':
+                self.log(f"FBX upgrade: {message}")
+                self._show_info_popup("FBX upgraded", message)
+                in_path = new_path
+            elif action == 'error':
+                self.log_error(f"FBX upgrade: {message}")
+                self._show_error_popup("FBX import aborted", message)
+                return
+            # 'no_op' -- modern FBX, ASCII FBX, etc.; proceed silently.
 
         ok, result = import_vehicle(in_path, blender_exe=blender_exe,
                                      on_log=lambda s: print(f"[import] {s}"))

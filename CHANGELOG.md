@@ -9,6 +9,41 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Auto-upgrade pre-7.1 FBX on import (1.51.0)
+
+Blender's FBX importer rejects binary FBX files with header
+version < 7100 (FBX 7.1).  The legacy WoT tank exporter wrote
+6.1, and so does anything else from the FBX SDK 2009 era -- so
+attempting to import an old archive popped a "version too low"
+error and stopped dead.
+
+New flow: when `Import` picks an `.fbx` file, the import handler
+probes its 27-byte binary header for the version code.  If the
+file is below the floor, `tankviewer.importers.fbx_version.
+ensure_modern_fbx` looks up Autodesk's free FBX Converter 2013
+in the standard install paths (override via `fbx_converter_exe`
+in tankExporterPy.json), runs it headless against the file, and
+hands the upgraded `<basename>_v73.fbx` to Blender.  The original
+is preserved untouched.
+
+A Tkinter `messagebox.showinfo` dialog tells the user what
+happened ("FBX 6.1 is too old for Blender; auto-upgraded to
+FBX 7.3.  Source: ...  Converted: ...").  When the converter
+isn't installed, a `messagebox.showerror` explains that the user
+needs FBX Converter 2013 (or an explicit `fbx_converter_exe`
+config override) and the import aborts.
+
+Helpers also exposed:
+- `read_fbx_version(path)` -> int|None
+- `fbx_version_pretty(code)` -> str
+- `find_fbx_converter(override)` -> str|None
+- `convert_fbx_to_modern(src, exe, dst)` -> (ok, dst|err)
+- `ensure_modern_fbx(src, override)` -> (path, action, message)
+
+Files: new `tankviewer/importers/fbx_version.py`; edits to
+`tankviewer/viewer.py` (import flow + popup helpers) and
+`tankviewer/config.py` (new `fbx_converter_exe` slot).
+
 ### Rename `_active_group` -> `_active_engine_class` (1.50.3)
 
 Cosmetic-only rename for clarity.  The field tracks which WoT

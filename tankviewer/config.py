@@ -39,6 +39,13 @@ _DEFAULTS = {
     'lookup_xml': '',     # path to TheItemList.xml; auto-discovered when empty
     'blender_exe': '',    # path override for FBX/GLB/OBJ export.  Empty
                           # = auto-detect via registry / PATH / install dirs.
+    'fbx_converter_exe': '',  # path override for Autodesk FBX
+                              # Converter 2013 (FbxConverter.exe).
+                              # Used by importers/fbx_version.py to
+                              # auto-upgrade pre-7.1 binary FBXes that
+                              # Blender's importer rejects outright.
+                              # Empty = search the standard install
+                              # paths under Program Files.
     'info_panel_collapsed': False,  # remember the left-panel collapse state
     'light_value':   0.10,  # Light slider (direct sun brightness)
     'ambient_value': 0.50,  # Ambient slider (flat ambient fill)
