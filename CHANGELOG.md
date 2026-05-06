@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Startup tkinter probe -> in-app warning (1.57.4)
+
+A tester reported "can not open file picker" and the source
+turned out to be `import tkinter` itself failing -- the python.org
+installer makes "tcl/tk and IDLE" an OPTIONAL component, and if
+it's unchecked at install time, you end up with a Python that
+can't open any file dialog.
+
+Previously the failure printed to stdout only -- a tester running
+TEPY by double-clicking `go.bat` rarely reads the cmd window
+behind the pygame surface, so they just saw "Set Paths / Import /
+Export buttons do nothing."
+
+`Viewer.__init__` now probes `import tkinter` at the same time as
+the PkgExtractor / ItemList readiness logging.  If it fails, four
+console-pane lines explain the diagnosis and the fix:
+
+    tkinter missing from this Python install -- Set Paths /
+        Import / Export / Language pickers WILL NOT OPEN.
+    underlying error: <exception>
+    Fix: re-run the python.org installer, choose Modify, and
+        check the 'tcl/tk and IDLE' option.
+    Or in Windows Settings > Apps, find Python > Modify >
+        check 'tcl/tk and IDLE' > Repair.
+
+Files: `tankExporterPy/viewer.py`.
+
 ### Set Paths picker hardening + error logging (1.57.3)
 
 `UIPathsDialog._pick_path` used to swallow any Tk failure

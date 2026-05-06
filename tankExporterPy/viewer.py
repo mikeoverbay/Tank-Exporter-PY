@@ -1085,6 +1085,31 @@ class Viewer:
         else:
             self.log_error("PkgExtractor not configured -- open Set Paths")
 
+        # Tkinter availability probe.  Every modal dialog in TEPY
+        # (Set Paths file pickers, Import / Export, Language picker,
+        # FBX upgrade popup) routes through `tkinter.filedialog` /
+        # `tkinter.messagebox`.  If the user's Python install is
+        # missing the `tcl/tk and IDLE` optional component, those
+        # dialogs all fail with an ImportError that previously
+        # surfaced only as a stdout print.  Surface it in the
+        # in-app console too so a tester running off `go.bat` sees
+        # the diagnosis without alt-tabbing to cmd.
+        try:
+            import tkinter as _tk_probe   # noqa: F401
+        except ImportError as exc:
+            self.log_error(
+                "tkinter missing from this Python install -- "
+                "Set Paths / Import / Export / Language pickers "
+                "WILL NOT OPEN.")
+            self.log_error(
+                f"   underlying error: {exc}")
+            self.log_error(
+                "   Fix: re-run the python.org installer, choose "
+                "Modify, and check the 'tcl/tk and IDLE' option.")
+            self.log_error(
+                "   Or in Windows Settings > Apps, find Python > "
+                "Modify > check 'tcl/tk and IDLE' > Repair.")
+
         # Auto-rebuild TheItemList.xml when it's missing.  The file is
         # .gitignored (70+ MB, machine-specific to the user's WoT
         # install) so a fresh checkout always lands here on first run.
