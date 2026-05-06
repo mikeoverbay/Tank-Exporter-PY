@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "V/V"
 
 msgid "Tools"
-msgstr ""
+msgstr "Nástroje"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Mřížka"
 
 msgid "Axes"
-msgstr ""
+msgstr "Osy"
 
 msgid "Light"
-msgstr ""
+msgstr "Světlo"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Orbita"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Nebe"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Drátový"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Sítě"
 
 msgid "Flip"
-msgstr ""
+msgstr "Přep."
 
 msgid "Compare"
-msgstr ""
+msgstr "Porovnat"
 
 msgid "Language"
-msgstr ""
+msgstr "Jazyk"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Cesty"
 
 msgid "Import"
-msgstr ""
+msgstr "Import"
 
 msgid "Export"
-msgstr ""
+msgstr "Export"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Uložit Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Sezn. obj."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Okolí"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Kouř Zač."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Kouř Kon."
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Kouř Ryc."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Kouř MizZ"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Kouř MizK"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Vel. ohně"
 
 msgid "Normals"
-msgstr ""
+msgstr "Normály"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "NaVrch"
 
 msgid "Debug"
-msgstr ""
+msgstr "Ladění"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX aktualizován"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Import FBX přerušen"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Import FBX selhal"

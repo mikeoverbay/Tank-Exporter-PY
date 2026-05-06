@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "V/R"
 
 msgid "Tools"
-msgstr ""
+msgstr "Công cụ"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Lưới"
 
 msgid "Axes"
-msgstr ""
+msgstr "Trục"
 
 msgid "Light"
-msgstr ""
+msgstr "Đèn"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Quỹ đạo"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Bầu trời"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Khung dây"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Lưới"
 
 msgid "Flip"
-msgstr ""
+msgstr "Đổi"
 
 msgid "Compare"
-msgstr ""
+msgstr "So sánh"
 
 msgid "Language"
-msgstr ""
+msgstr "Ngôn ngữ"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Đường dẫn"
 
 msgid "Import"
-msgstr ""
+msgstr "Nhập"
 
 msgid "Export"
-msgstr ""
+msgstr "Xuất"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Lưu Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Danh sách"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Nền"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Khói Bắt"
 
 msgid "Sm End"
-msgstr ""
+msgstr "Khói Kết"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Khói TĐộ"
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Khói MờĐ"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Khói MờK"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Kích thước lửa"
 
 msgid "Normals"
-msgstr ""
+msgstr "Pháp tuyến"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "TheoĐỉnh"
 
 msgid "Debug"
-msgstr ""
+msgstr "Gỡ lỗi"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX đã nâng cấp"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Nhập FBX đã hủy"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Nhập FBX thất bại"

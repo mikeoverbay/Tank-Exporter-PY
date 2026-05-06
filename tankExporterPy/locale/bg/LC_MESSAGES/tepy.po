@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "Вх/Изх"
 
 msgid "Tools"
-msgstr ""
+msgstr "Инстр."
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Мрежа"
 
 msgid "Axes"
-msgstr ""
+msgstr "Оси"
 
 msgid "Light"
-msgstr ""
+msgstr "Светл."
 
 msgid "Orbit"
-msgstr ""
+msgstr "Орбита"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Небе"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Каркас"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Мрежи"
 
 msgid "Flip"
-msgstr ""
+msgstr "Превкл."
 
 msgid "Compare"
-msgstr ""
+msgstr "Сравни"
 
 msgid "Language"
-msgstr ""
+msgstr "Език"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Пътища"
 
 msgid "Import"
-msgstr ""
+msgstr "Внеси"
 
 msgid "Export"
-msgstr ""
+msgstr "Изнеси"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Зап. Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Списък"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Околна"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Дим Нач."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Дим Край"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Дим Скор."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Дим ИзчН"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Дим ИзчК"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Размер огън"
 
 msgid "Normals"
-msgstr ""
+msgstr "Нормали"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "ПоВърх"
 
 msgid "Debug"
-msgstr ""
+msgstr "Отстран."
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX обновен"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "FBX импорт отменен"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "FBX импорт неуспешен"

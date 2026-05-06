@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "入出力"
 
 msgid "Tools"
-msgstr ""
+msgstr "ツール"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "グリッド"
 
 msgid "Axes"
-msgstr ""
+msgstr "軸"
 
 msgid "Light"
-msgstr ""
+msgstr "ライト"
 
 msgid "Orbit"
-msgstr ""
+msgstr "周回"
 
 msgid "Skybox"
-msgstr ""
+msgstr "空"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "ワイヤー"
 
 msgid "Meshes"
-msgstr ""
+msgstr "メッシュ"
 
 msgid "Flip"
-msgstr ""
+msgstr "切替"
 
 msgid "Compare"
-msgstr ""
+msgstr "比較"
 
 msgid "Language"
-msgstr ""
+msgstr "言語"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "パス"
 
 msgid "Import"
-msgstr ""
+msgstr "インポート"
 
 msgid "Export"
-msgstr ""
+msgstr "エクスポート"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Prim保存"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "項目リスト"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "環境光"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "煙 開始"
 
 msgid "Sm End"
-msgstr ""
+msgstr "煙 終了"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "煙 速度"
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "煙 消S"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "煙 消E"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "炎サイズ"
 
 msgid "Normals"
-msgstr ""
+msgstr "法線"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "頂点毎"
 
 msgid "Debug"
-msgstr ""
+msgstr "デバッグ"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBXアップグレード"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "FBXインポート中止"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "FBXインポート失敗"

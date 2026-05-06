@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "입출력"
 
 msgid "Tools"
-msgstr ""
+msgstr "도구"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "격자"
 
 msgid "Axes"
-msgstr ""
+msgstr "축"
 
 msgid "Light"
-msgstr ""
+msgstr "조명"
 
 msgid "Orbit"
-msgstr ""
+msgstr "궤도"
 
 msgid "Skybox"
-msgstr ""
+msgstr "하늘"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "와이어"
 
 msgid "Meshes"
-msgstr ""
+msgstr "메시"
 
 msgid "Flip"
-msgstr ""
+msgstr "전환"
 
 msgid "Compare"
-msgstr ""
+msgstr "비교"
 
 msgid "Language"
-msgstr ""
+msgstr "언어"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "경로"
 
 msgid "Import"
-msgstr ""
+msgstr "가져오기"
 
 msgid "Export"
-msgstr ""
+msgstr "내보내기"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Prim 저장"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "항목 목록"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "주변광"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "연기 시작"
 
 msgid "Sm End"
-msgstr ""
+msgstr "연기 끝"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "연기 속도"
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "연기 페이드S"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "연기 페이드E"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "불 크기"
 
 msgid "Normals"
-msgstr ""
+msgstr "노멀"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "정점별"
 
 msgid "Debug"
-msgstr ""
+msgstr "디버그"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX 업그레이드됨"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "FBX 가져오기 취소됨"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "FBX 가져오기 실패"

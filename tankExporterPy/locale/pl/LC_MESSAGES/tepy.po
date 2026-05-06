@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "WE/WY"
 
 msgid "Tools"
-msgstr ""
+msgstr "Narzęd."
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Siatka"
 
 msgid "Axes"
-msgstr ""
+msgstr "Osie"
 
 msgid "Light"
-msgstr ""
+msgstr "Światło"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Orbita"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Niebo"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Krawędz."
 
 msgid "Meshes"
-msgstr ""
+msgstr "Siatki"
 
 msgid "Flip"
-msgstr ""
+msgstr "Przeł."
 
 msgid "Compare"
-msgstr ""
+msgstr "Porównaj"
 
 msgid "Language"
-msgstr ""
+msgstr "Język"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Ścieżki"
 
 msgid "Import"
-msgstr ""
+msgstr "Importuj"
 
 msgid "Export"
-msgstr ""
+msgstr "Eksportuj"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Zapisz Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Lista obiekt."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Otocz."
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Dym Pocz."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Dym Koń."
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Dym Pręd."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Dym ZanP"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Dym ZanK"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Rozm. ognia"
 
 msgid "Normals"
-msgstr ""
+msgstr "Normalne"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "NaWierz."
 
 msgid "Debug"
-msgstr ""
+msgstr "Debug"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX zaktualizowany"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Import FBX anulowany"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Nieudany import FBX"

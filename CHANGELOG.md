@@ -9,6 +9,67 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Seed real translations into all 20 languages (1.56.0)
+
+The 1.55.0 framework shipped 20 stub catalogs that fell back to
+English.  This pass fills them in with actual translations for
+every UI string TEPY exposes -- 33 entries × 20 languages = 660
+new translations.
+
+Coverage: every left-panel button (Grid, Axes, Set Paths, Save
+Prim, ItemList, ...), every right-panel slider (Sm Start, Fire
+Size, Normals, ...), every checkbox (NMap, AO, PerVtx, Debug),
+every section header (UI, IO, Tools), and every popup title
+(FBX upgraded, FBX import aborted, FBX import failed).
+
+Languages translated:
+
+| Code   | Language                  |
+| ------ | ------------------------- |
+| de     | German                    |
+| ru     | Russian                   |
+| fr     | French                    |
+| es     | Spanish (Castilian)       |
+| es_ar  | Spanish (Latin American)  |
+| pt_br  | Portuguese (Brazil)       |
+| pl     | Polish                    |
+| cs     | Czech                     |
+| it     | Italian                   |
+| hu     | Hungarian                 |
+| bg     | Bulgarian                 |
+| ro     | Romanian                  |
+| tr     | Turkish                   |
+| uk     | Ukrainian                 |
+| ko     | Korean                    |
+| ja     | Japanese                  |
+| zh_cn  | Chinese (Simplified)      |
+| zh_tw  | Chinese (Traditional)     |
+| vi     | Vietnamese                |
+| th     | Thai                      |
+
+Translations are practical and recognition-oriented for a 70-px
+button width.  Technical abbreviations -- `UI`, `AO`, `NMap`,
+`FBX`, `Sm`, `Prim` -- stay as-is across every language because
+they're standard in 3-D / graphics tooling worldwide.  Where a
+natural translation would overflow ("Drahtgittermodell" for
+Wireframe), uses an abbreviation native to the language
+(`Drahtgit.`).
+
+New tool: `cust_tools/seed_locale_translations.py` -- holds the
+master translation table and a one-shot apply-then-recompile
+runner.  Re-run any time the table changes; existing
+translations get refreshed in place.  Idempotent.
+
+Native speaker review welcome -- this is a practical first pass
+to make the language picker visually working across every WoT
+locale, not a polished L10n release.  Anyone fluent in a
+language can edit the corresponding `.po` and re-run
+`build_locale_mo.py`.
+
+Files: `cust_tools/seed_locale_translations.py`,
+`tankExporterPy/locale/<code>/LC_MESSAGES/tepy.{po,mo}` for
+all 20 non-English languages.
+
 ### Multi-language UI via gettext catalogs (1.55.0)
 
 TEPY now ships its own `gettext` translation pipeline -- the same

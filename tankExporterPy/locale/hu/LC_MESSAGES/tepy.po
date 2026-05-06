@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "B/K"
 
 msgid "Tools"
-msgstr ""
+msgstr "Eszk."
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Rács"
 
 msgid "Axes"
-msgstr ""
+msgstr "Tengely."
 
 msgid "Light"
-msgstr ""
+msgstr "Fény"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Pálya"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Égbolt"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Drótvázv"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Hálók"
 
 msgid "Flip"
-msgstr ""
+msgstr "Csere"
 
 msgid "Compare"
-msgstr ""
+msgstr "Össz."
 
 msgid "Language"
-msgstr ""
+msgstr "Nyelv"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Útvonalak"
 
 msgid "Import"
-msgstr ""
+msgstr "Import."
 
 msgid "Export"
-msgstr ""
+msgstr "Export."
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Prim ment."
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Tárgylista"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Környezet"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Füst Kezd."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Füst Vég"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Füst Seb."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Füst HalK"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Füst HalV"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Tűz mérete"
 
 msgid "Normals"
-msgstr ""
+msgstr "Normálok"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "CsúcsP"
 
 msgid "Debug"
-msgstr ""
+msgstr "Hibakeres."
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX frissítve"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "FBX import megszakítva"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "FBX import sikertelen"

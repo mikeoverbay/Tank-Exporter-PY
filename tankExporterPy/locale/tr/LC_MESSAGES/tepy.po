@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "G/Ç"
 
 msgid "Tools"
-msgstr ""
+msgstr "Araçlar"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Izgara"
 
 msgid "Axes"
-msgstr ""
+msgstr "Eksenler"
 
 msgid "Light"
-msgstr ""
+msgstr "Işık"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Yörünge"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Gökyüzü"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Tel kafes"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Ağlar"
 
 msgid "Flip"
-msgstr ""
+msgstr "Değiştir"
 
 msgid "Compare"
-msgstr ""
+msgstr "Karşılaş."
 
 msgid "Language"
-msgstr ""
+msgstr "Dil"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Yollar"
 
 msgid "Import"
-msgstr ""
+msgstr "İçe Aktar"
 
 msgid "Export"
-msgstr ""
+msgstr "Dışa Aktar"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Prim Kayd."
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Öğe Lst."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Ortam"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Du Başl."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Du Son"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Du Hız"
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Du SönB"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Du SönS"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Ateş boy."
 
 msgid "Normals"
-msgstr ""
+msgstr "Normaller"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "KöşeBaş"
 
 msgid "Debug"
-msgstr ""
+msgstr "Hata Ayık."
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX güncellendi"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "FBX içe aktar. iptal"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "FBX içe aktar. başarısız"

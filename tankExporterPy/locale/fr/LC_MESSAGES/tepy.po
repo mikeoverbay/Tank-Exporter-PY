@@ -63,30 +63,30 @@ msgid "Export"
 msgstr "Exporter"
 
 msgid "Save Prim"
-msgstr "Enregistrer Prim"
+msgstr "Enreg. Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr "Liste d'objets"
+msgstr "Liste Obj."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
 msgstr "Ambiant"
 
 msgid "Sm Start"
-msgstr "Fum Début"
+msgstr "Sm Début"
 
 msgid "Sm End"
-msgstr "Fum Fin"
+msgstr "Sm Fin"
 
 msgid "Sm Speed"
-msgstr "Fum Vitesse"
+msgstr "Sm Vitesse"
 
 msgid "Sm FadeS"
-msgstr "Fum FadeD"
+msgstr "Sm FonduD"
 
 msgid "Sm FadeE"
-msgstr "Fum FadeF"
+msgstr "Sm FonduF"
 
 msgid "Fire Size"
 msgstr "Taille feu"
@@ -109,10 +109,10 @@ msgstr "Débug"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX mis à niveau"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Import FBX annulé"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Échec import FBX"

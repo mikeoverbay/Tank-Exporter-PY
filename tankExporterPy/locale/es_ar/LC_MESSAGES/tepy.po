@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "E/S"
 
 msgid "Tools"
-msgstr ""
+msgstr "Herram."
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Grilla"
 
 msgid "Axes"
-msgstr ""
+msgstr "Ejes"
 
 msgid "Light"
-msgstr ""
+msgstr "Luz"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Órbita"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Cielo"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Alámbr."
 
 msgid "Meshes"
-msgstr ""
+msgstr "Mallas"
 
 msgid "Flip"
-msgstr ""
+msgstr "Cambiar"
 
 msgid "Compare"
-msgstr ""
+msgstr "Comparar"
 
 msgid "Language"
-msgstr ""
+msgstr "Idioma"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Rutas"
 
 msgid "Import"
-msgstr ""
+msgstr "Importar"
 
 msgid "Export"
-msgstr ""
+msgstr "Exportar"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Guardar Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Lista Obj."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Ambiente"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Hu Inicio"
 
 msgid "Sm End"
-msgstr ""
+msgstr "Hu Fin"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Hu Vel."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Hu DescI"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Hu DescF"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Tam. fuego"
 
 msgid "Normals"
-msgstr ""
+msgstr "Normales"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "PorVért"
 
 msgid "Debug"
-msgstr ""
+msgstr "Depurar"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX actualizado"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Importación FBX cancelada"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Falló import FBX"

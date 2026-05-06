@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "I/O"
 
 msgid "Tools"
-msgstr ""
+msgstr "Unelte"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "Grilă"
 
 msgid "Axes"
-msgstr ""
+msgstr "Axe"
 
 msgid "Light"
-msgstr ""
+msgstr "Lumină"
 
 msgid "Orbit"
-msgstr ""
+msgstr "Orbită"
 
 msgid "Skybox"
-msgstr ""
+msgstr "Cer"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "Sârmă"
 
 msgid "Meshes"
-msgstr ""
+msgstr "Plase"
 
 msgid "Flip"
-msgstr ""
+msgstr "Schimbă"
 
 msgid "Compare"
-msgstr ""
+msgstr "Compară"
 
 msgid "Language"
-msgstr ""
+msgstr "Limbă"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "Căi"
 
 msgid "Import"
-msgstr ""
+msgstr "Importă"
 
 msgid "Export"
-msgstr ""
+msgstr "Exportă"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "Salv. Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "Listă Obj."
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "Ambient"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "Fum Înc."
 
 msgid "Sm End"
-msgstr ""
+msgstr "Fum Sf."
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "Fum Vit."
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "Fum EstoÎ"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "Fum EstoS"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "Mărime foc"
 
 msgid "Normals"
-msgstr ""
+msgstr "Normale"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "PeVârf"
 
 msgid "Debug"
-msgstr ""
+msgstr "Depan."
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "FBX actualizat"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "Import FBX anulat"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "Import FBX eșuat"

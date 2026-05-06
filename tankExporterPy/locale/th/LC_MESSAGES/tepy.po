@@ -13,106 +13,106 @@ msgstr ""
 
 # ---- Left-panel section headers ---------------------------------------
 msgid "UI"
-msgstr ""
+msgstr "UI"
 
 msgid "IO"
-msgstr ""
+msgstr "เข้า/ออก"
 
 msgid "Tools"
-msgstr ""
+msgstr "เครื่องมือ"
 
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
-msgstr ""
+msgstr "ตาราง"
 
 msgid "Axes"
-msgstr ""
+msgstr "แกน"
 
 msgid "Light"
-msgstr ""
+msgstr "แสง"
 
 msgid "Orbit"
-msgstr ""
+msgstr "วงโคจร"
 
 msgid "Skybox"
-msgstr ""
+msgstr "ท้องฟ้า"
 
 msgid "Wireframe"
-msgstr ""
+msgstr "โครง"
 
 msgid "Meshes"
-msgstr ""
+msgstr "เมช"
 
 msgid "Flip"
-msgstr ""
+msgstr "สลับ"
 
 msgid "Compare"
-msgstr ""
+msgstr "เปรียบเทียบ"
 
 msgid "Language"
-msgstr ""
+msgstr "ภาษา"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
-msgstr ""
+msgstr "พาธ"
 
 msgid "Import"
-msgstr ""
+msgstr "นำเข้า"
 
 msgid "Export"
-msgstr ""
+msgstr "ส่งออก"
 
 msgid "Save Prim"
-msgstr ""
+msgstr "บันทึก Prim"
 
 # ---- Tools-section buttons --------------------------------------------
 msgid "ItemList"
-msgstr ""
+msgstr "รายการ"
 
 # ---- Right-panel sliders ----------------------------------------------
 msgid "Ambient"
-msgstr ""
+msgstr "แวดล้อม"
 
 msgid "Sm Start"
-msgstr ""
+msgstr "ควันเริ่ม"
 
 msgid "Sm End"
-msgstr ""
+msgstr "ควันจบ"
 
 msgid "Sm Speed"
-msgstr ""
+msgstr "ควันเร็ว"
 
 msgid "Sm FadeS"
-msgstr ""
+msgstr "ควันจางS"
 
 msgid "Sm FadeE"
-msgstr ""
+msgstr "ควันจางE"
 
 msgid "Fire Size"
-msgstr ""
+msgstr "ขนาดไฟ"
 
 msgid "Normals"
-msgstr ""
+msgstr "นอร์มัล"
 
 # ---- Right-panel checkboxes -------------------------------------------
 msgid "NMap"
-msgstr ""
+msgstr "NMap"
 
 msgid "AO"
-msgstr ""
+msgstr "AO"
 
 msgid "PerVtx"
-msgstr ""
+msgstr "ต่อจุด"
 
 msgid "Debug"
-msgstr ""
+msgstr "ดีบัก"
 
 # ---- Popup titles -----------------------------------------------------
 msgid "FBX upgraded"
-msgstr ""
+msgstr "อัปเกรด FBX แล้ว"
 
 msgid "FBX import aborted"
-msgstr ""
+msgstr "ยกเลิกการนำเข้า FBX"
 
 msgid "FBX import failed"
-msgstr ""
+msgstr "นำเข้า FBX ล้มเหลว"

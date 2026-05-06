@@ -1,0 +1,851 @@
+"""Fill every supported-language .po file with a starter translation set.
+
+One-shot tool that walks `tankExporterPy/locale/<code>/LC_MESSAGES/
+tepy.po`, replaces every empty `msgstr ""` with the translation for
+that language from the table below, then recompiles the `.mo` via
+`build_locale_mo`.  Idempotent: re-running just rewrites existing
+translations with the latest table contents.
+
+Translations covered: every string the canonical English `.po`
+ships (buttons, sliders, checkboxes, section headers, popup
+titles).  ~34 strings per language, 20 languages, ~680 entries.
+
+Quality notes:
+
+* Technical abbreviations (`UI`, `IO`, `NMap`, `AO`, `FBX`, `Sm`)
+  are kept as-is across all languages -- they're standard in
+  3-D / graphics tooling worldwide and translating them would
+  hurt rather than help recognition.
+* Short forms ("Sm Start" = smoke start size) get
+  language-equivalent abbreviations only where the natural
+  translation would overflow the 70-pixel button width.
+* Native speaker review welcome -- this is a starter pass to
+  get the framework end-to-end visible, not a polished L10n
+  release.
+
+Run from project root:
+
+    python cust_tools/seed_locale_translations.py
+"""
+
+import os
+import re
+import sys
+
+
+_HERE         = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_HERE)
+_LOCALE_ROOT  = os.path.join(_PROJECT_ROOT, 'tankExporterPy', 'locale')
+
+# Make sibling tool importable for the recompile step at the end.
+sys.path.insert(0, _HERE)
+
+
+# ---------------------------------------------------------------------------
+# Translation tables.  Keys are the canonical English msgids from
+# en/LC_MESSAGES/tepy.po; values are the per-language translations.
+# Untranslated entries (or entries the table doesn't carry) fall
+# through to the English msgid via gettext's default behaviour.
+
+# French is already seeded but included here so the script can
+# refresh it identically to the others.
+TRANSLATIONS = {
+    # ------------------- French (fr) ----------------------------
+    'fr': {
+        'UI':                'UI',
+        'IO':                'E/S',
+        'Tools':             'Outils',
+        'Grid':              'Grille',
+        'Axes':              'Axes',
+        'Light':             'Lumière',
+        'Orbit':             'Orbite',
+        'Skybox':            'Ciel',
+        'Wireframe':         'Filaire',
+        'Meshes':            'Maillages',
+        'Flip':              'Échanger',
+        'Compare':           'Comparer',
+        'Language':          'Langue',
+        'Set Paths':         'Chemins',
+        'Import':            'Importer',
+        'Export':            'Exporter',
+        'Save Prim':         'Enreg. Prim',
+        'ItemList':          'Liste Obj.',
+        'Ambient':           'Ambiant',
+        'Sm Start':          'Sm Début',
+        'Sm End':            'Sm Fin',
+        'Sm Speed':          'Sm Vitesse',
+        'Sm FadeS':          'Sm FonduD',
+        'Sm FadeE':          'Sm FonduF',
+        'Fire Size':         'Taille feu',
+        'Normals':           'Normales',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'ParSom',
+        'Debug':             'Débug',
+        'FBX upgraded':      'FBX mis à niveau',
+        'FBX import aborted': 'Import FBX annulé',
+        'FBX import failed':  'Échec import FBX',
+    },
+    # ------------------- German (de) ----------------------------
+    'de': {
+        'UI':                'UI',
+        'IO':                'E/A',
+        'Tools':             'Werkzeuge',
+        'Grid':              'Gitter',
+        'Axes':              'Achsen',
+        'Light':             'Licht',
+        'Orbit':             'Orbit',
+        'Skybox':            'Himmel',
+        'Wireframe':         'Drahtgit.',
+        'Meshes':            'Netze',
+        'Flip':              'Tauschen',
+        'Compare':           'Vergleich',
+        'Language':          'Sprache',
+        'Set Paths':         'Pfade',
+        'Import':            'Importieren',
+        'Export':            'Exportieren',
+        'Save Prim':         'Prim sich.',
+        'ItemList':          'Objektliste',
+        'Ambient':           'Umgebung',
+        'Sm Start':          'Sm Start',
+        'Sm End':            'Sm Ende',
+        'Sm Speed':          'Sm Tempo',
+        'Sm FadeS':          'Sm BlendA',
+        'Sm FadeE':          'Sm BlendE',
+        'Fire Size':         'Feuergröße',
+        'Normals':           'Normalen',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'ProEck',
+        'Debug':             'Debug',
+        'FBX upgraded':      'FBX aktualisiert',
+        'FBX import aborted': 'FBX-Import abgebrochen',
+        'FBX import failed':  'FBX-Import fehlgeschlagen',
+    },
+    # ------------------- Russian (ru) ---------------------------
+    'ru': {
+        'UI':                'UI',
+        'IO':                'Ввод/Выв.',
+        'Tools':             'Инструм.',
+        'Grid':              'Сетка',
+        'Axes':              'Оси',
+        'Light':             'Свет',
+        'Orbit':             'Орбита',
+        'Skybox':            'Небо',
+        'Wireframe':         'Каркас',
+        'Meshes':            'Сетки',
+        'Flip':              'Перекл.',
+        'Compare':           'Сравн.',
+        'Language':          'Язык',
+        'Set Paths':         'Пути',
+        'Import':            'Импорт',
+        'Export':            'Экспорт',
+        'Save Prim':         'Сохр. Prim',
+        'ItemList':          'Список',
+        'Ambient':           'Рассеян.',
+        'Sm Start':          'Дым Нач.',
+        'Sm End':            'Дым Кон.',
+        'Sm Speed':          'Дым Скор.',
+        'Sm FadeS':          'Дым ЗатН',
+        'Sm FadeE':          'Дым ЗатК',
+        'Fire Size':         'Огонь',
+        'Normals':           'Нормали',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'НаВерш.',
+        'Debug':             'Отладка',
+        'FBX upgraded':      'FBX обновлён',
+        'FBX import aborted': 'Импорт FBX отменён',
+        'FBX import failed':  'Ошибка импорта FBX',
+    },
+    # ------------------- Spanish (es) ---------------------------
+    'es': {
+        'UI':                'UI',
+        'IO':                'E/S',
+        'Tools':             'Herram.',
+        'Grid':              'Cuadríc.',
+        'Axes':              'Ejes',
+        'Light':             'Luz',
+        'Orbit':             'Órbita',
+        'Skybox':            'Cielo',
+        'Wireframe':         'Alámbr.',
+        'Meshes':            'Mallas',
+        'Flip':              'Cambiar',
+        'Compare':           'Comparar',
+        'Language':          'Idioma',
+        'Set Paths':         'Rutas',
+        'Import':            'Importar',
+        'Export':            'Exportar',
+        'Save Prim':         'Guardar Prim',
+        'ItemList':          'Lista Obj.',
+        'Ambient':           'Ambiente',
+        'Sm Start':          'Hu Inicio',
+        'Sm End':            'Hu Fin',
+        'Sm Speed':          'Hu Vel.',
+        'Sm FadeS':          'Hu DescI',
+        'Sm FadeE':          'Hu DescF',
+        'Fire Size':         'Tam. fuego',
+        'Normals':           'Normales',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'PorVért',
+        'Debug':             'Depurar',
+        'FBX upgraded':      'FBX actualizado',
+        'FBX import aborted': 'Importación FBX cancelada',
+        'FBX import failed':  'Falló import FBX',
+    },
+    # ------------------- Spanish LATAM (es_ar) ------------------
+    # Same as es except minor Argentine flavour ("ítem" -> same).
+    'es_ar': {
+        'UI':                'UI',
+        'IO':                'E/S',
+        'Tools':             'Herram.',
+        'Grid':              'Grilla',
+        'Axes':              'Ejes',
+        'Light':             'Luz',
+        'Orbit':             'Órbita',
+        'Skybox':            'Cielo',
+        'Wireframe':         'Alámbr.',
+        'Meshes':            'Mallas',
+        'Flip':              'Cambiar',
+        'Compare':           'Comparar',
+        'Language':          'Idioma',
+        'Set Paths':         'Rutas',
+        'Import':            'Importar',
+        'Export':            'Exportar',
+        'Save Prim':         'Guardar Prim',
+        'ItemList':          'Lista Obj.',
+        'Ambient':           'Ambiente',
+        'Sm Start':          'Hu Inicio',
+        'Sm End':            'Hu Fin',
+        'Sm Speed':          'Hu Vel.',
+        'Sm FadeS':          'Hu DescI',
+        'Sm FadeE':          'Hu DescF',
+        'Fire Size':         'Tam. fuego',
+        'Normals':           'Normales',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'PorVért',
+        'Debug':             'Depurar',
+        'FBX upgraded':      'FBX actualizado',
+        'FBX import aborted': 'Importación FBX cancelada',
+        'FBX import failed':  'Falló import FBX',
+    },
+    # ------------------- Portuguese Brazil (pt_br) --------------
+    'pt_br': {
+        'UI':                'UI',
+        'IO':                'E/S',
+        'Tools':             'Ferram.',
+        'Grid':              'Grade',
+        'Axes':              'Eixos',
+        'Light':             'Luz',
+        'Orbit':             'Órbita',
+        'Skybox':            'Céu',
+        'Wireframe':         'Aramado',
+        'Meshes':            'Malhas',
+        'Flip':              'Trocar',
+        'Compare':           'Comparar',
+        'Language':          'Idioma',
+        'Set Paths':         'Caminhos',
+        'Import':            'Importar',
+        'Export':            'Exportar',
+        'Save Prim':         'Salvar Prim',
+        'ItemList':          'Lista Itens',
+        'Ambient':           'Ambiente',
+        'Sm Start':          'Fu Início',
+        'Sm End':            'Fu Fim',
+        'Sm Speed':          'Fu Vel.',
+        'Sm FadeS':          'Fu EsmI',
+        'Sm FadeE':          'Fu EsmF',
+        'Fire Size':         'Tam. fogo',
+        'Normals':           'Normais',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'PorVért',
+        'Debug':             'Depurar',
+        'FBX upgraded':      'FBX atualizado',
+        'FBX import aborted': 'Importação FBX cancelada',
+        'FBX import failed':  'Falha ao importar FBX',
+    },
+    # ------------------- Polish (pl) ----------------------------
+    'pl': {
+        'UI':                'UI',
+        'IO':                'WE/WY',
+        'Tools':             'Narzęd.',
+        'Grid':              'Siatka',
+        'Axes':              'Osie',
+        'Light':             'Światło',
+        'Orbit':             'Orbita',
+        'Skybox':            'Niebo',
+        'Wireframe':         'Krawędz.',
+        'Meshes':            'Siatki',
+        'Flip':              'Przeł.',
+        'Compare':           'Porównaj',
+        'Language':          'Język',
+        'Set Paths':         'Ścieżki',
+        'Import':            'Importuj',
+        'Export':            'Eksportuj',
+        'Save Prim':         'Zapisz Prim',
+        'ItemList':          'Lista obiekt.',
+        'Ambient':           'Otocz.',
+        'Sm Start':          'Dym Pocz.',
+        'Sm End':            'Dym Koń.',
+        'Sm Speed':          'Dym Pręd.',
+        'Sm FadeS':          'Dym ZanP',
+        'Sm FadeE':          'Dym ZanK',
+        'Fire Size':         'Rozm. ognia',
+        'Normals':           'Normalne',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'NaWierz.',
+        'Debug':             'Debug',
+        'FBX upgraded':      'FBX zaktualizowany',
+        'FBX import aborted': 'Import FBX anulowany',
+        'FBX import failed':  'Nieudany import FBX',
+    },
+    # ------------------- Czech (cs) -----------------------------
+    'cs': {
+        'UI':                'UI',
+        'IO':                'V/V',
+        'Tools':             'Nástroje',
+        'Grid':              'Mřížka',
+        'Axes':              'Osy',
+        'Light':             'Světlo',
+        'Orbit':             'Orbita',
+        'Skybox':            'Nebe',
+        'Wireframe':         'Drátový',
+        'Meshes':            'Sítě',
+        'Flip':              'Přep.',
+        'Compare':           'Porovnat',
+        'Language':          'Jazyk',
+        'Set Paths':         'Cesty',
+        'Import':            'Import',
+        'Export':            'Export',
+        'Save Prim':         'Uložit Prim',
+        'ItemList':          'Sezn. obj.',
+        'Ambient':           'Okolí',
+        'Sm Start':          'Kouř Zač.',
+        'Sm End':            'Kouř Kon.',
+        'Sm Speed':          'Kouř Ryc.',
+        'Sm FadeS':          'Kouř MizZ',
+        'Sm FadeE':          'Kouř MizK',
+        'Fire Size':         'Vel. ohně',
+        'Normals':           'Normály',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'NaVrch',
+        'Debug':             'Ladění',
+        'FBX upgraded':      'FBX aktualizován',
+        'FBX import aborted': 'Import FBX přerušen',
+        'FBX import failed':  'Import FBX selhal',
+    },
+    # ------------------- Italian (it) ---------------------------
+    'it': {
+        'UI':                'UI',
+        'IO':                'I/O',
+        'Tools':             'Strum.',
+        'Grid':              'Griglia',
+        'Axes':              'Assi',
+        'Light':             'Luce',
+        'Orbit':             'Orbita',
+        'Skybox':            'Cielo',
+        'Wireframe':         'Wirefr.',
+        'Meshes':            'Mesh',
+        'Flip':              'Scambia',
+        'Compare':           'Confronta',
+        'Language':          'Lingua',
+        'Set Paths':         'Percorsi',
+        'Import':            'Importa',
+        'Export':            'Esporta',
+        'Save Prim':         'Salva Prim',
+        'ItemList':          'Elenco Ogg.',
+        'Ambient':           'Ambient.',
+        'Sm Start':          'Fu Inizio',
+        'Sm End':            'Fu Fine',
+        'Sm Speed':          'Fu Vel.',
+        'Sm FadeS':          'Fu DissI',
+        'Sm FadeE':          'Fu DissF',
+        'Fire Size':         'Dim. fuoco',
+        'Normals':           'Normali',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'PerVert',
+        'Debug':             'Debug',
+        'FBX upgraded':      'FBX aggiornato',
+        'FBX import aborted': 'Import FBX annullato',
+        'FBX import failed':  'Import FBX fallito',
+    },
+    # ------------------- Hungarian (hu) -------------------------
+    'hu': {
+        'UI':                'UI',
+        'IO':                'B/K',
+        'Tools':             'Eszk.',
+        'Grid':              'Rács',
+        'Axes':              'Tengely.',
+        'Light':             'Fény',
+        'Orbit':             'Pálya',
+        'Skybox':            'Égbolt',
+        'Wireframe':         'Drótvázv',
+        'Meshes':            'Hálók',
+        'Flip':              'Csere',
+        'Compare':           'Össz.',
+        'Language':          'Nyelv',
+        'Set Paths':         'Útvonalak',
+        'Import':            'Import.',
+        'Export':            'Export.',
+        'Save Prim':         'Prim ment.',
+        'ItemList':          'Tárgylista',
+        'Ambient':           'Környezet',
+        'Sm Start':          'Füst Kezd.',
+        'Sm End':            'Füst Vég',
+        'Sm Speed':          'Füst Seb.',
+        'Sm FadeS':          'Füst HalK',
+        'Sm FadeE':          'Füst HalV',
+        'Fire Size':         'Tűz mérete',
+        'Normals':           'Normálok',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'CsúcsP',
+        'Debug':             'Hibakeres.',
+        'FBX upgraded':      'FBX frissítve',
+        'FBX import aborted': 'FBX import megszakítva',
+        'FBX import failed':  'FBX import sikertelen',
+    },
+    # ------------------- Bulgarian (bg) -------------------------
+    'bg': {
+        'UI':                'UI',
+        'IO':                'Вх/Изх',
+        'Tools':             'Инстр.',
+        'Grid':              'Мрежа',
+        'Axes':              'Оси',
+        'Light':             'Светл.',
+        'Orbit':             'Орбита',
+        'Skybox':            'Небе',
+        'Wireframe':         'Каркас',
+        'Meshes':            'Мрежи',
+        'Flip':              'Превкл.',
+        'Compare':           'Сравни',
+        'Language':          'Език',
+        'Set Paths':         'Пътища',
+        'Import':            'Внеси',
+        'Export':            'Изнеси',
+        'Save Prim':         'Зап. Prim',
+        'ItemList':          'Списък',
+        'Ambient':           'Околна',
+        'Sm Start':          'Дим Нач.',
+        'Sm End':            'Дим Край',
+        'Sm Speed':          'Дим Скор.',
+        'Sm FadeS':          'Дим ИзчН',
+        'Sm FadeE':          'Дим ИзчК',
+        'Fire Size':         'Размер огън',
+        'Normals':           'Нормали',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'ПоВърх',
+        'Debug':             'Отстран.',
+        'FBX upgraded':      'FBX обновен',
+        'FBX import aborted': 'FBX импорт отменен',
+        'FBX import failed':  'FBX импорт неуспешен',
+    },
+    # ------------------- Romanian (ro) --------------------------
+    'ro': {
+        'UI':                'UI',
+        'IO':                'I/O',
+        'Tools':             'Unelte',
+        'Grid':              'Grilă',
+        'Axes':              'Axe',
+        'Light':             'Lumină',
+        'Orbit':             'Orbită',
+        'Skybox':            'Cer',
+        'Wireframe':         'Sârmă',
+        'Meshes':            'Plase',
+        'Flip':              'Schimbă',
+        'Compare':           'Compară',
+        'Language':          'Limbă',
+        'Set Paths':         'Căi',
+        'Import':            'Importă',
+        'Export':            'Exportă',
+        'Save Prim':         'Salv. Prim',
+        'ItemList':          'Listă Obj.',
+        'Ambient':           'Ambient',
+        'Sm Start':          'Fum Înc.',
+        'Sm End':            'Fum Sf.',
+        'Sm Speed':          'Fum Vit.',
+        'Sm FadeS':          'Fum EstoÎ',
+        'Sm FadeE':          'Fum EstoS',
+        'Fire Size':         'Mărime foc',
+        'Normals':           'Normale',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'PeVârf',
+        'Debug':             'Depan.',
+        'FBX upgraded':      'FBX actualizat',
+        'FBX import aborted': 'Import FBX anulat',
+        'FBX import failed':  'Import FBX eșuat',
+    },
+    # ------------------- Turkish (tr) ---------------------------
+    'tr': {
+        'UI':                'UI',
+        'IO':                'G/Ç',
+        'Tools':             'Araçlar',
+        'Grid':              'Izgara',
+        'Axes':              'Eksenler',
+        'Light':             'Işık',
+        'Orbit':             'Yörünge',
+        'Skybox':            'Gökyüzü',
+        'Wireframe':         'Tel kafes',
+        'Meshes':            'Ağlar',
+        'Flip':              'Değiştir',
+        'Compare':           'Karşılaş.',
+        'Language':          'Dil',
+        'Set Paths':         'Yollar',
+        'Import':            'İçe Aktar',
+        'Export':            'Dışa Aktar',
+        'Save Prim':         'Prim Kayd.',
+        'ItemList':          'Öğe Lst.',
+        'Ambient':           'Ortam',
+        'Sm Start':          'Du Başl.',
+        'Sm End':            'Du Son',
+        'Sm Speed':          'Du Hız',
+        'Sm FadeS':          'Du SönB',
+        'Sm FadeE':          'Du SönS',
+        'Fire Size':         'Ateş boy.',
+        'Normals':           'Normaller',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'KöşeBaş',
+        'Debug':             'Hata Ayık.',
+        'FBX upgraded':      'FBX güncellendi',
+        'FBX import aborted': 'FBX içe aktar. iptal',
+        'FBX import failed':  'FBX içe aktar. başarısız',
+    },
+    # ------------------- Ukrainian (uk) -------------------------
+    'uk': {
+        'UI':                'UI',
+        'IO':                'Вв/Вив',
+        'Tools':             'Інстр.',
+        'Grid':              'Сітка',
+        'Axes':              'Осі',
+        'Light':             'Світло',
+        'Orbit':             'Орбіта',
+        'Skybox':            'Небо',
+        'Wireframe':         'Каркас',
+        'Meshes':            'Сітки',
+        'Flip':              'Перекл.',
+        'Compare':           'Порівн.',
+        'Language':          'Мова',
+        'Set Paths':         'Шляхи',
+        'Import':            'Імпорт',
+        'Export':            'Експорт',
+        'Save Prim':         'Збер. Prim',
+        'ItemList':          'Список',
+        'Ambient':           'Розсіян.',
+        'Sm Start':          'Дим Поч.',
+        'Sm End':            'Dim Кін.',
+        'Sm Speed':          'Дим Швид.',
+        'Sm FadeS':          'Дим ЗгасП',
+        'Sm FadeE':          'Дим ЗгасК',
+        'Fire Size':         'Розмір вогн.',
+        'Normals':           'Нормалі',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'НаВерш.',
+        'Debug':             'Налагодж.',
+        'FBX upgraded':      'FBX оновлено',
+        'FBX import aborted': 'Імпорт FBX скасовано',
+        'FBX import failed':  'Помилка імпорту FBX',
+    },
+    # ------------------- Korean (ko) ----------------------------
+    'ko': {
+        'UI':                'UI',
+        'IO':                '입출력',
+        'Tools':             '도구',
+        'Grid':              '격자',
+        'Axes':              '축',
+        'Light':             '조명',
+        'Orbit':             '궤도',
+        'Skybox':            '하늘',
+        'Wireframe':         '와이어',
+        'Meshes':            '메시',
+        'Flip':              '전환',
+        'Compare':           '비교',
+        'Language':          '언어',
+        'Set Paths':         '경로',
+        'Import':            '가져오기',
+        'Export':            '내보내기',
+        'Save Prim':         'Prim 저장',
+        'ItemList':          '항목 목록',
+        'Ambient':           '주변광',
+        'Sm Start':          '연기 시작',
+        'Sm End':            '연기 끝',
+        'Sm Speed':          '연기 속도',
+        'Sm FadeS':          '연기 페이드S',
+        'Sm FadeE':          '연기 페이드E',
+        'Fire Size':         '불 크기',
+        'Normals':           '노멀',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            '정점별',
+        'Debug':             '디버그',
+        'FBX upgraded':      'FBX 업그레이드됨',
+        'FBX import aborted': 'FBX 가져오기 취소됨',
+        'FBX import failed':  'FBX 가져오기 실패',
+    },
+    # ------------------- Japanese (ja) --------------------------
+    'ja': {
+        'UI':                'UI',
+        'IO':                '入出力',
+        'Tools':             'ツール',
+        'Grid':              'グリッド',
+        'Axes':              '軸',
+        'Light':             'ライト',
+        'Orbit':             '周回',
+        'Skybox':            '空',
+        'Wireframe':         'ワイヤー',
+        'Meshes':            'メッシュ',
+        'Flip':              '切替',
+        'Compare':           '比較',
+        'Language':          '言語',
+        'Set Paths':         'パス',
+        'Import':            'インポート',
+        'Export':            'エクスポート',
+        'Save Prim':         'Prim保存',
+        'ItemList':          '項目リスト',
+        'Ambient':           '環境光',
+        'Sm Start':          '煙 開始',
+        'Sm End':            '煙 終了',
+        'Sm Speed':          '煙 速度',
+        'Sm FadeS':          '煙 消S',
+        'Sm FadeE':          '煙 消E',
+        'Fire Size':         '炎サイズ',
+        'Normals':           '法線',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            '頂点毎',
+        'Debug':             'デバッグ',
+        'FBX upgraded':      'FBXアップグレード',
+        'FBX import aborted': 'FBXインポート中止',
+        'FBX import failed':  'FBXインポート失敗',
+    },
+    # ------------------- Chinese Simplified (zh_cn) -------------
+    'zh_cn': {
+        'UI':                'UI',
+        'IO':                '输入/输出',
+        'Tools':             '工具',
+        'Grid':              '网格',
+        'Axes':              '坐标轴',
+        'Light':             '光源',
+        'Orbit':             '环绕',
+        'Skybox':            '天空盒',
+        'Wireframe':         '线框',
+        'Meshes':            '网格体',
+        'Flip':              '切换',
+        'Compare':           '比较',
+        'Language':          '语言',
+        'Set Paths':         '设置路径',
+        'Import':            '导入',
+        'Export':            '导出',
+        'Save Prim':         '保存Prim',
+        'ItemList':          '项目列表',
+        'Ambient':           '环境光',
+        'Sm Start':          '烟开始',
+        'Sm End':            '烟结束',
+        'Sm Speed':          '烟速度',
+        'Sm FadeS':          '烟淡入',
+        'Sm FadeE':          '烟淡出',
+        'Fire Size':         '火焰大小',
+        'Normals':           '法线',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            '逐顶点',
+        'Debug':             '调试',
+        'FBX upgraded':      'FBX已升级',
+        'FBX import aborted': 'FBX导入已取消',
+        'FBX import failed':  'FBX导入失败',
+    },
+    # ------------------- Chinese Traditional (zh_tw) ------------
+    'zh_tw': {
+        'UI':                'UI',
+        'IO':                '輸入/輸出',
+        'Tools':             '工具',
+        'Grid':              '網格',
+        'Axes':              '座標軸',
+        'Light':             '光源',
+        'Orbit':             '環繞',
+        'Skybox':            '天空盒',
+        'Wireframe':         '線框',
+        'Meshes':            '網格體',
+        'Flip':              '切換',
+        'Compare':           '比較',
+        'Language':          '語言',
+        'Set Paths':         '設定路徑',
+        'Import':            '匯入',
+        'Export':            '匯出',
+        'Save Prim':         '儲存Prim',
+        'ItemList':          '項目清單',
+        'Ambient':           '環境光',
+        'Sm Start':          '煙開始',
+        'Sm End':            '煙結束',
+        'Sm Speed':          '煙速度',
+        'Sm FadeS':          '煙淡入',
+        'Sm FadeE':          '煙淡出',
+        'Fire Size':         '火焰大小',
+        'Normals':           '法線',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            '逐頂點',
+        'Debug':             '除錯',
+        'FBX upgraded':      'FBX已升級',
+        'FBX import aborted': 'FBX匯入已取消',
+        'FBX import failed':  'FBX匯入失敗',
+    },
+    # ------------------- Vietnamese (vi) ------------------------
+    'vi': {
+        'UI':                'UI',
+        'IO':                'V/R',
+        'Tools':             'Công cụ',
+        'Grid':              'Lưới',
+        'Axes':              'Trục',
+        'Light':             'Đèn',
+        'Orbit':             'Quỹ đạo',
+        'Skybox':            'Bầu trời',
+        'Wireframe':         'Khung dây',
+        'Meshes':            'Lưới',
+        'Flip':              'Đổi',
+        'Compare':           'So sánh',
+        'Language':          'Ngôn ngữ',
+        'Set Paths':         'Đường dẫn',
+        'Import':            'Nhập',
+        'Export':            'Xuất',
+        'Save Prim':         'Lưu Prim',
+        'ItemList':          'Danh sách',
+        'Ambient':           'Nền',
+        'Sm Start':          'Khói Bắt',
+        'Sm End':            'Khói Kết',
+        'Sm Speed':          'Khói TĐộ',
+        'Sm FadeS':          'Khói MờĐ',
+        'Sm FadeE':          'Khói MờK',
+        'Fire Size':         'Kích thước lửa',
+        'Normals':           'Pháp tuyến',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'TheoĐỉnh',
+        'Debug':             'Gỡ lỗi',
+        'FBX upgraded':      'FBX đã nâng cấp',
+        'FBX import aborted': 'Nhập FBX đã hủy',
+        'FBX import failed':  'Nhập FBX thất bại',
+    },
+    # ------------------- Thai (th) ------------------------------
+    'th': {
+        'UI':                'UI',
+        'IO':                'เข้า/ออก',
+        'Tools':             'เครื่องมือ',
+        'Grid':              'ตาราง',
+        'Axes':              'แกน',
+        'Light':             'แสง',
+        'Orbit':             'วงโคจร',
+        'Skybox':            'ท้องฟ้า',
+        'Wireframe':         'โครง',
+        'Meshes':            'เมช',
+        'Flip':              'สลับ',
+        'Compare':           'เปรียบเทียบ',
+        'Language':          'ภาษา',
+        'Set Paths':         'พาธ',
+        'Import':            'นำเข้า',
+        'Export':            'ส่งออก',
+        'Save Prim':         'บันทึก Prim',
+        'ItemList':          'รายการ',
+        'Ambient':           'แวดล้อม',
+        'Sm Start':          'ควันเริ่ม',
+        'Sm End':            'ควันจบ',
+        'Sm Speed':          'ควันเร็ว',
+        'Sm FadeS':          'ควันจางS',
+        'Sm FadeE':          'ควันจางE',
+        'Fire Size':         'ขนาดไฟ',
+        'Normals':           'นอร์มัล',
+        'NMap':              'NMap',
+        'AO':                'AO',
+        'PerVtx':            'ต่อจุด',
+        'Debug':             'ดีบัก',
+        'FBX upgraded':      'อัปเกรด FBX แล้ว',
+        'FBX import aborted': 'ยกเลิกการนำเข้า FBX',
+        'FBX import failed':  'นำเข้า FBX ล้มเหลว',
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+
+def _escape_po(s):
+    """Escape a string for use as a `.po` msgstr literal.  Handles
+    backslash and double-quote; everything else passes through.
+    """
+    return s.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def apply_translations(po_path, mapping):
+    """Walk a .po file and fill empty msgstrs from `mapping`.
+
+    Algorithm: read line by line; when we see a `msgid "X"` line,
+    remember X.  When we see the very next `msgstr "..."` line and
+    the mapping has X, replace with the translation.  Header
+    msgstr (which is multi-line and starts with `""`) is left
+    alone.  Already-translated entries are also overwritten so
+    re-running the script refreshes from the table.
+    """
+    with open(po_path, 'r', encoding='utf-8') as fh:
+        text = fh.read()
+
+    out = []
+    pending = None
+    for line in text.splitlines():
+        m = re.match(r'^msgid\s+"(.*)"$', line)
+        if m:
+            pending = m.group(1)
+            out.append(line)
+            continue
+        # Match msgstr (any content) -- we'll replace if we have a mapping
+        m = re.match(r'^msgstr\s+"(.*)"$', line)
+        if m and pending in mapping:
+            translated = mapping[pending]
+            out.append(f'msgstr "{_escape_po(translated)}"')
+            pending = None
+            continue
+        # Reset `pending` after any non-msgstr line so we don't
+        # accidentally overwrite a continuation block.
+        if line.startswith('"') and pending is not None:
+            # multi-line msgstr continuation -- skip our pending
+            # to avoid corrupting the header.
+            pending = None
+        out.append(line)
+
+    new = '\n'.join(out) + '\n'
+    if new == text:
+        return 0   # no change
+    with open(po_path, 'w', encoding='utf-8') as fh:
+        fh.write(new)
+    return sum(1 for k in mapping if k in text)   # rough count
+
+
+def main():
+    n_changed = 0
+    for lang, mapping in TRANSLATIONS.items():
+        po_path = os.path.join(_LOCALE_ROOT, lang,
+                                'LC_MESSAGES', 'tepy.po')
+        if not os.path.isfile(po_path):
+            print(f"  SKIP  {lang}: no .po file at {po_path}")
+            continue
+        n = apply_translations(po_path, mapping)
+        print(f"  ok    {lang:6s}  -> {n} entries")
+        n_changed += 1
+
+    # Recompile every .mo
+    print()
+    print("recompiling .mo catalogs ...")
+    from build_locale_mo import compile_tree
+    compile_tree()
+    print(f"-- seeded {n_changed} languages")
+
+
+if __name__ == '__main__':
+    main()
