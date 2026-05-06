@@ -26,6 +26,16 @@ TheItemList.NEW.xml
 # `_ensure_itemlist` post-UI hook.  Never commit.
 TheItemList.xml
 
+# Cached WoT particle atlas extracted by
+# cust_tools/extract_wot_fire_atlas.py from the user's own
+# particles.pkg.  21 MB of Wargaming-painted artwork; the script
+# re-extracts it on demand from a fresh WoT install, so committing
+# the cache would be redundant + inflate the clone.  The sliced
+# subfolders under resources/fire_sets/ are kept out of git for the
+# same reason.
+resources/_wot_eff_tex.dds
+resources/fire_sets/
+
 # Local user config -- the viewer writes pkg / res_mods paths in
 # here on first run; they're machine-specific and shouldn't ship.
 # Comment out if you want to commit a default config.

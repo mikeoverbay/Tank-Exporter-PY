@@ -115,6 +115,26 @@ _CORNER_UVS = np.array([
     [0.0, 0.0], [1.0, 1.0], [0.0, 1.0],
 ], dtype=np.float32)
 
+# Horizontally-mirrored UVs (u' = 1 - u).  Used by AnimatedBillboard
+# layers tagged flip_x=True so half the stacked flames at each
+# emitter sample the source texture left-flipped, breaking the
+# "all four are the same image" symmetry.
+_CORNER_UVS_MIRROR_X = np.array([
+    [1.0, 0.0], [0.0, 0.0], [0.0, 1.0],
+    [1.0, 0.0], [0.0, 1.0], [1.0, 1.0],
+], dtype=np.float32)
+
+# Bottom-anchored offsets used by AnimatedBillboard for the burning-
+# tank fire sprites.  Y runs 0.0 -> 1.0 instead of -0.5 -> 0.5 so the
+# bottom edge of the flame quad sits AT the emitter position
+# (HP_Fire_*) and the flame rises upward.  Without this, the centered
+# offsets sink the lower half of every flame into the hull.  X stays
+# at +/-0.5 so the flame is centered horizontally over the hardpoint.
+_CORNER_OFFSETS_BOTTOM = np.array([
+    [-0.5, 0.0], [ 0.5, 0.0], [ 0.5, 1.0],
+    [-0.5, 0.0], [ 0.5, 1.0], [-0.5, 1.0],
+], dtype=np.float32)
+
 
 class ParticleSystem:
     """Camera-facing billboard particles with flipbook animation.
@@ -141,6 +161,14 @@ class ParticleSystem:
         self.vel   = np.zeros((max_particles, 3), dtype=np.float32)
         self.age   = np.zeros(max_particles,      dtype=np.float32)
         self.alive = np.zeros(max_particles,      dtype=bool)
+        # Screen-plane rotation (in radians) chosen at spawn time, held
+        # constant for the particle's life.  Random uniform 0..2pi by
+        # default in _spawn_one -- gives every smoke puff a different
+        # starting orientation so the eye doesn't lock onto a single
+        # rotation aligning with the camera.  Set rotation_jitter to 0
+        # to disable (legacy axis-aligned billboards).
+        self.rot   = np.zeros(max_particles,      dtype=np.float32)
+        self.rotation_jitter = float(2.0 * np.pi)   # full 0..2pi spread
 
         # ---- Emitters: list of {'pos': vec3, 'fwd': vec3} ------------------
         self.emitters = []
@@ -164,8 +192,9 @@ class ParticleSystem:
         self._emitter_index = 0    # round-robin emitter selection
 
         # ---- GPU buffer (sized for max alive particles) --------------------
-        # 6 verts/particle, 8 floats/vert (pos3 + offset2 + uv2 + age1)
-        self._FLOATS_PER_PARTICLE = 6 * 8
+        # 6 verts/particle, 9 floats/vert
+        # (pos3 + offset2 + uv2 + age1 + rotation1 = 9).
+        self._FLOATS_PER_PARTICLE = 6 * 9
         self._VERTS_PER_PARTICLE  = 6
         buf_bytes = max_particles * self._FLOATS_PER_PARTICLE * 4
 
@@ -175,7 +204,7 @@ class ParticleSystem:
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
         glBufferData(GL_ARRAY_BUFFER, buf_bytes, None, GL_DYNAMIC_DRAW)
 
-        stride = 8 * 4   # 8 floats * 4 bytes
+        stride = 9 * 4   # 9 floats * 4 bytes
         # location 0 -- a_pos (vec3) at byte offset 0
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
                               ctypes.c_void_p(0))
@@ -192,6 +221,10 @@ class ParticleSystem:
         glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride,
                               ctypes.c_void_p(28))
         glEnableVertexAttribArray(3)
+        # location 4 -- a_rotation (float) at byte offset 32
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride,
+                              ctypes.c_void_p(32))
+        glEnableVertexAttribArray(4)
         glBindVertexArray(0)
 
     # ------------------------------------------------------------------
@@ -236,6 +269,17 @@ class ParticleSystem:
         self.vel[idx]   = vel_dir * self.speed
         self.age[idx]   = 0.0
         self.alive[idx] = True
+        # Random screen-plane rotation chosen ONCE at spawn and held
+        # constant for the particle's lifetime.  Each smoke puff
+        # therefore appears at a different starting orientation,
+        # which breaks up the "every billboard is the same sprite"
+        # giveaway without making the particles spin (which would
+        # look unnatural for slow-moving smoke).
+        if self.rotation_jitter > 0.0:
+            self.rot[idx] = float(np.random.uniform(0.0,
+                                                     self.rotation_jitter))
+        else:
+            self.rot[idx] = 0.0
 
     # ------------------------------------------------------------------
     def update(self, dt):
@@ -289,13 +333,15 @@ class ParticleSystem:
             return
 
         # Build vertex buffer for alive particles (vectorised broadcast)
-        # shape: (n_alive, 6, 8) -- 6 verts per particle, 8 floats per vert
-        verts = np.empty((n_alive, self._VERTS_PER_PARTICLE, 8),
+        # shape: (n_alive, 6, 9) -- 6 verts per particle, 9 floats per vert
+        # (pos3 + offset2 + uv2 + age1 + rotation1 = 9)
+        verts = np.empty((n_alive, self._VERTS_PER_PARTICLE, 9),
                          dtype=np.float32)
         verts[:, :, 0:3] = self.pos[alive_idx, np.newaxis, :]
         verts[:, :, 3:5] = _CORNER_OFFSETS
         verts[:, :, 5:7] = _CORNER_UVS
         verts[:, :, 7]   = self.age[alive_idx, np.newaxis]
+        verts[:, :, 8]   = self.rot[alive_idx, np.newaxis]
         flat = verts.reshape(-1)
 
         # Camera right / up axes in world space (row-major view matrix)
@@ -329,6 +375,10 @@ class ParticleSystem:
         particle_shader.set_float('u_num_frames',       float(self.flipbook.frame_count))
         particle_shader.set_float('u_fade_start_frame', self.fade_start_frame)
         particle_shader.set_float('u_fade_end_frame',   self.fade_end_frame)
+        # 5-frame fade-in softens spawn pop-in for particle streams.
+        # Matches the historical legacy behaviour the smoke / engine-
+        # exhaust look has been tuned against.
+        particle_shader.set_float('u_fade_in_frames',   5.0)
 
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, self.flipbook.tex_id)
@@ -339,6 +389,353 @@ class ParticleSystem:
         glBindVertexArray(0)
 
         # ---- Restore state ------------------------------------------------
+        glDepthMask(GL_TRUE)
+        glEnable(GL_CULL_FACE)
+        glDisable(GL_BLEND)
+
+    # ------------------------------------------------------------------
+    def cleanup(self):
+        if self.vbo:
+            glDeleteBuffers(1, [self.vbo])
+            self.vbo = None
+        if self.vao:
+            glDeleteVertexArrays(1, [self.vao])
+            self.vao = None
+
+
+# ---------------------------------------------------------------------------
+# Animated billboard (one looping flipbook quad per emitter)
+# ---------------------------------------------------------------------------
+
+class AnimatedBillboard:
+    """Camera-facing animated billboard, ONE quad per emitter.
+
+    Different beast from `ParticleSystem` -- no spawn rate, no drift,
+    no per-particle lifecycle.  Each registered emitter gets a
+    single permanent quad that loops the flipbook continuously
+    while the emitter list is non-empty.  Right tool for things
+    that are anchored to a position and just animate in place
+    (think: a torch, an idle flame on a knocked-out tank, a
+    glowing engine vent).
+
+    Reuses the existing ParticleShader -- the shader's age->frame
+    mapping happily covers the looping case.  We feed it a per-
+    emitter `age = (current_time + offset) % lifetime` and set
+    `lifetime = num_frames / fps` so one full lifetime span equals
+    one full flipbook playthrough.
+
+    Per-emitter time offset is randomised at set_emitters() time
+    so two adjacent flames don't play perfectly synchronised --
+    that visual sync is the giveaway that flames are flipbook
+    sprites, not actual fire.
+
+    Tunables (all live; safe to mutate at runtime):
+        size       (float): billboard side length in world units
+        fps        (float): flipbook playback rate, frames/sec
+        loop       (bool):  True (default) keeps the cycle running
+                            forever; False stops at the last frame.
+        sync_jitter (float): seconds of per-emitter random offset
+                             applied at set_emitters time.  0.0 =
+                             every emitter starts at frame 0
+                             together; large value = fully
+                             desynchronised.
+
+    Note: forward / direction vector on each emitter is IGNORED.
+    Billboards always face the camera; for a flame, that's the
+    right call ("fire goes up and outwards in 2D", we don't try to
+    orient the flipbook in 3D).
+    """
+
+    def __init__(self, flipbook):
+        self.flipbook = flipbook
+
+        # Tunables
+        self.size       = 1.5      # m -- single value, no start/end interp
+        self.fps        = 30.0     # flipbook playback rate
+        self.loop       = True
+        self.sync_jitter = 0.7     # seconds of per-emitter offset
+
+        # Each registered HP_Fire emitter is rendered as `layers_per_emitter`
+        # overlapping camera-facing quads at the SAME position, each one
+        # phase-staggered to a different point in the flipbook loop.
+        # Half of them are horizontally mirrored.  This breaks up the
+        # tell-tale "this is one repeating sprite" look that single-
+        # billboard fire suffers from -- the eye sees four uncorrelated
+        # flame shapes blending together instead.
+        #
+        # `phase_frames`: per-layer starting frame offset.  Default
+        # (0, 8, 16, 24) on a 32-frame flipbook = quarter-period
+        # staggers.
+        # `flip_pattern`: per-layer horizontal mirror flag.  Alternates
+        # so adjacent layers don't look identical.
+        # `speed_pattern`: per-layer INITIAL playback-rate multiplier
+        # on the nominal `fps`.  Used only for the FIRST cycle; each
+        # subsequent cycle re-rolls a random fps in [min_fps, max_fps].
+        # `min_fps` / `max_fps`: bounds for the per-cycle random
+        # playback rate.  At every loop wrap each layer picks a fresh
+        # `fps_now = uniform(min_fps, max_fps)` so over time the four
+        # layers wander out of step with each other instead of
+        # locking into a recognisable rhythm.  Independent of render
+        # frame rate -- if the GPU runs at 60 or 144 Hz the per-layer
+        # cycle still takes (frame_count / fps_now) real seconds.
+        self.layers_per_emitter = 4
+        self.phase_frames       = (0, 8, 16, 24)
+        self.flip_pattern       = (False, True, False, True)
+        self.speed_pattern      = (0.92, 1.05, 0.97, 1.11)
+        self.min_fps            = 24.0
+        self.max_fps            = 36.0
+
+        # Emitters: list of dicts
+        # {'pos': vec3, 'phase': float in [0, 1),
+        #  'fps_now': float, 'flip_x': bool}.
+        # We don't need 'fwd' (camera-facing) but keep set_emitters
+        # API-compatible with ParticleSystem.set_emitters.
+        self.emitters = []
+        self._rng = None     # lazy-init in set_emitters / update
+
+        # GPU buffer: 6 verts per emitter, same 8-float vertex layout
+        # ParticleSystem uses (pos3 + offset2 + uv2 + age1).  Sized
+        # to a generous default so resizing is rare; grows on demand
+        # in set_emitters if a tank somehow has more HP_Fire points
+        # than this cap.
+        self._FLOATS_PER_QUAD = 6 * 8
+        self._VERTS_PER_QUAD  = 6
+        # Capacity counts INTERNAL emitter slots (4 per HP_Fire by
+        # default), so 64 slots = 16 HP_Fire emitters at the default
+        # 4 layers each.  Real tanks have 1-4 HP_Fire points so this
+        # is comfortably oversized; set_emitters resizes if needed.
+        self._capacity        = 64
+        buf_bytes = self._capacity * self._FLOATS_PER_QUAD * 4
+
+        self.vao = glGenVertexArrays(1)
+        self.vbo = glGenBuffers(1)
+        glBindVertexArray(self.vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, buf_bytes, None, GL_DYNAMIC_DRAW)
+
+        stride = 8 * 4
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
+                              ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride,
+                              ctypes.c_void_p(12))
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
+                              ctypes.c_void_p(20))
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride,
+                              ctypes.c_void_p(28))
+        glEnableVertexAttribArray(3)
+        glBindVertexArray(0)
+
+    # ------------------------------------------------------------------
+    @property
+    def lifetime(self):
+        """One flipbook playthrough takes (frames / fps) seconds.
+        Computed from `self.fps` so changing fps live updates the
+        loop period without further bookkeeping."""
+        n = max(1.0, float(self.flipbook.frame_count))
+        return n / max(0.1, float(self.fps))
+
+    # ------------------------------------------------------------------
+    def set_emitters(self, emitter_list):
+        """Replace the active emitter list.  Each entry must be a
+        dict with at least a 'pos' key (3-tuple or array).  'fwd'
+        is accepted for API symmetry with ParticleSystem.set_emitters
+        but ignored (billboards face the camera).
+
+        Each input HP_Fire emitter is EXPANDED into
+        `self.layers_per_emitter` overlapping internal billboards
+        at the same position, each with:
+          - a phase offset = (phase_frame_N / fps)  -- so layer 0
+            starts at flipbook frame 0, layer 1 at frame 8, etc.
+          - a horizontal-flip flag from `flip_pattern`.
+        Plus a small RANDOM jitter on top of the phase offset
+        (capped by `sync_jitter`) so two HP_Fire points that share
+        the same layer index don't lockstep.
+        """
+        self._rng = np.random.default_rng()
+        new_emitters = []
+
+        n_layers = max(1, int(self.layers_per_emitter))
+        fps      = max(0.1, float(self.fps))
+        n_frames = max(1, int(self.flipbook.frame_count))
+        phases   = list(self.phase_frames) or [0]
+        flips    = list(self.flip_pattern) or [False]
+        speeds   = list(self.speed_pattern) or [1.0]
+
+        # Per-layer phase is normalised to [0, 1) -- the fraction of
+        # the flipbook played so far.  Each frame we advance phase by
+        # (dt * fps_now / frame_count); on wrap we roll a new
+        # fps_now in [min_fps, max_fps].
+        for e in emitter_list:
+            pos = np.asarray(e['pos'], dtype=np.float32)
+            # ONE random base phase per HP_Fire emitter so two HPs on
+            # the same tank don't lockstep.  Their per-layer offsets
+            # then add the planned 0/8/16/24-frame stagger on top.
+            # Expressed as a fraction of the flipbook (i.e., a phase
+            # in [0, 1)).
+            hp_phase_base = float(self._rng.uniform(0.0, 1.0))
+            for k in range(n_layers):
+                phase_frame = phases[k % len(phases)]
+                flip_x      = bool(flips[k % len(flips)])
+                speed       = float(speeds[k % len(speeds)])
+                # Convert frame-index stagger to phase fraction.
+                phase_offset = (hp_phase_base
+                                + float(phase_frame) / n_frames) % 1.0
+                # First-cycle fps from the speed_pattern; subsequent
+                # cycles roll in update().
+                fps_now = fps * speed
+                new_emitters.append({
+                    'pos':     pos,
+                    'phase':   phase_offset,
+                    'fps_now': fps_now,
+                    'flip_x':  flip_x,
+                })
+
+        self.emitters = new_emitters
+
+        # Grow the GPU buffer if we hit the soft cap.  Rare in
+        # practice -- 4 layers x 4 HP_Fire = 16 internal slots,
+        # comfortably under the 64-slot default.
+        if len(new_emitters) > self._capacity:
+            new_cap = max(self._capacity * 2, len(new_emitters) + 4)
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+            glBufferData(GL_ARRAY_BUFFER,
+                         new_cap * self._FLOATS_PER_QUAD * 4,
+                         None, GL_DYNAMIC_DRAW)
+            self._capacity = new_cap
+
+    # ------------------------------------------------------------------
+    def reset(self):
+        """Stop animating and clear the emitter list."""
+        self.emitters = []
+
+    # ------------------------------------------------------------------
+    def update(self, dt):
+        """Advance each layer's normalised phase ∈ [0, 1).
+
+        Per layer:
+          * phase advances by `dt * fps_now / frame_count` so the
+            layer plays at its own real-time fps regardless of
+            render rate.
+          * On wrap (phase >= 1), subtract 1 and roll a fresh
+            `fps_now` in [min_fps, max_fps].  Each cycle gets a
+            new random playback speed -- the four overlapping
+            layers continually drift out of phase / out of rhythm.
+
+        `_time` is no longer used; phase is the single source of
+        truth and is bounded to [0, 1) so we never accumulate
+        floating-point error.  `loop=False` mode caps phase at
+        just-below-1 instead of wrapping.
+        """
+        if dt <= 0.0 or not self.emitters:
+            return
+        n_frames = max(1, int(self.flipbook.frame_count))
+        if self._rng is None:
+            self._rng = np.random.default_rng()
+
+        for em in self.emitters:
+            # phase is fraction of one flipbook playthrough
+            inc = dt * em['fps_now'] / n_frames
+            new_phase = em['phase'] + inc
+            if self.loop:
+                while new_phase >= 1.0:
+                    new_phase -= 1.0
+                    # Roll a fresh playback rate for the next cycle.
+                    em['fps_now'] = float(self._rng.uniform(
+                        self.min_fps, self.max_fps))
+            else:
+                if new_phase >= 1.0:
+                    new_phase = 0.999999    # park at last frame
+            em['phase'] = new_phase
+
+    # ------------------------------------------------------------------
+    def render(self, particle_shader, view, projection):
+        """Build and draw one quad per emitter.  Reuses the same
+        ParticleShader the smoke system uses; differences live in
+        the uniforms and the vertex stream we feed in."""
+        if not self.emitters:
+            return
+
+        n = len(self.emitters)
+        verts = np.empty((n, self._VERTS_PER_QUAD, 8), dtype=np.float32)
+
+        # Per-layer "age" passed to the shader is `phase * lifetime`
+        # (where lifetime is the NOMINAL fps's frame_count/fps).
+        # The shader does t = age/lifetime, frame = floor(t *
+        # num_frames) -- so passing phase * nominal_lifetime makes
+        # t == phase, picking the correct frame for any per-layer
+        # playback speed without the shader needing to know about it.
+        L = self.lifetime
+        for i, em in enumerate(self.emitters):
+            age = em['phase'] * L
+            verts[i, :, 0:3] = em['pos']
+            # Bottom-anchored offsets: emitter pos = bottom-center of
+            # the flame quad rather than its centroid.  See
+            # _CORNER_OFFSETS_BOTTOM for why.
+            verts[i, :, 3:5] = _CORNER_OFFSETS_BOTTOM
+            verts[i, :, 5:7] = (_CORNER_UVS_MIRROR_X
+                                if em.get('flip_x') else _CORNER_UVS)
+            verts[i, :, 7]   = age
+
+        flat = verts.reshape(-1)
+
+        # Camera right / up axes in world space (row-major view matrix)
+        cam_right = view[0, :3]
+        cam_up    = view[1, :3]
+
+        # Upload + draw
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, flat.nbytes, flat)
+
+        # Same render state ParticleSystem uses: alpha blend, depth
+        # test on but write off, no backface cull.
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
+        glDisable(GL_CULL_FACE)
+
+        particle_shader.use()
+        particle_shader.set_mat4 ('u_view',       view)
+        particle_shader.set_mat4 ('u_proj',       projection)
+        particle_shader.set_vec3 ('u_cam_right',  float(cam_right[0]),
+                                                  float(cam_right[1]),
+                                                  float(cam_right[2]))
+        particle_shader.set_vec3 ('u_cam_up',     float(cam_up[0]),
+                                                  float(cam_up[1]),
+                                                  float(cam_up[2]))
+        # Same size on both ends -- billboards don't grow over a
+        # lifetime the way particles do.
+        particle_shader.set_float('u_start_size',       self.size)
+        particle_shader.set_float('u_end_size',         self.size)
+        particle_shader.set_float('u_lifetime',         L)
+        particle_shader.set_float('u_num_frames',
+                                   float(self.flipbook.frame_count))
+        # No fade for a continuous flame -- pin both fade endpoints
+        # past the last frame so the shader's fade_out term stays at
+        # 1.0 across the full loop.  (The fade-in over the first
+        # ~5 frames in the shader is harmless: it only matters if
+        # you happen to land near frame 0 of the loop, and even
+        # there the smoothstep mostly resolves to 1.0 quickly.)
+        n_frames = float(self.flipbook.frame_count)
+        particle_shader.set_float('u_fade_start_frame', n_frames + 1.0)
+        particle_shader.set_float('u_fade_end_frame',   n_frames + 2.0)
+        # No fade-in for billboard mode -- this is a continuous movie
+        # clip, every loop should snap straight back to frame 0 at
+        # full opacity.  Fade-in over the first 5 frames would make
+        # the flame disappear briefly at every loop boundary.
+        particle_shader.set_float('u_fade_in_frames',   0.0)
+
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D_ARRAY, self.flipbook.tex_id)
+        particle_shader.set_int('u_flipbook', 0)
+
+        glBindVertexArray(self.vao)
+        glDrawArrays(GL_TRIANGLES, 0, n * self._VERTS_PER_QUAD)
+        glBindVertexArray(0)
+
+        # Restore state
         glDepthMask(GL_TRUE)
         glEnable(GL_CULL_FACE)
         glDisable(GL_BLEND)

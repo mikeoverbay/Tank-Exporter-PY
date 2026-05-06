@@ -107,6 +107,22 @@ end of `load_vehicle`.  We previously rewrote the 15 MB
 `xmlitemslist.xml` per discovery (20-30 times per fresh tank load);
 batching dropped a 7.7 s first-chassis-load to ~70 ms.
 
+### First-tank-load slowness was Pillow + GL warm-up
+
+A separate, later 6-second first-load stall turned out to NOT be
+pkg I/O (PkgExtractor was 55 ms / 7582 ms = 0.7%).  It was Pillow's
+DDS codec + the GL driver's BC-format / mipmap-gen pipeline JIT-ing
+on the first batch of texture uploads.  After the first ~48
+textures, every subsequent upload was fast for the rest of the
+session.  Fix lives in `Viewer._prewarm_first_load_caches`: push
+ONE real DDS (`resources/Details_map.dds`) through
+`TextureLoader.load_texture` at splash so all the lazy init happens
+during the already-expected startup wait.  Same routine also warms
+`ArmorColorLoader` (`base_paints.xml`) and
+`VehicleXMLLoader._shared_xml_cache` (5 component XMLs × 11
+nations).  Result: first tank load is now indistinguishable from
+the second.
+
 ---
 
 ## Build / version conventions

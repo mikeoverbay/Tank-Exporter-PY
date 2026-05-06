@@ -38,7 +38,7 @@ from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
                        ParticleShader, ImportedShader, NormalsShader)
 from .skybox   import Skybox
-from .particles import FlipbookTexture, ParticleSystem
+from .particles import FlipbookTexture, ParticleSystem, AnimatedBillboard
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 
 
@@ -243,6 +243,54 @@ class Viewer:
 
     # Tier-filter tab labels (strings).  '1' .. '11' for WoT tiers I-XI.
     TREE_TIER_TABS = [str(t) for t in range(1, 12)]
+
+    # Engine-class names used by WoT.  Each tank's def XML carries an
+    # `<exhaust><pixie>` value that picks one of these to drive smoke
+    # particle scale + behaviour in-game.  We mirror the same set as
+    # the keys in our per-class smoke/fire settings dict so tweaks the
+    # user makes while a tier-1 (gas_small) is on screen save into the
+    # 'gas_small' slot, and don't bleed into 'diesel_large' when a
+    # heavy is loaded next.  The active editing slot is auto-wired
+    # from the loaded tank's pixie -- there's no manual override.
+    EXHAUST_PIXIE_CLASSES = (
+        'gas_small',     'gas_medium',     'gas_large',
+        'diesel_small',  'diesel_medium',  'diesel_large',  'diesel_strv',
+    )
+
+    # Built-in defaults applied the first time the user runs a build
+    # with per-class settings (or when the persisted dict is missing a
+    # class / field).  Loosely scaled by name -- *_small spawns visibly
+    # less than *_large; the user dials from there.  Persisted to
+    # config under `smoke_groups` / `fire_groups` (see cleanup()).
+    # Falls through to 'gas_medium' for any unknown / null pixie.
+    _SMOKE_GROUP_DEFAULTS = {
+        'gas_small':     {'start_size': 0.06, 'end_size': 0.16, 'speed': 1.5,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'gas_medium':    {'start_size': 0.10, 'end_size': 0.25, 'speed': 2.0,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'gas_large':     {'start_size': 0.18, 'end_size': 0.42, 'speed': 2.5,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'diesel_small':  {'start_size': 0.07, 'end_size': 0.18, 'speed': 1.6,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'diesel_medium': {'start_size': 0.11, 'end_size': 0.27, 'speed': 2.0,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'diesel_large':  {'start_size': 0.20, 'end_size': 0.45, 'speed': 2.5,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+        'diesel_strv':   {'start_size': 0.09, 'end_size': 0.22, 'speed': 1.8,
+                          'fade_start_frame': 30.0, 'fade_end_frame': 60.0},
+    }
+    _FIRE_GROUP_DEFAULTS = {
+        'gas_small':     {'size': 1.0},
+        'gas_medium':    {'size': 1.6},
+        'gas_large':     {'size': 2.4},
+        'diesel_small':  {'size': 1.1},
+        'diesel_medium': {'size': 1.7},
+        'diesel_large':  {'size': 2.6},
+        'diesel_strv':   {'size': 1.4},
+    }
+    # Fallback class used when the loaded tank's pixie is missing
+    # or unknown -- common for turret-only stub entries.
+    _DEFAULT_PIXIE_CLASS = 'gas_medium'
 
     # Width of the left-hand info panel (collapsible tank stats).
     INFO_PANEL_W = 280
@@ -458,9 +506,18 @@ class Viewer:
         try:
             from .splash import Splash
             from . import __version__ as _APP_VERSION
-            _splash_path = os.path.join(
+            # Prefer the TEPY-branded banner (resources/tepy_banner.png --
+            # the sepia stagecoach scene with our burnt-orange title
+            # baked into the bottom-centre).  Fall back to the bare
+            # splash.png if the banner hasn't been generated on this
+            # checkout yet -- run cust_tools/make_banner.py to produce
+            # tepy_banner.png from splash.png + the current title text.
+            _res_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'resources', 'splash.png')
+                'resources')
+            _banner = os.path.join(_res_dir, 'tepy_banner.png')
+            _bare   = os.path.join(_res_dir, 'splash.png')
+            _splash_path = _banner if os.path.isfile(_banner) else _bare
             if os.path.isfile(_splash_path):
                 _welcome = f"Welcome to version {_APP_VERSION}"
                 self.splash = Splash(_splash_path, self.width, self.height,
@@ -511,15 +568,16 @@ class Viewer:
         self.hp_lines     = LineBatch(line_width=2.5)
 
         # ---- Particle system (engine smoke, billboard flipbook) ------------
-        # Flipbook is 91 PNG frames (256x256 RGBA) at resources/smoke/.
+        # Flipbook is N PNG frames (256x256 RGBA) at resources/smoke/.
         # Loaded once at startup and held for the life of the viewer.
         # ParticleSystem owns the per-particle CPU state + dynamic VBO;
         # set_emitters() is called every load_vehicle to point it at the
         # current tank's HP_Track_Exhaus_* nodes.
         self._splash_status('Loading smoke flipbook (91 frames)...')
-        self.particle_shader = None
-        self.smoke_flipbook  = None
-        self.smoke_particles = None
+        self.particle_shader      = None
+        self.smoke_flipbook       = None
+        self.smoke_particles      = None
+        self.fire_smoke_particles = None
         try:
             self.particle_shader = ParticleShader()
             smoke_dir = os.path.join(
@@ -531,59 +589,82 @@ class Viewer:
             # Restore persisted fade range immediately -- this way the
             # values continue to apply even if the slider is later
             # removed (the slider only writes back into these attributes).
+            # Then clamp into the loaded flipbook's actual frame range
+            # so swapping in a shorter set (e.g. WoT's 64-frame smoke
+            # vs the old 91-frame procedural smoke) doesn't leave the
+            # fade-end pointing past the last frame -- particles would
+            # disappear at full opacity instead of fading out cleanly.
             self.smoke_particles.fade_start_frame = float(
                 self._cfg.get('smoke_fade_start_frame', 75.0))
             self.smoke_particles.fade_end_frame   = float(
                 self._cfg.get('smoke_fade_end_frame',   91.0))
+            self._clamp_fade_to_flipbook(
+                self.smoke_particles, self.smoke_flipbook, label='smoke')
+
+            # Second smoke ParticleSystem dedicated to FIRE-point
+            # smoke (the plume rising off each HP_Fire flame on a
+            # damaged tank).  Shares the same flipbook + the same
+            # tunable values as the engine-exhaust smoke -- only
+            # the per-system cap is different:
+            #   1024 particles (engine exhaust, multi-emitter cone)
+            #    400 particles (fire-point smoke, smaller load)
+            # Splitting them lets us cap fire smoke without also
+            # clipping the busier engine-exhaust plume.  The
+            # flipbook itself is shared, not duplicated -- only
+            # the particle pool + VBO are independent.
+            self.fire_smoke_particles = ParticleSystem(
+                self.smoke_flipbook, max_particles=400)
+            self.fire_smoke_particles.fade_start_frame = (
+                self.smoke_particles.fade_start_frame)
+            self.fire_smoke_particles.fade_end_frame = (
+                self.smoke_particles.fade_end_frame)
         except Exception as exc:
             print(f"[viewer] Smoke particles disabled: {exc}")
             self.particle_shader = None
             self.smoke_flipbook  = None
             self.smoke_particles = None
+            self.fire_smoke_particles = None
 
-        # Fire flipbook + particle system -- shares the ParticleShader
-        # already compiled above.  Only spawns when the loaded tank is
-        # the damaged variant (set by load_vehicle); a normal-variant
-        # load leaves fire_particles silent (no emitters, no draws).
-        # Default tunables tuned for "burning hulk", not exhaust:
-        #   * smaller spawn footprint
-        #   * faster vertical drift (fire rises)
-        #   * no drag on the upward velocity
-        # Sliders below override start_size / end_size / speed.
-        self._splash_status('Loading fire flipbook (91 frames)...')
-        self.fire_flipbook  = None
-        self.fire_particles = None
+        # Fire: animated BILLBOARD (one looping quad per HP_Fire
+        # emitter), NOT a particle system.  A burning hulk's flames
+        # are anchored at fixed hardpoints and just animate in place;
+        # a particle stream gave us flames floating upward and
+        # away, which read as "engine exhaust" not "tank on fire".
+        # See particles.py / AnimatedBillboard for the rendering
+        # model: same ParticleShader as smoke, but each emitter is
+        # a single permanent looping quad fed `(time + offset) %
+        # lifetime` for its flipbook frame.
+        self._splash_status('Loading fire flipbook...')
+        self.fire_flipbook   = None
+        self.fire_billboards = None
         if self.particle_shader is not None:
             try:
                 fire_dir = os.path.join(
                     os.path.dirname(os.path.dirname(__file__)),
                     'resources', 'fire')
-                self.fire_flipbook  = FlipbookTexture(fire_dir)
-                self.fire_particles = ParticleSystem(self.fire_flipbook,
-                                                      max_particles=512)
-                # Tweak defaults for fire vs smoke before slider restore.
-                self.fire_particles.start_size = 0.20
-                self.fire_particles.end_size   = 0.55
-                self.fire_particles.speed      = 1.4    # m/s upward
-                self.fire_particles.drag       = 0.6    # less drag than smoke
-                self.fire_particles.lifetime   = 1.6    # s
-                self.fire_particles.spawn_rate = 45.0   # /s/emitter
-                # Restore persisted slider values when present.
-                self.fire_particles.start_size = float(
-                    self._cfg.get('fire_start_size', self.fire_particles.start_size))
-                self.fire_particles.end_size   = float(
-                    self._cfg.get('fire_end_size',   self.fire_particles.end_size))
-                self.fire_particles.speed      = float(
-                    self._cfg.get('fire_speed',      self.fire_particles.speed))
-                # Fade range -- fire's own values, not shared with smoke.
-                self.fire_particles.fade_start_frame = float(
-                    self._cfg.get('fire_fade_start_frame', 70.0))
-                self.fire_particles.fade_end_frame   = float(
-                    self._cfg.get('fire_fade_end_frame',   91.0))
+                self.fire_flipbook   = FlipbookTexture(fire_dir)
+                self.fire_billboards = AnimatedBillboard(self.fire_flipbook)
+                # Burning-tank-tuned defaults; Fire Size / Fire FPS
+                # sliders override these live.
+                self.fire_billboards.size        = 1.6   # m
+                self.fire_billboards.fps         = 30.0  # frames/sec
+                self.fire_billboards.sync_jitter = 0.7   # s offset between emitters
+                # Restore persisted slider values.  We renamed the
+                # config keys when we switched from the particle path
+                # (fire_start_size / fire_speed) to the billboard
+                # path (fire_size / fire_fps); fall back to the old
+                # keys so a previously-running install carries its
+                # tuning forward.
+                self.fire_billboards.size = float(
+                    self._cfg.get('fire_size',
+                        self._cfg.get('fire_start_size',
+                                       self.fire_billboards.size)))
+                self.fire_billboards.fps  = float(
+                    self._cfg.get('fire_fps',  self.fire_billboards.fps))
             except Exception as exc:
-                print(f"[viewer] Fire particles disabled: {exc}")
-                self.fire_flipbook  = None
-                self.fire_particles = None
+                print(f"[viewer] Fire billboards disabled: {exc}")
+                self.fire_flipbook   = None
+                self.fire_billboards = None
 
         # Fire spawn points -- populated by load_vehicle when the
         # damaged variant is loaded; empty otherwise.  Same dict shape
@@ -646,9 +727,7 @@ class Viewer:
         self._smoke_speed_slider    = None
         self._smoke_fade_slider     = None
         self._smoke_fade_end_slider = None
-        self._fire_start_slider     = None
-        self._fire_end_slider       = None
-        self._fire_speed_slider     = None
+        self._fire_size_slider      = None
         self._normals_slider        = None
         self._normals_mode_cb       = None
         self._invert_metal_cb    = None
@@ -660,6 +739,26 @@ class Viewer:
         # Default off -- the data is still populated on every load so
         # the toggle just gates the rendering.
         self._show_hardpoints = bool(self._cfg.get('show_hardpoints', False))
+
+        # Per-engine-class smoke / fire settings.  Loaded from config
+        # (each class is a dict of float fields) and merged with the
+        # built-in defaults so a missing field falls through to the
+        # default rather than crashing.  `self._active_group` tracks
+        # which class's values are currently mirrored into the
+        # sliders -- it's auto-wired to the loaded tank's
+        # `<exhaust><pixie>` value by load_vehicle / load_mesh, so
+        # tweaks the user makes while a gas_small tank is on screen
+        # save into 'gas_small' rather than bleeding into 'diesel_large'
+        # when a heavy is loaded next.
+        self._smoke_groups = self._merge_group_dict(
+            self._cfg.get('smoke_groups', {}) or {},
+            self._SMOKE_GROUP_DEFAULTS)
+        self._fire_groups  = self._merge_group_dict(
+            self._cfg.get('fire_groups', {}) or {},
+            self._FIRE_GROUP_DEFAULTS)
+        # Default editing target = the fallback class (gas_medium)
+        # until a tank loads and tells us its real engine class.
+        self._active_group = self._DEFAULT_PIXIE_CLASS
 
         self._build_ui()
 
@@ -731,6 +830,23 @@ class Viewer:
         # detects the existing tab_bar and skips the lazy-build.
         self._splash_status('Building tank-browser tree (per tier, per nation)...')
         self._build_all_tier_trees()
+
+        # Pre-warm caches that USED to lazy-load on the first
+        # load_vehicle call.  Without this, the very first tank load
+        # paid the full extract+BWXML-decode cost of:
+        #   - WoT base_paints.xml (ArmorColorLoader.ensure_loaded)
+        #   - 5 shared component XMLs per nation (engines.xml,
+        #     radios.xml, fuelTanks.xml, guns.xml, shells.xml) inside
+        #     VehicleXMLLoader._shared_xml_cache
+        # Subsequent loads were instant because the caches were warm.
+        # Moving the work here means the user pays it ONCE during the
+        # already-expected splash wait instead of stalling mid-load.
+        self._splash_status('Pre-warming armor-paint + component XML caches...')
+        try:
+            self._prewarm_first_load_caches()
+        except Exception as exc:
+            print(f"[viewer] cache pre-warm failed: {exc}")
+
         self._splash_status('Almost ready...')
 
         # Auto-prompt for paths on first run / if the configured path is
@@ -871,6 +987,96 @@ class Viewer:
             self.log_error(f"ItemList auto-rebuild failed: {exc}")
 
     # ------------------------------------------------------------------
+    # Per-group smoke / fire settings helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_group_dict(persisted, defaults):
+        """Merge a persisted-config group dict with built-in defaults.
+
+        Each `defaults` entry is `{group_name: {field: float, ...}}`.
+        Missing groups OR missing fields in the persisted dict fall
+        through to the defaults so a partial config never leaves a
+        slider with NaN.  Field values are coerced to float.
+
+        Args:
+            persisted (dict): user's saved group settings (may be empty)
+            defaults  (dict): built-in defaults (the fallback table)
+
+        Returns:
+            dict: merged result -- always has every group + every field.
+        """
+        out = {}
+        for g, dflt in defaults.items():
+            slot = persisted.get(g, {}) or {}
+            out[g] = {f: float(slot.get(f, dflt[f])) for f in dflt}
+        return out
+
+    def _save_active_group(self):
+        """Read the live slider values back into the active group dict.
+
+        Run before switching `self._active_group` (so the user's
+        in-progress edits aren't lost) and at exit (so they persist).
+        Touches `self._smoke_groups` + `self._fire_groups`; the radio
+        checkbox state isn't touched here.
+        """
+        g = self._smoke_groups.get(self._active_group)
+        if g is not None:
+            if self._smoke_start_slider:
+                g['start_size']       = float(self._smoke_start_slider.value)
+            if self._smoke_end_slider:
+                g['end_size']         = float(self._smoke_end_slider.value)
+            if self._smoke_speed_slider:
+                g['speed']            = float(self._smoke_speed_slider.value)
+            if self._smoke_fade_slider:
+                g['fade_start_frame'] = float(self._smoke_fade_slider.value)
+            if self._smoke_fade_end_slider:
+                g['fade_end_frame']   = float(self._smoke_fade_end_slider.value)
+        gf = self._fire_groups.get(self._active_group)
+        if gf is not None and self._fire_size_slider:
+            gf['size'] = float(self._fire_size_slider.value)
+
+    def _load_active_group(self):
+        """Push the active group's stored values onto the sliders."""
+        g = self._smoke_groups.get(self._active_group)
+        if g is not None:
+            if self._smoke_start_slider:
+                self._smoke_start_slider.value = g['start_size']
+            if self._smoke_end_slider:
+                self._smoke_end_slider.value = g['end_size']
+            if self._smoke_speed_slider:
+                self._smoke_speed_slider.value = g['speed']
+            if self._smoke_fade_slider:
+                self._smoke_fade_slider.value = g['fade_start_frame']
+            if self._smoke_fade_end_slider:
+                self._smoke_fade_end_slider.value = g['fade_end_frame']
+        gf = self._fire_groups.get(self._active_group)
+        if gf is not None and self._fire_size_slider:
+            self._fire_size_slider.value = gf['size']
+
+    def _set_active_group(self, group):
+        """Switch which engine-class the smoke / fire sliders edit.
+
+        Auto-wired by load_vehicle / load_mesh from the loaded tank's
+        `<exhaust><pixie>` value.  Saves the current slider values
+        into the previous class's slot (so any in-progress tweaks are
+        preserved) and loads the new class's stored values onto the
+        sliders.  No-op if `group` is None / unknown / already active.
+
+        Args:
+            group (str | None): an engine-class key from
+                EXHAUST_PIXIE_CLASSES.  None or an unknown value falls
+                back to `_DEFAULT_PIXIE_CLASS` (gas_medium).
+        """
+        if not group or group not in self._smoke_groups:
+            group = self._DEFAULT_PIXIE_CLASS
+        if group == self._active_group:
+            return
+        self._save_active_group()
+        self._active_group = group
+        self._load_active_group()
+
+    # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
 
@@ -980,54 +1186,46 @@ class Viewer:
                                                 group_id='lighting')
 
         # Smoke particle tunables (drive the smoke ParticleSystem each
-        # frame).  Defaults pulled from config so iterations persist
-        # across sessions.  Fade-end is also persisted but not exposed as
-        # a slider yet -- once a fade-start value is dialled in, both
-        # values continue to apply via the shader uniforms even after
-        # the slider widget is removed.
-        smoke_start_init      = float(self._cfg.get('smoke_start_size',       0.10))
-        smoke_end_init        = float(self._cfg.get('smoke_end_size',         0.25))
-        smoke_speed_init      = float(self._cfg.get('smoke_speed',            2.0))
-        smoke_fade_start_init = float(self._cfg.get('smoke_fade_start_frame', 30.0))
-        smoke_fade_end_init   = float(self._cfg.get('smoke_fade_end_frame',   60.0))
-        self._smoke_start_slider = self.ui.add_slider(
-            'Sm Start', tx, cy3, tw, value=smoke_start_init, value_max=0.5,
-            group_id='smoke')
-        self._smoke_end_slider   = self.ui.add_slider(
-            'Sm End',   tx, cy4, tw, value=smoke_end_init,   value_max=1.0,
-            group_id='smoke')
-        self._smoke_speed_slider = self.ui.add_slider(
-            'Sm Speed', tx, cy5, tw, value=smoke_speed_init, value_max=8.0,
-            group_id='smoke')
-        # Fade range: alpha begins ramping at FadeS, hits zero at FadeE.
-        # FadeE < 91 makes the smoke disappear before the flipbook ends
-        # (which is what "fade earlier" means).  Default 30 -> 60 fades
-        # over the middle third of the particle's life.
-        self._smoke_fade_slider     = self.ui.add_slider(
-            'Sm FadeS', tx, cy6,        tw, value=smoke_fade_start_init,
-            value_max=91.0, group_id='smoke')
-        self._smoke_fade_end_slider = self.ui.add_slider(
-            'Sm FadeE', tx, cy6 + 25,   tw, value=smoke_fade_end_init,
-            value_max=91.0, group_id='smoke')
+        # frame).  Initial slider values come from the per-group
+        # settings table -- one set of values for small / medium /
+        # large engines.  The radio-checkbox row below selects which
+        # group the sliders edit; default editing target is 'medium'
+        # (matches `self._active_group` in __init__).  Per-tank live
+        # render uses the loaded tank's own group based on its
+        # <exhaust><pixie> value -- see _set_active_group / load_vehicle.
+        active_smoke = self._smoke_groups[self._active_group]
+        active_fire  = self._fire_groups[self._active_group]
 
-        # Fire-particle sliders -- mirror the Sm Start/End/Speed
-        # widgets so the controls feel parallel.  No fade-range
-        # sliders for fire (less visual interest in tweaking those
-        # for a stationary burning hulk; the defaults look right).
-        # Final geometry is set in `_layout_widgets`; we register
-        # them here on the same dummy y so add_slider can index.
-        fire_start_init = float(self._cfg.get('fire_start_size', 0.20))
-        fire_end_init   = float(self._cfg.get('fire_end_size',   0.55))
-        fire_speed_init = float(self._cfg.get('fire_speed',      1.4))
-        self._fire_start_slider = self.ui.add_slider(
-            'Fire Start', tx, cy6 + 75, tw, value=fire_start_init,
-            value_max=0.8, group_id='smoke')
-        self._fire_end_slider   = self.ui.add_slider(
-            'Fire End',   tx, cy6 + 100, tw, value=fire_end_init,
-            value_max=1.5, group_id='smoke')
-        self._fire_speed_slider = self.ui.add_slider(
-            'Fire Speed', tx, cy6 + 125, tw, value=fire_speed_init,
-            value_max=6.0, group_id='smoke')
+        # Fade-range slider value_max scales with the actual loaded
+        # flipbook frame count -- otherwise swapping in a shorter set
+        # leaves the slider track running out into "no flipbook frame"
+        # territory.
+        smoke_n_frames = (float(self.smoke_flipbook.frame_count)
+                          if self.smoke_flipbook else 91.0)
+        self._smoke_start_slider = self.ui.add_slider(
+            'Sm Start', tx, cy3, tw, value=active_smoke['start_size'],
+            value_max=0.5, group_id='smoke')
+        self._smoke_end_slider   = self.ui.add_slider(
+            'Sm End',   tx, cy4, tw, value=active_smoke['end_size'],
+            value_max=1.0, group_id='smoke')
+        self._smoke_speed_slider = self.ui.add_slider(
+            'Sm Speed', tx, cy5, tw, value=active_smoke['speed'],
+            value_max=8.0, group_id='smoke')
+        # Fade range: alpha begins ramping at FadeS, hits zero at FadeE.
+        self._smoke_fade_slider     = self.ui.add_slider(
+            'Sm FadeS', tx, cy6,        tw, value=active_smoke['fade_start_frame'],
+            value_max=smoke_n_frames, group_id='smoke')
+        self._smoke_fade_end_slider = self.ui.add_slider(
+            'Sm FadeE', tx, cy6 + 25,   tw, value=active_smoke['fade_end_frame'],
+            value_max=smoke_n_frames, group_id='smoke')
+
+        # Fire BILLBOARD slider -- size only.  FPS is hard-coded
+        # (30 fps / 91 frames = 3.0 s loop) since we never wanted it
+        # exposed; removed in favour of per-engine-class sizes.  Final
+        # geometry set in _layout_widgets.
+        self._fire_size_slider = self.ui.add_slider(
+            'Fire Size', tx, cy6 + 75, tw, value=active_fire['size'],
+            value_max=4.0, group_id='smoke')
 
         # Surface-normal debug lines.  Slider drives world-space line
         # length; 0 = off.  Default loaded from the persisted config
@@ -1233,6 +1431,50 @@ class Viewer:
             return resolved
 
     # ------------------------------------------------------------------
+    def _clamp_fade_to_flipbook(self, particle_system, flipbook, label=''):
+        """Clamp `particle_system.fade_start_frame / fade_end_frame`
+        into the loaded `flipbook`'s actual frame count.
+
+        Reason: the persisted config defaults (fade_end=91) assume
+        the original 91-frame procedural / explosion flipbook.  After
+        swapping in a shorter set (e.g. WoT's 64-frame smoke or
+        32-frame flame columns), the unclamped fade_end points past
+        the last frame -- particles disappear at full opacity at
+        the final frame instead of fading smoothly.
+
+        Policy: keep whatever the user has set, but cap at the actual
+        frame count.  If the resulting fade_end <= fade_start, push
+        fade_start back to ~75% of fade_end so there's at least a
+        sensible band.  Logs a one-liner to stdout per particle
+        system so the user can see the clamp happen.
+        """
+        if flipbook is None or particle_system is None:
+            return
+        n = float(flipbook.frame_count)
+        old_start = float(particle_system.fade_start_frame)
+        old_end   = float(particle_system.fade_end_frame)
+
+        end   = min(old_end, n)
+        start = min(old_start, max(0.0, n - 1.0))
+        # Make sure start is meaningfully below end.  When end gets
+        # clamped down hard, the previously-saved start might land
+        # at-or-past end -- pick something ~75% of end so the fade
+        # band still has shape.
+        if start >= end - 0.5:
+            start = max(0.0, end * 0.75)
+
+        particle_system.fade_start_frame = start
+        particle_system.fade_end_frame   = end
+
+        changed = (abs(start - old_start) > 0.5
+                   or abs(end - old_end) > 0.5)
+        if changed:
+            print(f"[viewer] {label} fade clamped to flipbook frames "
+                  f"(N={int(n)}): "
+                  f"start {old_start:.0f}->{start:.0f}, "
+                  f"end {old_end:.0f}->{end:.0f}")
+
+    # ------------------------------------------------------------------
     def _resolve_tank_nation(self, tank_name):
         """Look up which nation owns a tank XML basename.
 
@@ -1303,6 +1545,12 @@ class Viewer:
         spec_nodes_lower = set(n.lower() for n in (spec.get('nodes') or []))
         print(f"[viewer] exhaust-for-tank: {tank_basename}  "
               f"pixie={self._exhaust_pixie!r}  nodes={spec.get('nodes')}")
+        # Auto-wire the per-engine-class smoke / fire sliders to the
+        # newly-loaded tank's class.  Tweaks the user makes from here
+        # on save into THIS tank's class (e.g. 'gas_small') instead of
+        # whatever was active before (likely 'gas_medium' from the
+        # default).  See _set_active_group for the swap mechanics.
+        self._set_active_group(self._exhaust_pixie)
 
         # 3: Hull visual file -> walk for hardpoints
         hull_vis_path = (f'vehicles/{nation}/{tank_basename}/'
@@ -1384,6 +1632,114 @@ class Viewer:
         lookup table can both work without them."""
         p = (self._cfg.get('pkg_dir') or '').strip()
         return bool(p) and os.path.isdir(p)
+
+    def _prewarm_first_load_caches(self):
+        """Trigger every "lazy on first tank load" cache during splash.
+
+        Three categories of one-shot lazy state used to pay their
+        full cost on the FIRST `load_vehicle` call, making it 6-7x
+        slower than every subsequent load:
+
+            1. `ArmorColorLoader.ensure_loaded()` -- extracts and parses
+               WoT's `base_paints.xml`.  Hundreds of ms.
+
+            2. `VehicleXMLLoader._shared_xml_cache` -- class-level dict
+               keyed by `<nation>/components/<file>.xml`.  On the first
+               tank load of any nation, `parse_info()` pulls 5 of these
+               from `scripts.pkg`: engines, radios, fuelTanks, guns,
+               shells.  Each pays a BWXML decode cost.
+
+            3. **Pillow's DDS codec + the GL driver's BC-format /
+               mipmap-gen path.**  This is the BIG one.  The first
+               handful of `TextureLoader.load_texture` calls warm
+               Pillow's plugin registry, the driver's tex-upload
+               memory pools, and the JIT for `glGenerateMipmap` on
+               compressed sources.  After that, every subsequent
+               upload is much faster -- accounting for a measured
+               ~6 s gap between first-tank-load (7.5 s) and
+               second-tank-load (~1 s) of the same data.
+
+        Pre-warming all three during splash means the user pays the
+        cost ONCE during the already-expected startup wait, instead
+        of stalling mid-load on the first tank.  No-ops cleanly when
+        the PkgExtractor isn't configured (fresh install before
+        Set Paths) -- just leaves the caches cold.
+
+        Safe to call multiple times; every step is idempotent.
+        """
+        if self._pkg_extractor is None:
+            return
+
+        # 1. Armor-paint loader (cheap; one file)
+        try:
+            self._armor_loader.ensure_loaded()
+        except Exception as exc:
+            print(f"[viewer] armor-color pre-warm failed: {exc}")
+
+        # 2. Per-nation shared component XMLs.  Drive nation list from
+        # the same source the tier-tree builder uses so we can't drift
+        # out of sync.  Five files per nation, all in scripts.pkg.
+        from .loaders import VehicleXMLLoader, TextureLoader
+        try:
+            nations = list(self._pkg_extractor.list_vehicle_xmls(
+                with_tier=False).keys())
+        except Exception as exc:
+            print(f"[viewer] could not enumerate nations for pre-warm: {exc}")
+            nations = []
+
+        SHARED_FILES = ('engines.xml', 'radios.xml', 'fuelTanks.xml',
+                        'guns.xml', 'shells.xml')
+        n_warmed = 0
+        for nation in nations:
+            for fname in SHARED_FILES:
+                try:
+                    VehicleXMLLoader._read_shared_xml(
+                        f'scripts/item_defs/vehicles/{nation}/components/'
+                        f'{fname}',
+                        self._pkg_extractor)
+                    n_warmed += 1
+                except Exception as exc:
+                    # One bad nation/file shouldn't kill the rest --
+                    # the lazy path will just hit it normally on first
+                    # load if it's recoverable.
+                    print(f"[viewer] pre-warm {nation}/{fname} failed: "
+                          f"{exc}")
+        print(f"[viewer] pre-warmed {n_warmed} shared component XMLs "
+              f"across {len(nations)} nations")
+
+        # 3. Pillow + GL driver warm-up.  We push ONE real DDS through
+        # the full TextureLoader pipeline (PIL open + transpose +
+        # glTexImage2D + glGenerateMipmap) so all the lazy
+        # initialisation happens here instead of stalling the first
+        # tank's 40+ texture uploads.
+        #
+        # Use Details_map.dds -- the shared scratch noise map every
+        # tank references via metallicDetailMap.  It's cached on disk
+        # at resources/Details_map.dds (copied in by
+        # _resolve_detail_map_path on the very first session ever),
+        # so this is just a local file open.  We stash the result
+        # into _shared_tex_cache under its abs path, which means the
+        # first tank to request 'detail' skips the load entirely --
+        # double win.
+        detail_path = os.path.join(self.RESOURCES_DIR, 'Details_map.dds')
+        if os.path.isfile(detail_path):
+            try:
+                key = os.path.abspath(detail_path)
+                if key not in self._shared_tex_cache:
+                    tex_id = TextureLoader.load_texture(detail_path)
+                    self._shared_tex_cache[key] = tex_id
+                    print(f"[viewer] pre-warmed Pillow + GL via "
+                          f"Details_map.dds (tex_id={tex_id})")
+            except Exception as exc:
+                print(f"[viewer] Pillow/GL pre-warm failed: {exc}")
+        else:
+            # First-ever run on this install: detail map hasn't been
+            # cached to resources/ yet.  We could pull it from the pkg
+            # but it's an edge case (one slow first-tank-load every
+            # fresh install) so leave it lazy.  After the first tank
+            # loads, the file will be in resources/ for next session.
+            print(f"[viewer] Details_map.dds not cached yet -- "
+                  f"Pillow/GL pre-warm skipped (one-time)")
 
     # ------------------------------------------------------------------
     # Mesh-visibility window
@@ -4194,6 +4550,10 @@ class Viewer:
             # smoke style.  Falls through gracefully if the block is absent.
             exhaust_spec = VehicleXMLLoader.find_engine_exhaust(xml_path)
             self._exhaust_pixie = (exhaust_spec or {}).get('pixie')
+            # Auto-wire the per-engine-class smoke / fire sliders to
+            # this tank's class.  See _set_active_group / cleanup for
+            # the persistence side.
+            self._set_active_group(self._exhaust_pixie)
             exhaust_node_names  = set(
                 n.lower() for n in (exhaust_spec or {}).get('nodes', []))
             if exhaust_spec:
@@ -4506,24 +4866,53 @@ class Viewer:
                 segments.append((start, end, cyan))
             self.hp_lines.update(segments)
 
-            # Point the smoke particle system at the same hardpoints.
-            # Resetting kills any in-flight particles from the previous
-            # tank so we don't see ghost smoke during a load.
+            # Engine-exhaust smoke -- hardpoints from the running
+            # engine.  Reset kills any in-flight particles from the
+            # previous tank so we don't see ghost smoke.
             if self.smoke_particles is not None:
                 self.smoke_particles.reset()
                 self.smoke_particles.set_emitters(self._exhaust_points)
+
+            # Fire-point smoke is currently DISABLED -- the smoke
+            # plume rising off each HP_Fire flame looked wrong over
+            # the painted-flame billboards (white/grey wisps in front
+            # of the orange flame washed out the colour).  The
+            # particle system stays in place so flipping the
+            # `enable_fire_smoke` flag below back on is a one-line
+            # change; keeping it off for now.
+            enable_fire_smoke = False
+            if self.fire_smoke_particles is not None:
+                self.fire_smoke_particles.reset()
+                fire_smoke_emitters = []
+                if enable_fire_smoke and damaged and self._fire_points:
+                    for hp in self._fire_points:
+                        fire_smoke_emitters.append({
+                            'component': hp.get('component', ''),
+                            'name':      hp.get('name', '') + '_smoke',
+                            'pos':       hp['pos'],
+                            'fwd':       np.array([0.0, 1.0, 0.0],
+                                                  dtype=np.float32),
+                        })
+                # Always set the emitter list (possibly empty) so a
+                # previous damaged tank's emitters don't leak into
+                # this load.
+                self.fire_smoke_particles.set_emitters(fire_smoke_emitters)
+                if fire_smoke_emitters:
+                    print(f"  Smoke emitters: {len(self._exhaust_points)} "
+                          f"engine exhaust + {len(fire_smoke_emitters)} "
+                          f"fire-point smoke (cap=400)")
 
             # Fire emitters -- only populated when the damaged variant
             # is loaded (see the per-component fire-walk above).  When
             # the user loads a normal-variant tank, _fire_points stays
             # empty and the fire system goes idle (no emitters means
-            # spawn() does nothing).
-            if self.fire_particles is not None:
-                self.fire_particles.reset()
-                self.fire_particles.set_emitters(self._fire_points)
+            # the billboard render call short-circuits).
+            if self.fire_billboards is not None:
+                self.fire_billboards.reset()
+                self.fire_billboards.set_emitters(self._fire_points)
                 if self._fire_points:
-                    print(f"\n  Fire enabled: {len(self._fire_points)} "
-                          f"HP_Fire emitter(s)")
+                    print(f"  Fire enabled: {len(self._fire_points)} "
+                          f"HP_Fire billboard emitter(s)")
 
             _status("Done.")
 
@@ -4747,9 +5136,7 @@ class Viewer:
             self._smoke_speed_slider,
             self._smoke_fade_slider,
             self._smoke_fade_end_slider,
-            self._fire_start_slider,
-            self._fire_end_slider,
-            self._fire_speed_slider,
+            self._fire_size_slider,
             self._normals_slider,
         ]
 
@@ -5309,6 +5696,16 @@ class Viewer:
                 self.hp_sphere.render(self.color_shader, hp_model, view, proj)
             self.hp_lines.render(self.color_shader, view, proj)
 
+        # ---- Mirror live slider values back into the active engine
+        # class.  The sliders ARE the canonical store while a tank is
+        # loaded; this just makes sure every per-frame tweak is
+        # captured into self._smoke_groups[self._active_group] (and
+        # self._fire_groups[...]) so a subsequent load of a different
+        # tank can persist it via _save_active_group.  Cheap (six
+        # float assignments) and keeps the cleanup() save path
+        # universally correct without extra mouse-up plumbing.
+        self._save_active_group()
+
         # ---- Smoke particles ----------------------------------------------
         # Update + render the billboard flipbook system.  Update advances
         # the simulation by this frame's dt (computed in run() before
@@ -5332,22 +5729,47 @@ class Viewer:
             self.smoke_particles.update(self._frame_dt)
             self.smoke_particles.render(self.particle_shader, view, proj)
 
+        # ---- Fire-point smoke (damaged tanks only) -----------------------
+        # Independent ParticleSystem with a 400-particle cap (smoke
+        # for the engine exhaust runs 1024).  Inherits every slider
+        # value from the engine smoke -- the only thing that differs
+        # is the per-system pool size.  Empty emitters = idle.
+        if self.fire_smoke_particles is not None:
+            if self._smoke_start_slider:
+                self.fire_smoke_particles.start_size = (
+                    self._smoke_start_slider.value)
+            if self._smoke_end_slider:
+                self.fire_smoke_particles.end_size = (
+                    self._smoke_end_slider.value)
+            if self._smoke_speed_slider:
+                self.fire_smoke_particles.speed = (
+                    self._smoke_speed_slider.value)
+            if self._smoke_fade_slider:
+                self.fire_smoke_particles.fade_start_frame = (
+                    self._smoke_fade_slider.value)
+            if self._smoke_fade_end_slider:
+                self.fire_smoke_particles.fade_end_frame = (
+                    self._smoke_fade_end_slider.value)
+
+            self.fire_smoke_particles.update(self._frame_dt)
+            self.fire_smoke_particles.render(
+                self.particle_shader, view, proj)
+
         # ---- Fire particles (damaged tanks only) -------------------------
         # Same flipbook-billboard machinery as smoke, separate
         # ParticleSystem instance so size / speed tunables don't fight
         # the smoke ones.  No emitters means update/render are essentially
         # free -- so this block is safe to run unconditionally even when
         # the loaded tank is undamaged.
-        if self.fire_particles is not None:
-            if self._fire_start_slider:
-                self.fire_particles.start_size = self._fire_start_slider.value
-            if self._fire_end_slider:
-                self.fire_particles.end_size   = self._fire_end_slider.value
-            if self._fire_speed_slider:
-                self.fire_particles.speed      = self._fire_speed_slider.value
+        if self.fire_billboards is not None:
+            if self._fire_size_slider:
+                self.fire_billboards.size = self._fire_size_slider.value
+            # Fire FPS is fixed -- the user-facing slider was removed
+            # (we never wanted it controllable per session).  The
+            # initial 30 fps set in __init__ stays put.
 
-            self.fire_particles.update(self._frame_dt)
-            self.fire_particles.render(self.particle_shader, view, proj)
+            self.fire_billboards.update(self._frame_dt)
+            self.fire_billboards.render(self.particle_shader, view, proj)
 
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
@@ -5491,22 +5913,15 @@ class Viewer:
                 self._cfg['light_value']      = float(self._metal_slider.value)
             if self._shine_slider:
                 self._cfg['ambient_value']    = float(self._shine_slider.value)
-            if self._smoke_start_slider:
-                self._cfg['smoke_start_size']        = float(self._smoke_start_slider.value)
-            if self._smoke_end_slider:
-                self._cfg['smoke_end_size']          = float(self._smoke_end_slider.value)
-            if self._smoke_speed_slider:
-                self._cfg['smoke_speed']             = float(self._smoke_speed_slider.value)
-            if self._smoke_fade_slider:
-                self._cfg['smoke_fade_start_frame']  = float(self._smoke_fade_slider.value)
-            if self._smoke_fade_end_slider:
-                self._cfg['smoke_fade_end_frame']    = float(self._smoke_fade_end_slider.value)
-            if self._fire_start_slider:
-                self._cfg['fire_start_size']         = float(self._fire_start_slider.value)
-            if self._fire_end_slider:
-                self._cfg['fire_end_size']           = float(self._fire_end_slider.value)
-            if self._fire_speed_slider:
-                self._cfg['fire_speed']              = float(self._fire_speed_slider.value)
+            # Smoke + fire settings are now per-group dicts.  Snapshot
+            # the live sliders into the active group first, then write
+            # both group dicts as a unit.  Legacy keys (smoke_start_size
+            # / smoke_end_size / fire_fps / etc.) are NOT re-emitted --
+            # any old config that still has them gets transparently
+            # ignored on the next load (defaults take over).
+            self._save_active_group()
+            self._cfg['smoke_groups'] = self._smoke_groups
+            self._cfg['fire_groups']  = self._fire_groups
             if self._normals_slider:
                 self._cfg['normals_length']          = float(self._normals_slider.value)
             if self._normals_mode_cb is not None:
@@ -5534,10 +5949,12 @@ class Viewer:
         self.hp_lines.cleanup()
         if self.smoke_particles is not None:
             self.smoke_particles.cleanup()
+        if self.fire_smoke_particles is not None:
+            self.fire_smoke_particles.cleanup()
         if self.smoke_flipbook is not None:
             self.smoke_flipbook.cleanup()
-        if self.fire_particles is not None:
-            self.fire_particles.cleanup()
+        if self.fire_billboards is not None:
+            self.fire_billboards.cleanup()
         if self.fire_flipbook is not None:
             self.fire_flipbook.cleanup()
         if self.skybox:

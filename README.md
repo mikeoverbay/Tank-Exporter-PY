@@ -32,7 +32,14 @@ them with PBR + IBL lighting, and round-trips back out as
 - **Per-nation armor color** -- linear sRGB tint of the diffuse,
   picked from the tank's nation in the XML path.
 - **Particles** -- camera-facing billboard smoke + fire flipbooks
-  with adjustable start size, end size, speed, and fade.
+  with adjustable start size, end size, speed, and fade.  Smoke and
+  fire scale **per WoT engine class** (`gas_small`, `gas_medium`,
+  `gas_large`, `diesel_small`, `diesel_medium`, `diesel_large`,
+  `diesel_strv`) -- the loaded tank's `<exhaust><pixie>` value
+  auto-wires which slot the sliders read/write, so a tier-1 light
+  doesn't puff Maus-scale clouds.  Fire billboards are anchored
+  bottom-center on each `HP_Fire_*` hardpoint so flames rise up out
+  of the deck rather than sinking through it.
 
 ### Diagnose & inspect
 - **Surface-normal debug shader** -- geometry-shader pass renders

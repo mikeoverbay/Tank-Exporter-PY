@@ -7,6 +7,114 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-06
+
+### Pillow + GL pre-warm via Details_map.dds (1.47.1)
+
+The 1.47.0 pre-warm only addressed XML caches (a few hundred ms at
+most).  Profiling showed the real first-tank-load cost was Pillow's
+DDS codec + the GL driver's BC-format / mipmap-gen pipeline warming
+up.  Measured: same tank loaded twice -- 7582 ms first, 1132 ms
+second, with PkgExtractor at 55 ms vs 0 ms (i.e. extraction is NOT
+the bottleneck).  The ~6.5 s gap matches "~48 textures pay
+~130 ms cold-init each, then ~25 ms warm each" exactly.
+
+`_prewarm_first_load_caches` now pushes ONE real DDS through the
+full `TextureLoader.load_texture` pipeline at splash:
+`resources/Details_map.dds`, which is the shared scratch noise map
+every tank references and is already cached on disk after the first
+ever session.  That single upload warms Pillow's plugin registry,
+the GL driver's tex-upload memory pools, and the `glGenerateMipmap`
+JIT, then stashes the result into `_shared_tex_cache` so the first
+mesh that requests 'detail' skips the load entirely.
+
+Edge case: on a fresh install the detail map isn't cached yet.  In
+that one case we leave the warm-up lazy (the file gets written to
+`resources/` on first tank load, so every session after that benefits).
+
+Files touched: `tankviewer/viewer.py`.
+
+### Pre-warm first-tank-load caches at splash (1.47.0)
+
+The first `load_vehicle` call used to stall for a beat *after* the
+per-component meshes (Hull, Chassis, Turret, Gun) finished loading.
+Subsequent loads were instant.  Two lazy-init caches were the cause:
+
+1. **`ArmorColorLoader.ensure_loaded()`** -- extracts and parses
+   WoT's `base_paints.xml` on first `get()` call.  Hundreds of ms.
+2. **`VehicleXMLLoader._shared_xml_cache`** -- a class-level dict
+   keyed by `<nation>/components/<file>.xml`.  The first tank of
+   any nation pays for 5 BWXML decodes (engines, radios, fuelTanks,
+   guns, shells) inside `parse_info()`, which fires AFTER the
+   per-component loop.
+
+Both now warm during the splash sequence via the new
+`Viewer._prewarm_first_load_caches`, called between the tier-tree
+build and "Almost ready..."  The user sees a status line
+("Pre-warming armor-paint + component XML caches...") and pays the
+cost once, up-front, where they already expect to wait.  No-ops
+cleanly when the PkgExtractor isn't configured yet (fresh install,
+first run).
+
+Files touched: `tankviewer/viewer.py`.
+
+### Bottom-anchor fire billboards (1.46.1)
+
+`AnimatedBillboard` was placing the emitter position (HP_Fire_*) at
+the **center** of each flame quad, so the lower half of every flame
+sank into the tank.  Added `_CORNER_OFFSETS_BOTTOM` -- y runs
+`0.0 .. 1.0` instead of `-0.5 .. 0.5` -- and switched
+`AnimatedBillboard.render` to use it.  Smoke `ParticleSystem` keeps
+the original centered offsets (smoke wants to drift in all
+directions from the exhaust).  Net effect: the bottom edge of every
+flame now sits AT the hardpoint and the flame rises upward, like
+fire does.
+
+Files touched: `tankviewer/particles.py`.
+
+### Per-engine-class smoke / fire settings (1.46.0)
+
+The smoke-particle and fire-billboard sliders now save into
+**one slot per WoT engine class** rather than a single global
+slot.  Engine class is the value WoT stores in each tank's
+`<exhaust><pixie>` block: `gas_small`, `gas_medium`, `gas_large`,
+`diesel_small`, `diesel_medium`, `diesel_large`, `diesel_strv`.
+
+How it works:
+
+* When a tank loads, `load_vehicle` (and `_populate_exhaust_for_tank`
+  for the FBX-import path) reads the def XML's pixie value and
+  calls `_set_active_group(pixie)`.
+* `_set_active_group` saves the previous class's slider values into
+  `self._smoke_groups[old_class]` / `self._fire_groups[old_class]`,
+  switches `self._active_group`, then loads the new class's stored
+  values onto the sliders.
+* While that tank is on screen, every render frame copies the live
+  slider values back into the active class's slot via
+  `_save_active_group` -- so a tweak made on a tier-1 (`gas_small`)
+  doesn't bleed into `diesel_large` when a heavy is loaded next.
+* On exit, both dicts (`smoke_groups` / `fire_groups`) are written
+  to the config file as a unit; legacy keys (`smoke_start_size`,
+  `smoke_end_size`, `fire_fps`, etc.) are no longer emitted.  Any
+  old config that still has them is ignored on load -- the merge
+  helper just falls through to the built-in defaults.
+
+UI changes:
+
+* **Removed**: `Fire FPS` slider.  We never wanted it user-tunable
+  (the 30 fps loop was already baked).  The right control panel is
+  one row shorter as a result.
+* **No new UI** for the per-class switching.  An earlier draft
+  added an `Sm | Md | Lg` radio row but the loaded tank's engine
+  class auto-wires the active slot, so the radio was redundant.
+
+Built-in defaults are seeded so `_small` classes spawn visibly less
+smoke than `_large` -- a tier-1 light no longer puffs Maus-scale
+clouds out of two pinholes.  User tweaks override per class and
+persist across sessions.
+
+Files touched: `tankviewer/viewer.py`.
+
 ## 2026-05-05 (afternoon)
 
 Tooling pass: a fresh-rebuild path for `TheItemList.xml`, an in-app
@@ -14,6 +122,59 @@ button to invoke it, a left-panel reorganisation that groups every
 button by category (UI / IO / Tools), a Windows .bat launcher
 trio (`go.bat` / `uninstall.bat` / `reinstall.bat`), and a TEPY
 rebrand (window title + tepee icon).
+
+### WoT-painted fire/smoke flipbook sets (1.37.0)
+
+Replaced the procedural fire frames with **WoT's own painted
+flame texture**, ripped straight from the master particle atlas.
+
+Discovery chain:
+* `scripts/destructible_entity_effects.xml` references
+  `<pixie><file>particles/.../*.eff</file></pixie>`.
+* The `.eff` files (legacy ASCII) no longer exist; their compiled
+  `.effbin` successors do.  Each `.effbin` is a tiny manifest
+  pointing at the real definition: `.vfxbin` files under
+  `particles/content_deferred/PFX/Tank/destruction/`.
+* The `.vfxbin` is binary (undocumented format), but ASCII strings
+  inside reveal that EVERY burning-tank effect samples ONE master
+  atlas: `particles/content_deferred/PFX_textures/eff_tex.dds`
+  (4096x4096) and references it via integer region IDs.
+* The atlas itself is organised into ~10 visually-obvious
+  flipbook grids (regular MxN tilings of same-sized animation
+  frames), each fed to a different particle layer at runtime.
+
+`cust_tools/extract_wot_fire_atlas.py` extracts the atlas from
+`particles.pkg` (cached on disk for repeat runs) and slices it
+into `resources/fire_sets/<name>/`:
+
+    fire_BIG/                 64 frames @ 128px  -- main fire animation
+    fire_small/              256 frames @  64px  -- small flickers
+    fireball_blast/           32 frames @ 128px  -- ammo cookoff blast
+    flame_columns_black/      32 frames @ 128px  -- vertical flames (dark)
+    flame_columns_light/      32 frames @ 128px  -- vertical flames (light)
+    smoke_white/              64 frames @ 128px  -- pale smoke clouds
+    smoke_dark/               64 frames @ 128px  -- dark grey smoke
+    smoke_cream/              64 frames @ 128px  -- warm-tone smoke
+    smoke_dirt/               64 frames @ 128px  -- ground impact dust
+    smoke_under/              64 frames @ 128px  -- under-tank smoke dome
+
+Plus `resources/fire_sets/README.txt` -- catalogue manifest the
+script writes automatically so the user doesn't need to re-run to
+see the inventory.
+
+After extraction the script ALSO copies `fire_BIG/` into
+`resources/fire/` so the runtime FlipbookTexture loads the WoT
+fire on the next launch with no manual file shuffling.  To switch
+to a different set later, drop the contents of any other
+`fire_sets/<name>/` into `resources/fire/`.
+
+Why slice manually instead of parsing the .vfxbin: a brute-force
+probe of the binary near each named region returns particle
+SIMULATION parameters (rotation in radians, lifetime fractions,
+scale curves) -- the atlas-rect indices are stored separately,
+keyed against an undocumented offsets table.  Visual inspection
+of the atlas is fast and reliable; the catalogue is a fixed
+table the user can tweak by editing the rectangles in the script.
 
 ### Real fire flipbook (1.36.1)
 

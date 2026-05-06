@@ -388,6 +388,8 @@ Main application class.
 | `_on_resize(w, h)` | Update camera aspect (3-D viewport excludes tree) and reflow tree | pixel dims |
 | `_apply_button_action(btn)` / `_sync_button_state(attr, value)` | Bar-button ↔ flag mirroring | — |
 | `_init_pkg_extractor_early()` | Build `PkgExtractor` from config or default WoT NA path before any mesh load | — |
+| `_prewarm_first_load_caches()` | Splash-time pre-warm of the three "lazy on first tank load" caches: `ArmorColorLoader`, `VehicleXMLLoader._shared_xml_cache`, and (the big one) Pillow's DDS codec + GL driver tex-upload pools via one real `Details_map.dds` upload | — |
+| `_set_active_group(pixie)` | Switch which engine-class slot (`gas_small` / `diesel_large` / etc.) the smoke + fire sliders edit; auto-called from `load_vehicle` with the loaded tank's `<exhaust><pixie>` value | str\|None |
 | `_build_tree_panel()` | Populate the tank-browser tree (filtered by `tanks.txt`) | — |
 | `_load_tanks_txt(valid_basenames)` | Parse Tank Exporter's `tanks.txt` → `{xml_basename: display_name}`; resolves 30-char truncations by prefix | set of names |
 | `_on_tree_tank_selected(node)` | Open the load-confirm dialog | UITreeNode |
