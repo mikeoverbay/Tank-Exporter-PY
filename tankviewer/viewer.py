@@ -1174,6 +1174,41 @@ class Viewer:
         if gf is not None and self._fire_size_slider:
             self._fire_size_slider.value = gf['size']
 
+    def _persist_slider_state(self):
+        """Snapshot every slider's value into self._cfg + write the JSON.
+
+        Called from `handle_input` whenever the user releases the
+        mouse after dragging a slider so tweaks persist instantly
+        instead of only at window close.  Mirrors the slider-related
+        portion of cleanup()'s save block -- if you add a new slider
+        whose value persists, update both places.
+
+        Cheap (one JSON encode + write per release; release fires once
+        per drag, NOT per pixel of motion).  Disk error during the
+        write is logged but doesn't bubble up -- a failed mid-session
+        save still leaves cleanup()'s on-exit save as a fallback.
+        """
+        try:
+            # Per-engine-class smoke / fire dicts -- snapshot the
+            # active class first so the in-progress drag lands in
+            # self._smoke_groups / self._fire_groups before we copy
+            # them to self._cfg.
+            self._save_active_group()
+            self._cfg['smoke_groups'] = self._smoke_groups
+            self._cfg['fire_groups']  = self._fire_groups
+            # Lighting + normals sliders persist alongside the
+            # smoke / fire ones since the user releases ANY slider
+            # via the same mouse-up event.
+            if self._metal_slider:
+                self._cfg['light_value']    = float(self._metal_slider.value)
+            if self._shine_slider:
+                self._cfg['ambient_value']  = float(self._shine_slider.value)
+            if self._normals_slider:
+                self._cfg['normals_length'] = float(self._normals_slider.value)
+            _config.save(self._cfg)
+        except Exception as exc:
+            print(f"[viewer] mouse-up slider persist failed: {exc}")
+
     def _set_active_group(self, group):
         """Switch which engine-class the smoke / fire sliders edit.
 
@@ -5433,7 +5468,17 @@ class Viewer:
 
             elif event.type == MOUSEBUTTONUP:
                 if event.button == 1:
+                    # Snapshot whether a slider was being dragged BEFORE
+                    # handle_mouse_up clears _active_slider.  If yes,
+                    # the user just released after a tweak -- snapshot
+                    # the active engine class's slider values into
+                    # self._cfg and write the JSON so the change
+                    # persists right now (instead of waiting for the
+                    # window to close).
+                    slider_was_active = self.ui._active_slider is not None
                     self.ui.handle_mouse_up()
+                    if slider_was_active:
+                        self._persist_slider_state()
 
             elif event.type == MOUSEMOTION:
                 self.ui.update_hover(*event.pos)

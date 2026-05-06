@@ -9,6 +9,31 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Persist sliders on mouse-up, not just on window close (1.50.1)
+
+Slider tweaks used to write to `tankExporterPy.json` only when the
+window closed cleanly.  If you wanted to confirm a change had stuck
+without quitting + relaunching, you couldn't -- and a kill via
+Task Manager / a crash dropped every unsaved tweak.
+
+Now `handle_input` snapshots whether a slider was being dragged
+before `handle_mouse_up` clears the active-slider reference; if
+yes, `_persist_slider_state` runs after the release.  That:
+
+* Mirrors `_save_active_group()` to capture the active engine
+  class's per-slider values into `self._smoke_groups` /
+  `self._fire_groups`.
+* Copies both dicts onto `self._cfg`.
+* Snapshots Light / Ambient / Normals sliders the same way.
+* Writes the JSON via `_config.save`.
+
+Fires once per mouse-up (not per pixel of drag) so disk cost is
+trivial.  cleanup() still saves on exit as a belt-and-braces
+fallback for keys that aren't slider-driven (debug flag, paths,
+etc.).
+
+Files: `tankviewer/viewer.py`.
+
 ### Single Debug master toggle (1.50.0)
 
 Replaced the **Show HP** + **Show Fire** checkboxes with a single
