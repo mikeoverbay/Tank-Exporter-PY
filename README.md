@@ -184,7 +184,7 @@ Companion bats:
 
 ```bash
 python -m pip install pygame PyOpenGL numpy Pillow
-python tank_viewer.py
+python tankExporterPy.py
 ```
 
 ### First-time setup
@@ -193,8 +193,8 @@ Point TEPY at your WoT install once (paths get saved to
 `tankviewer.json` and reused forever):
 
 ```
-python tank_viewer.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
-python tank_viewer.py --res-mods "C:\Games\World_of_Tanks_NA\res_mods\<version>"
+python tankExporterPy.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
+python tankExporterPy.py --res-mods "C:\Games\World_of_Tanks_NA\res_mods\<version>"
 ```
 
 Or use the **Set Paths** button in the IO group of the left panel.
@@ -282,11 +282,14 @@ If TEPY is useful to you, consider supporting development:
 ## Project layout
 
 ```
-tank_viewer.py              entry point
+tankExporterPy.py              entry point
 tankviewer/                 main package (loaders, writers, UI, render)
 cust_tools/                 diagnostic + asset-generation scripts
 shaders/                    GLSL 330 shader sources
 resources/                  splash, banner, icons, environment maps
+                            (fire/ and smoke/ are auto-extracted on
+                            first launch from your WoT install -- the
+                            repo never carries Wargaming's textures)
 reference/                  legacy VB code kept as ground truth
 ARCHITECTURE.md             per-module reference
 CHANGELOG.md                per-day work log (newest first)

@@ -106,7 +106,7 @@ The World of Tanks `.primitives_processed` format stores:
 - **Tangents/Binormals**: Tangent space basis vectors in DirectX space
 - **Winding order**: Uses special rules (see VISUAL_PROCESSED_FORMAT.md)
 
-Current handling in tank_viewer.py:
+Current handling in tankExporterPy.py:
 1. ✅ Positions Z-flipped
 2. ✅ Normals Z-flipped
 3. ✅ Tangents Z-flipped

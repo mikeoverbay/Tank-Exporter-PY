@@ -107,6 +107,21 @@ end of `load_vehicle`.  We previously rewrote the 15 MB
 `xmlitemslist.xml` per discovery (20-30 times per fresh tank load);
 batching dropped a 7.7 s first-chassis-load to ~70 ms.
 
+### Never ship Wargaming pixels
+
+Every PNG that used to live under `resources/fire/` and
+`resources/smoke/` was a slice of WoT's `eff_tex.dds` particle
+atlas.  We can't redistribute those.  They're now gitignored, and
+`Viewer.__init__` calls
+`cust_tools.extract_wot_fire_atlas.ensure_runtime_flipbooks()` at
+startup -- which checks if those folders are empty and, if so,
+re-extracts the atlas from the user's local `particles.pkg` and
+slices the two grids the runtime actually consumes (`fire_BIG` ->
+`resources/fire/`, `smoke_white` -> `resources/smoke/`).  The
+Wargaming bytes never enter the repo.  Same rule applies to any
+future texture pulled from a pkg: gitignore the destination,
+trigger an extract from the user's install on demand.
+
 ### First-tank-load slowness was Pillow + GL warm-up
 
 A separate, later 6-second first-load stall turned out to NOT be

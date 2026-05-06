@@ -1401,7 +1401,7 @@ class TextureLoader:
 class PkgExtractor:
     """Extract files from WoT .pkg archives (standard ZIP format).
 
-    Uses TheItemList.xml (next to tank_viewer.py) for an O(1) lookup of
+    Uses TheItemList.xml (next to tankExporterPy.py) for an O(1) lookup of
     which archive contains each file.  Falls back to scanning all archives
     in pkg_dir when the lookup table is absent or returns no match.
 
@@ -1410,10 +1410,10 @@ class PkgExtractor:
         pkg_dir    (str|None)  : override path to the packages folder;
                                  defaults to <wot_root>/res/packages/
         lookup_xml (str|None)  : override path to the item-list XML;
-                                 auto-discovered next to tank_viewer.py when None
+                                 auto-discovered next to tankExporterPy.py when None
     """
 
-    # Path to the experiment root (where tank_viewer.py and TheItemList.xml live)
+    # Path to the experiment root (where tankExporterPy.py and TheItemList.xml live)
     _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Pkg-basename filters for the scan-fallback list.  We never need to

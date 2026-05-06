@@ -13,7 +13,7 @@
 ::              wheels in `requirements\` as a `--find-links` source),
 ::            - re-verify imports,
 ::            - delete `requirements\` once everything passes.
-::      4. Launch tank_viewer.py with whatever args the user passed in.
+::      4. Launch tankExporterPy.py with whatever args the user passed in.
 ::
 ::  Once the install has happened once, this script just verifies imports
 ::  and launches -- the full install path runs only when something is
@@ -124,5 +124,5 @@ rmdir /S /Q "%REQ_DIR%"
 echo.
 echo Launching Tank Exporter PY ...
 echo.
-python tank_viewer.py %*
+python tankExporterPy.py %*
 endlocal

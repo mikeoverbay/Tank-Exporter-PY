@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Tank Mesh Viewer — entry point.
+TEPY (Tank Exporter PY) — entry point.
 
 Usage:
-    python tank_viewer.py <file> [options]
+    python tankExporterPy.py <file> [options]
 
 Positional:
     file                  .primitives_processed or vehicle .xml to load
@@ -25,6 +25,12 @@ Controls:
     ESC               — quit
 
 All application logic lives in the tankviewer/ package.
+
+History: this file was previously named `tank_viewer.py`; renamed to
+`tankExporterPy.py` so the entry-point matches the GitHub repo name
+(`Tank-Exporter-PY`) and user-facing brand (TEPY).  Both go.bat and
+start.bat invoke the new name; older docs referencing
+`tank_viewer.py` are stale.
 """
 
 import argparse

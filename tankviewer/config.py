@@ -1,7 +1,7 @@
 """
 Persistent configuration for Tank Viewer.
 
-Settings are stored in tankviewer.json next to tank_viewer.py.
+Settings are stored in tankviewer.json next to tankExporterPy.py.
 Any key can be overridden from the command line; the new value is
 written back to disk so subsequent runs use it automatically.
 
@@ -17,7 +17,7 @@ the loaded file's path.
 import json
 import os
 
-# Config file lives next to tank_viewer.py (two directories above this file)
+# Config file lives next to tankExporterPy.py (two directories above this file)
 _CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'tankviewer.json',

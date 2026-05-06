@@ -4,28 +4,28 @@ WoT packs every particle texture into one 4096x4096 master atlas at
 `particles/content_deferred/PFX_textures/eff_tex.dds`.  The atlas is
 organised into ~16 sub-quadrants and each sub-quadrant hosts one or
 more flipbook grids -- regular MxN tilings of same-sized animation
-frames.  This script catalogues every grid we've identified by
+frames.  This module catalogues every grid we've identified by
 visual inspection and slices each into its own subfolder under
 `resources/fire_sets/<name>/`.
 
-After running:
+Two modes:
 
-    resources/fire_sets/
-        fire_BIG/                 64 frames -- orange-bg main fire
-        fire_small/               128 frames -- small orange fire
-        fireball_blast/           32 frames -- black-bg fireballs
-        flame_columns_black/      32 frames -- black-bg flame columns
-        flame_columns_light/      32 frames -- light-bg flame columns
-        smoke_white/              64 frames -- white smoke clouds
-        smoke_dark/               64 frames -- dark grey smoke
-        smoke_cream/              64 frames -- cream/warm smoke
-        smoke_dirt/               32 frames -- dirt/ground impact
-        ...
+1. **CLI / authoring mode** (`python cust_tools/extract_wot_fire_atlas.py`)
+   slices ALL catalogued sets to `resources/fire_sets/<name>/` and
+   copies the DEFAULT_RUNTIME_PICK into `resources/fire/`.  Used when
+   you're swapping or comparing flipbook sets by hand.
 
-The runtime FlipbookTexture loads any `*.png` in alphabetical order
-from a single folder, so to pick a set, copy / point its frames at
-`resources/fire/`.  The viewer's load path is folder-name driven --
-all you'd change is which subfolder feeds it.
+2. **Runtime auto-extract** (`ensure_runtime_flipbooks(...)`, called
+   from `Viewer.__init__`) slices ONLY the two sets the viewer
+   actually consumes (fire_BIG -> resources/fire, smoke_white ->
+   resources/smoke) and skips the work entirely if the target
+   folders already have PNGs.  No `fire_sets/` tree is produced --
+   that's authoring-only output.
+
+Why we don't ship the WoT flipbooks: every PNG is a slice of
+Wargaming's `eff_tex.dds`.  We can't redistribute their artwork.
+Both modes pull from the user's local `particles.pkg` so the bytes
+never leave their installation.
 
 Why we slice manually (no .vfx parsing):
 
@@ -162,15 +162,176 @@ GRID_DEFS = {
 # main BIG fire grid for the burning-damaged-tanks effect.
 DEFAULT_RUNTIME_PICK = 'fire_BIG'
 
+# Runtime-only: which catalogue entry feeds which `resources/<dir>/`
+# folder.  Used by `ensure_runtime_flipbooks` (called from
+# Viewer.__init__) so the viewer always has fire+smoke frames to load
+# even on a fresh clone where the WoT artwork was never shipped to
+# git.  The grid names map back into `GRID_DEFS` above.
+RUNTIME_TARGETS = {
+    'fire':  'fire_BIG',
+    'smoke': 'smoke_white',
+}
+
 
 # ---------------------------------------------------------------------------
 
 
-def _locate_pkg():
-    for p in _PKG_CANDIDATES:
-        if os.path.isfile(p):
-            return p
+def _locate_pkg(extra_paths=()):
+    """Find particles.pkg.  Search order:
+
+        1. Any extra paths the caller supplied (e.g. the user's
+           configured `pkg_dir` from tankviewer.json).
+        2. The hardcoded NA / EU / RU / standalone candidates.
+
+    Returns the absolute path to the pkg, or None if no candidate
+    exists.  Both individual files and a containing directory are
+    accepted -- if `extra_paths` includes a folder, we look for
+    `particles.pkg` inside it.
+    """
+    candidates = []
+    for p in extra_paths:
+        if not p:
+            continue
+        if os.path.isdir(p):
+            candidates.append(os.path.join(p, 'particles.pkg'))
+        else:
+            candidates.append(p)
+    candidates.extend(_PKG_CANDIDATES)
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
     return None
+
+
+def ensure_atlas_local(resources_dir, pkg_path=None, extra_pkg_paths=()):
+    """Make sure `resources/_wot_eff_tex.dds` exists; extract from
+    particles.pkg if not.
+
+    Args:
+        resources_dir   (str)         : project resources/ folder
+        pkg_path        (str|None)    : explicit particles.pkg, or None to
+                                        search via _locate_pkg
+        extra_pkg_paths (iterable)    : extra search paths handed to
+                                        _locate_pkg (e.g. user's pkg_dir
+                                        from config)
+
+    Returns:
+        str | None: abs path to the cached `.dds`, or None if neither a
+        cached copy nor a source pkg was available.
+    """
+    atlas_local = os.path.join(resources_dir, '_wot_eff_tex.dds')
+    if os.path.isfile(atlas_local):
+        return atlas_local
+    src_pkg = pkg_path if (pkg_path and os.path.isfile(pkg_path)) \
+        else _locate_pkg(extra_pkg_paths)
+    if not src_pkg:
+        return None
+    os.makedirs(resources_dir, exist_ok=True)
+    try:
+        with zipfile.ZipFile(src_pkg) as zf:
+            with zf.open(_INTERNAL) as src, open(atlas_local, 'wb') as dst:
+                dst.write(src.read())
+        return atlas_local
+    except Exception as exc:
+        print(f"[extract_wot_fire_atlas] could not extract atlas: {exc}")
+        return None
+
+
+def slice_set(set_name, target_dir, atlas_path, prefix=None,
+              wipe_first=True):
+    """Slice one named grid out of the atlas into target_dir as PNGs.
+
+    Args:
+        set_name    (str): catalogue key (must be in GRID_DEFS)
+        target_dir  (str): output folder (created if missing)
+        atlas_path  (str): path to a local copy of `eff_tex.dds`
+        prefix      (str|None): per-tile filename prefix; defaults to
+                                 set_name (e.g. 'fire_BIG_0000.png')
+        wipe_first  (bool): empty *.png from target_dir before writing
+
+    Returns:
+        int: number of frames written.
+
+    Raises:
+        KeyError: if set_name isn't in GRID_DEFS.
+    """
+    gdef = GRID_DEFS[set_name]
+    os.makedirs(target_dir, exist_ok=True)
+    if wipe_first:
+        _wipe_pngs(target_dir)
+    src = Image.open(atlas_path).convert('RGBA')
+    rx0, ry0, rx1, ry1 = gdef['rect']
+    grid = src.crop((rx0, ry0, rx1, ry1))
+    n = _slice_one(grid, gdef, target_dir, prefix=prefix or set_name)
+    return n
+
+
+def ensure_runtime_flipbooks(resources_dir, pkg_path=None,
+                             extra_pkg_paths=(), force=False):
+    """Make sure `resources/fire/` and `resources/smoke/` are populated.
+
+    Called from `Viewer.__init__` BEFORE the FlipbookTexture loaders
+    fire so the user can clone the repo, run `go.bat`, and get a
+    burning-tank effect on first launch -- without the repo having
+    to ship Wargaming's atlas artwork.
+
+    Skips work entirely when both target folders already contain at
+    least one PNG (steady-state cost = two os.listdir calls).  When
+    one folder is empty, locates particles.pkg, caches the atlas to
+    `resources/_wot_eff_tex.dds`, and slices ONLY the two grids
+    listed in RUNTIME_TARGETS.
+
+    Args:
+        resources_dir   (str)      : project resources/ folder
+        pkg_path        (str|None) : explicit particles.pkg
+        extra_pkg_paths (iterable) : additional pkg search paths
+                                     (typically the user's configured
+                                     pkg_dir from tankviewer.json)
+        force           (bool)     : re-slice even if folders are
+                                     already populated
+
+    Returns:
+        dict: {target_dir_name: frames_written}.  Empty when nothing
+        needed doing or when no pkg was available.  Never raises.
+    """
+    out = {}
+
+    def _has_pngs(folder):
+        if not os.path.isdir(folder):
+            return False
+        for fn in os.listdir(folder):
+            if fn.lower().endswith('.png'):
+                return True
+        return False
+
+    needed = []
+    for target_name, set_name in RUNTIME_TARGETS.items():
+        target_dir = os.path.join(resources_dir, target_name)
+        if force or not _has_pngs(target_dir):
+            needed.append((target_name, set_name, target_dir))
+
+    if not needed:
+        return out
+
+    atlas = ensure_atlas_local(
+        resources_dir, pkg_path=pkg_path, extra_pkg_paths=extra_pkg_paths)
+    if not atlas:
+        # Caller will get a clean error from FlipbookTexture; we just
+        # log here so the user understands why the folders are empty.
+        print(f"[ensure_runtime_flipbooks] no particles.pkg found -- "
+              f"fire/smoke flipbooks unavailable until WoT path is set")
+        return out
+
+    for target_name, set_name, target_dir in needed:
+        try:
+            n = slice_set(set_name, target_dir, atlas)
+            out[target_name] = n
+            print(f"[ensure_runtime_flipbooks] {target_name}/  <- "
+                  f"{set_name}  ({n} frames)")
+        except Exception as exc:
+            print(f"[ensure_runtime_flipbooks] slice {set_name} -> "
+                  f"{target_name}/ failed: {exc}")
+    return out
 
 
 def _slice_one(grid_image, grid_def, out_dir, prefix):
@@ -217,25 +378,17 @@ def main():
     os.makedirs(sets_dir, exist_ok=True)
 
     # 1) Source pkg + atlas extraction (cached on disk so re-runs
-    #    are fast).
-    pkg = _locate_pkg()
-    if pkg is None:
+    #    are fast).  Re-uses ensure_atlas_local so the runtime path
+    #    and the CLI path can't drift out of sync.
+    atlas_local = ensure_atlas_local(res_dir)
+    if atlas_local is None:
         sys.exit("ERROR: particles.pkg not found in any of:\n  "
                  + "\n  ".join(_PKG_CANDIDATES))
-
-    atlas_local = os.path.join(res_dir, '_wot_eff_tex.dds')
-    if not os.path.isfile(atlas_local):
-        with zipfile.ZipFile(pkg) as zf:
-            with zf.open(_INTERNAL) as src, open(atlas_local, 'wb') as dst:
-                dst.write(src.read())
-        print(f"  extracted {_INTERNAL}")
-        print(f"    -> {atlas_local}")
-    else:
-        print(f"  using cached atlas: {atlas_local}")
+    print(f"  atlas: {atlas_local}")
 
     src = Image.open(atlas_local).convert('RGBA')
     sw, sh = src.size
-    print(f"  atlas: {sw}x{sh}\n")
+    print(f"  atlas size: {sw}x{sh}\n")
 
     # 2) Slice every cataloged grid into its own subfolder.
     #    Filenames inside use the SET name as prefix so dragging

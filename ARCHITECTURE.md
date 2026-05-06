@@ -2,14 +2,14 @@
 
 A Python + Pygame + PyOpenGL viewer for World of Tanks `.primitives_processed`
 mesh files and complete vehicle XMLs.  All application code lives in the
-`tankviewer/` package; `tank_viewer.py` is a thin CLI entry point.
+`tankviewer/` package; `tankExporterPy.py` is a thin CLI entry point.
 
 ---
 
 ## File Map
 
 ```
-tank_viewer.py          CLI entry point — argparse, persisted config, Viewer.run()
+tankExporterPy.py          CLI entry point — argparse, persisted config, Viewer.run()
 tanks.txt               Tank Exporter export of currently-active tanks (canonical filter)
 thumb_nails/            Per-tank PNG thumbnails (filename = <xml_basename>.png)
 TheItemList.xml         File→pkg lookup index used by PkgExtractor (O(1) extraction)
@@ -48,7 +48,7 @@ resources/
 
 ---
 
-## `tank_viewer.py`
+## `tankExporterPy.py`
 
 Argparse-driven entry point.
 
@@ -90,7 +90,7 @@ Shared utilities with no OpenGL dependency.
 ## `tankviewer/config.py`
 
 Tiny persistent-config helper backed by `tankviewer.json` next to
-`tank_viewer.py`.
+`tankExporterPy.py`.
 
 | Symbol | Purpose |
 |--------|---------|

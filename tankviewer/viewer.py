@@ -573,6 +573,30 @@ class Viewer:
         # ParticleSystem owns the per-particle CPU state + dynamic VBO;
         # set_emitters() is called every load_vehicle to point it at the
         # current tank's HP_Track_Exhaus_* nodes.
+        # ---- Runtime extract: WoT fire / smoke flipbooks ----------
+        # The PNGs under resources/fire/ and resources/smoke/ are
+        # slices of Wargaming's eff_tex.dds particle atlas, so we
+        # CAN'T ship them with the repo.  Instead, when those
+        # folders are empty (fresh clone or freshly gitignored),
+        # we extract the atlas from the user's local particles.pkg
+        # and slice the two grids the viewer actually uses.  Output
+        # is identical to running cust_tools/extract_wot_fire_atlas.py
+        # by hand; this just removes the manual step.  Skips work
+        # entirely when the folders already have PNGs.
+        self._splash_status('Checking fire / smoke flipbooks...')
+        try:
+            from cust_tools.extract_wot_fire_atlas import (
+                ensure_runtime_flipbooks)
+            cfg_pkg_dir = (self._cfg.get('pkg_dir', '') or '').strip()
+            ensure_runtime_flipbooks(
+                resources_dir=os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources'),
+                extra_pkg_paths=(cfg_pkg_dir,) if cfg_pkg_dir else (),
+            )
+        except Exception as exc:
+            print(f"[viewer] runtime flipbook extract skipped: {exc}")
+
         self._splash_status('Loading smoke flipbook (91 frames)...')
         self.particle_shader      = None
         self.smoke_flipbook       = None

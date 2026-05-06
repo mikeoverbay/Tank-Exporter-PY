@@ -9,6 +9,52 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Stop shipping WoT pixels + entry-point rename (1.48.0)
+
+Every PNG that lived under `resources/fire/` and
+`resources/smoke/` was a slice of Wargaming's `eff_tex.dds`
+particle atlas.  We can't redistribute their artwork, so:
+
+* Both folders are now in `.gitignore` (along with
+  `resources/_wot_eff_tex.dds`, `resources/fire_sets/`, and the
+  legacy `resources/fire_legacy_explosion/`).
+* All previously-tracked PNGs were removed via `git rm --cached`
+  (the local copies stay on disk; only the index changed).
+* `cust_tools/extract_wot_fire_atlas.py` got refactored to expose
+  importable helpers: `ensure_atlas_local`, `slice_set`, and
+  `ensure_runtime_flipbooks`.  The CLI still works the same; the
+  module-level `GRID_DEFS` and `RUNTIME_TARGETS` tables let the
+  viewer call the same logic in-process.
+* `Viewer.__init__` calls `ensure_runtime_flipbooks` BEFORE
+  `FlipbookTexture` init.  When `resources/fire/` or
+  `resources/smoke/` is empty, the helper locates `particles.pkg`
+  (preferring the user's configured `pkg_dir` from
+  `tankviewer.json`, then falling back to the hardcoded NA / EU /
+  RU / standalone paths), caches the atlas to
+  `resources/_wot_eff_tex.dds`, and slices `fire_BIG` +
+  `smoke_white` into the runtime folders.  Steady-state cost when
+  the folders are populated = two `os.listdir` calls.
+
+Net effect: a fresh clone produces a working burning-tank effect
+on first launch as long as WoT is installed somewhere we can find
+it.  No Wargaming bytes ride along in the repo.
+
+**Entry-point rename**: `tank_viewer.py` -> `tankExporterPy.py`
+so the launcher name matches the GitHub repo (`Tank-Exporter-PY`)
+and the user-facing brand (TEPY).  `go.bat`, `start.bat`,
+`README.md`, `README_TANK_VIEWER.md`, `ARCHITECTURE.md`,
+`COORDINATE_SYSTEMS.md`, `tankviewer/config.py`, and
+`tankviewer/loaders.py` all updated.  Historical CHANGELOG entries
+left unchanged -- they describe what those files said at the
+time.
+
+Files touched: `cust_tools/extract_wot_fire_atlas.py`,
+`tankviewer/viewer.py`, `tankviewer/config.py`,
+`tankviewer/loaders.py`, `tankExporterPy.py` (renamed),
+`go.bat`, `start.bat`, `.gitignore`, `README.md`,
+`README_TANK_VIEWER.md`, `ARCHITECTURE.md`,
+`COORDINATE_SYSTEMS.md`, `CLAUDE.md`.
+
 ### Pillow + GL pre-warm via Details_map.dds (1.47.1)
 
 The 1.47.0 pre-warm only addressed XML caches (a few hundred ms at

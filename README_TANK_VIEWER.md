@@ -36,7 +36,7 @@ python -m pip install pygame PyOpenGL pillow numpy
 ## Usage
 
 ```bash
-python tank_viewer.py [<file>] [options]
+python tankExporterPy.py [<file>] [options]
 ```
 
 `<file>` is optional.  Omit it to start with an empty scene and pick a
@@ -49,24 +49,24 @@ tank from the right-hand tree panel; otherwise pass either:
 **First-time setup** — point the viewer at your WoT install once:
 
 ```bash
-python tank_viewer.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
-python tank_viewer.py --res-mods "C:\Games\World_of_Tanks_NA\res_mods\<version>"
+python tankExporterPy.py --pkg-dir  "C:\Games\World_of_Tanks_NA\res\packages"
+python tankExporterPy.py --res-mods "C:\Games\World_of_Tanks_NA\res_mods\<version>"
 ```
 
-The paths are written to `tankviewer.json` (next to `tank_viewer.py`)
+The paths are written to `tankviewer.json` (next to `tankExporterPy.py`)
 and reused on every subsequent run.
 
 **Examples:**
 ```bash
 # Empty start, pick from the tree:
-python tank_viewer.py
+python tankExporterPy.py
 
 # Direct mesh:
-python tank_viewer.py "C:\path\Hull.primitives_processed"
+python tankExporterPy.py "C:\path\Hull.primitives_processed"
 
 # Direct vehicle XML (loads crashed-variant if you tick the dialog box
 # when launching from the tree):
-python tank_viewer.py "C:\path\A14_T30.xml"
+python tankExporterPy.py "C:\path\A14_T30.xml"
 ```
 
 ## Controls
@@ -198,7 +198,7 @@ Trackball orbit camera implementation:
 
 3. Launch viewer:
    ```bash
-   python tank_viewer.py mesh_file.primitives_processed
+   python tankExporterPy.py mesh_file.primitives_processed
    ```
 
 4. Interact with 3D model:

@@ -26,15 +26,26 @@ TheItemList.NEW.xml
 # `_ensure_itemlist` post-UI hook.  Never commit.
 TheItemList.xml
 
-# Cached WoT particle atlas extracted by
-# cust_tools/extract_wot_fire_atlas.py from the user's own
-# particles.pkg.  21 MB of Wargaming-painted artwork; the script
-# re-extracts it on demand from a fresh WoT install, so committing
-# the cache would be redundant + inflate the clone.  The sliced
-# subfolders under resources/fire_sets/ are kept out of git for the
-# same reason.
+# Wargaming particle artwork.  Every PNG under resources/fire/ and
+# resources/smoke/ is a slice of WoT's eff_tex.dds atlas, which we
+# can't redistribute.  Viewer.__init__ calls
+# `ensure_runtime_flipbooks()` (in cust_tools/extract_wot_fire_atlas.py)
+# at startup, which re-extracts the atlas from the user's local
+# particles.pkg and slices the two runtime grids
+# (fire_BIG -> resources/fire/, smoke_white -> resources/smoke/) on
+# first launch.  resources/fire_sets/ is the authoring-mode dump
+# (every catalogued grid, ~10 subfolders); the runtime path only
+# touches the two folders the viewer reads.  Cached atlas DDS lives
+# at resources/_wot_eff_tex.dds.  None of this ships in the repo.
 resources/_wot_eff_tex.dds
 resources/fire_sets/
+resources/fire/
+resources/smoke/
+
+# Legacy explosion flipbook from an earlier flipbook source -- also
+# WoT-derived, no longer used by the viewer.  Listed defensively in
+# case anyone still has stale copies on disk.
+resources/fire_legacy_explosion/
 
 # Local user config -- the viewer writes pkg / res_mods paths in
 # here on first run; they're machine-specific and shouldn't ship.

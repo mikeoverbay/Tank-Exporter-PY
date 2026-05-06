@@ -5,7 +5,7 @@
 ::  start.bat is the bare-bones "just run the app" entry point.  Use it
 ::  when you know the dependencies are already installed and you just
 ::  want to spin up the viewer fast.  No import probe, no install path,
-::  no requirements\ folder shuffling -- just python tank_viewer.py and
+::  no requirements\ folder shuffling -- just python tankExporterPy.py and
 ::  any args you pass through.
 ::
 ::  If you're not sure whether the deps are installed, use go.bat
@@ -26,7 +26,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python tank_viewer.py %*
+python tankExporterPy.py %*
 
 if errorlevel 1 (
     echo.
