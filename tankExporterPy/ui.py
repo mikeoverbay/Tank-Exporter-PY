@@ -1018,33 +1018,78 @@ class UIPathsDialog:
     @staticmethod
     def _pick_path(mode, current):
         """Open a tkinter file/folder picker.  Returns the chosen path
-        or '' if the user cancelled.  Tk root is created hidden and
-        destroyed immediately so the pygame window stays focused."""
+        or '' if the user cancelled / the picker failed.
+
+        Windows-specific gotchas that motivated the dance below:
+
+        * Just calling `Tk(); withdraw(); askdirectory()` opens the
+          dialog BEHIND the pygame window on a lot of Windows
+          driver / WM combos.  The user sees "nothing happened" and
+          gives up.  `update()` + `lift()` + `focus_force()` and the
+          explicit `parent=root` argument force the dialog to land
+          on top.
+
+        * `mustexist=True` plus an empty / non-existent `initialdir`
+          can make the dialog refuse to open at all on older Tk.
+          We sanity-check `current` before passing it through; if
+          it's bad we hand `None` so Tk picks the user's home dir.
+
+        * Any exception inside Tk used to be silently swallowed;
+          the `try/except` here logs it so a future failure doesn't
+          look like "nothing happened" all over again.
+        """
         try:
+            import os
             import tkinter as tk
             from tkinter import filedialog
-        except ImportError:
-            print("[ui] tkinter not available -- cannot open file picker")
+        except ImportError as exc:
+            print(f"[ui] tkinter not available -- cannot open file picker: {exc}")
             return ''
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
+        # Sanitise initial dir: only keep it if it actually exists,
+        # otherwise Tk on some Windows builds throws or just refuses.
+        initial_dir = None
+        if current:
+            cand = current if mode == 'folder' else os.path.dirname(current)
+            if cand and os.path.isdir(cand):
+                initial_dir = cand
+
         try:
+            root = tk.Tk()
+            root.withdraw()
+            # Process pending events so attribute changes apply
+            # before the dialog opens.
+            root.attributes('-topmost', True)
+            root.update_idletasks()
+            root.lift()
+            try:
+                root.focus_force()
+            except Exception:
+                pass
+
             if mode == 'folder':
                 chosen = filedialog.askdirectory(
-                    initialdir=current or None,
+                    parent=root,
+                    initialdir=initial_dir,
                     title='Select folder',
                     mustexist=True,
                 )
             else:
                 chosen = filedialog.askopenfilename(
-                    initialdir=(current and __import__('os').path.dirname(current)) or None,
+                    parent=root,
+                    initialdir=initial_dir,
                     title='Select file',
-                    filetypes=[('XML files', '*.xml'), ('All files', '*.*')],
+                    filetypes=[('XML files', '*.xml'),
+                               ('All files',  '*.*')],
                 )
+        except Exception as exc:
+            print(f"[ui] file picker failed: {exc}")
+            chosen = ''
         finally:
-            root.destroy()
+            try:
+                root.destroy()
+            except Exception:
+                pass
         return chosen or ''
 
     # ---- events ------------------------------------------------------

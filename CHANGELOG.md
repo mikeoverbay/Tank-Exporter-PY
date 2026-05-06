@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Set Paths picker hardening + error logging (1.57.3)
+
+`UIPathsDialog._pick_path` used to swallow any Tk failure
+silently -- if the dialog refused to open (Tcl init error, weird
+DPI scaling, missing `tcl/` install, ...) the user would just see
+"nothing happened" with no diagnostic.
+
+Hardened in three ways:
+
+1. **Wrapped Tk calls in try/except** that prints the failure to
+   stdout (`[ui] file picker failed: <exc>`).  Future
+   "picker doesn't work" reports come with an actual cause.
+2. **Forced focus / topmost** -- `update_idletasks()` + `lift()` +
+   `focus_force()` + the explicit `parent=root` argument fix the
+   common-on-Windows symptom where the dialog opens BEHIND the
+   pygame window and looks like nothing happened.
+3. **Sanitised `initialdir`** -- only passed when the path
+   actually exists on disk.  Older Tk on Windows refused to
+   open the dialog at all when given a stale path.
+
+Files: `tankExporterPy/ui.py`.
+
 ### go.bat: --user fallback + per-package failure diagnostics (1.57.2)
 
 Hardening on top of 1.57.1's `py -3` switch.  When pip's default
