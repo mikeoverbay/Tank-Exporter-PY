@@ -2953,6 +2953,28 @@ class Viewer:
         except Exception as exc:
             self.log_error(f"tank list: rebuild failed: {exc}")
             # Don't return False -- ItemList rebuild succeeded.
+
+        # In-memory tank-tree refresh.  After a fresh ItemList
+        # rebuild the on-disk catalogue may carry tanks the running
+        # session never saw -- a game patch added a new line, the
+        # user pointed at a different WoT install, etc.  Without a
+        # session restart the tier-tree would still show the stale
+        # contents.  Drop `_tanks_display_map` so it re-loads on
+        # next access, detach the live `ui.tree` pointer so it
+        # doesn't point into a soon-to-be-freed cached tree, and
+        # rebuild every tier from the current `list_vehicle_xmls`.
+        # Tab bar stays (same 11 tier slots either way) -- only the
+        # contents get rebuilt.  Failure here is logged but
+        # non-fatal: the on-disk artefacts are the critical
+        # outputs; a stale tree is a UI annoyance, not data loss.
+        try:
+            self._tanks_display_map = {}
+            self.ui.tree = None
+            self._build_all_tier_trees()
+            self.log("tank tree: rebuilt against fresh ItemList")
+        except Exception as exc:
+            self.log_error(f"tank tree: rebuild failed: {exc}")
+
         return True
 
     def _rebuild_tank_list_now(self):

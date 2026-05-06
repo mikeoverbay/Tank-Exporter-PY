@@ -9,6 +9,29 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Refresh tank tree after ItemList rebuild (1.53.1)
+
+`_rebuild_itemlist_now` used to leave the in-memory tier-tree
+unchanged.  After a rebuild that picked up new tanks (game patch,
+different WoT install via Set Paths in the same session), the
+tree would still show whatever was there at session start until
+the user restarted TEPY.
+
+Now the rebuild path finishes by:
+
+1. Dropping `self._tanks_display_map` so `_load_tanks_txt`
+   re-reads on next access.
+2. Detaching `self.ui.tree` so it doesn't point into a
+   soon-to-be-freed cached tree.
+3. Calling `_build_all_tier_trees()` to rebuild every tier from
+   the current `list_vehicle_xmls()` view.
+
+Tab bar isn't touched (same 11 tier slots); only the contents
+rebuild.  Failure of this step is logged but non-fatal -- the
+on-disk artefacts are still the critical outputs.
+
+Files: `tankviewer/viewer.py`.
+
 ### Pull tank names from WoT's localization catalogs (1.53.0)
 
 WoT stores user-facing strings -- tank names, descriptions,
