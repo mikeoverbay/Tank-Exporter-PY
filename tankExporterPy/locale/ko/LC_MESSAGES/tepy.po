@@ -1,4 +1,4 @@
-# TEPY - Korean -- stub.  msgstr empty == fall back to English.
+# TEPY - English (canonical msgid catalog).
 # This file is the master.  msgid is the in-code English label;
 # msgstr should equal msgid for the en build (so the gettext
 # pipeline returns the same string the code passed in).
@@ -39,6 +39,9 @@ msgstr "하늘"
 
 msgid "Wireframe"
 msgstr "와이어"
+
+msgid "Terrain"
+msgstr "지형"
 
 msgid "Meshes"
 msgstr "메시"

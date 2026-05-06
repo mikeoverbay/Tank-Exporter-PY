@@ -1,4 +1,4 @@
-# TEPY - French -- stub.  msgstr empty == fall back to English.
+# TEPY - English (canonical msgid catalog).
 # This file is the master.  msgid is the in-code English label;
 # msgstr should equal msgid for the en build (so the gettext
 # pipeline returns the same string the code passed in).
@@ -39,6 +39,9 @@ msgstr "Ciel"
 
 msgid "Wireframe"
 msgstr "Filaire"
+
+msgid "Terrain"
+msgstr "Terrain"
 
 msgid "Meshes"
 msgstr "Maillages"

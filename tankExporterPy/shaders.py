@@ -161,6 +161,38 @@ class SimpleColorShader:
         glUniformMatrix4fv(glGetUniformLocation(self.program, name), 1, GL_TRUE, matrix)
 
 
+class TerrainShader:
+    """Procedural-ground shader.  Three-band height-then-slope colour
+    blend (grass / dirt / rock) under a single directional light --
+    cheap fixed-cost pipeline for the Terrain class.
+
+    Uniforms set per-frame by `Terrain.render`:
+        u_view, u_proj  (mat4)
+        u_light_dir     (vec3, world space; shader normalises)
+        u_height_min,
+        u_height_max    (float, world Y range of the heightmap)
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/terrain.vert')
+        fs = load_shader_file('shaders/terrain.frag')
+        self.program = _compile_program(vs, fs, 'Terrain shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, matrix):
+        glUniformMatrix4fv(
+            glGetUniformLocation(self.program, name), 1, GL_TRUE, matrix)
+
+    def set_vec3(self, name, vec):
+        v = (float(vec[0]), float(vec[1]), float(vec[2]))
+        glUniform3f(glGetUniformLocation(self.program, name), *v)
+
+    def set_float(self, name, value):
+        glUniform1f(glGetUniformLocation(self.program, name), float(value))
+
+
 class ShaderProgram:
     """Main textured mesh shader (Phong + normal map + alpha test + AO)."""
 

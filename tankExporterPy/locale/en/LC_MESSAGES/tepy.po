@@ -40,6 +40,9 @@ msgstr "Skybox"
 msgid "Wireframe"
 msgstr "Wireframe"
 
+msgid "Terrain"
+msgstr "Terrain"
+
 msgid "Meshes"
 msgstr "Meshes"
 

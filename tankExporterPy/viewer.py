@@ -36,8 +36,10 @@ from .         import config as _config
 from .mesh     import Mesh
 from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
-                       ParticleShader, ImportedShader, NormalsShader)
+                       ParticleShader, ImportedShader, NormalsShader,
+                       TerrainShader)
 from .skybox   import Skybox
+from .terrain  import Terrain
 from .particles import FlipbookTexture, ParticleSystem, AnimatedBillboard
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 from .localization import _
@@ -719,12 +721,35 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] Skybox not loaded: {exc}")
 
+        # Procedural ground.  Generated once at startup via Perlin
+        # fBm; kept hidden by default so a clean tank screenshot
+        # still works.  Toggle is the `Terrain` button in the
+        # left-panel UI section.
+        self._splash_status('Generating procedural terrain...')
+        self.terrain        = None
+        self.terrain_shader = None
+        try:
+            self.terrain_shader = TerrainShader()
+            # Default: 257-vertex grid, 40 m of world, ±1.5 m
+            # vertical band, base_y just below 0 so the tank's
+            # tracks don't sink into a peak.  Seed = 0 for now;
+            # could expose the seed via config later.
+            self.terrain = Terrain(seed=0, size=257,
+                                    world_size=40.0,
+                                    height_scale=3.0,
+                                    base_y=-0.05)
+        except Exception as exc:
+            print(f"[viewer] Terrain disabled: {exc}")
+            self.terrain        = None
+            self.terrain_shader = None
+
         # Toggleable display flags
-        self.show_grid   = False
-        self.show_axes   = False
-        self.show_skybox = False
-        self.show_light  = True
-        self.wireframe   = False
+        self.show_grid    = False
+        self.show_axes    = False
+        self.show_skybox  = False
+        self.show_light   = True
+        self.show_terrain = bool(self._cfg.get('show_terrain', False))
+        self.wireframe    = False
         self.use_normal_map = True
         # Source type of the currently loaded scene:
         #   None  -- nothing loaded
@@ -1296,6 +1321,7 @@ class Viewer:
             (_('Orbit'),     'orbit_lights'),
             (_('Skybox'),    'show_skybox'),
             (_('Wireframe'), 'wireframe'),
+            (_('Terrain'),   'show_terrain'),
         ]:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
@@ -5597,9 +5623,10 @@ class Viewer:
                 (_('Orbit'),     0, 1),
                 (_('Skybox'),    1, 1),
                 (_('Wireframe'), 2, 1),
-                (_('Meshes'),    0, 1),
-                (_('Flip'),      1, 1),
-                (_('Compare'),   2, 1),
+                (_('Terrain'),   0, 1),
+                (_('Meshes'),    1, 1),
+                (_('Flip'),      2, 1),
+                (_('Compare'),   0, 1),
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
@@ -6046,6 +6073,20 @@ class Viewer:
             # Stay in GL_FILL for the main mesh pass; the wireframe
             # overlay (if any) fires after the solid render.
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+        # Procedural terrain.  Drawn AFTER the skybox (so the
+        # ground occludes the horizon line) and BEFORE the tank
+        # meshes (so the tank renders on top).  Depth-tested
+        # against the main scene so the tank tracks meet the
+        # ground instead of clipping through.  Toggle is the
+        # `Terrain` button in the UI section -- off by default.
+        if self.show_terrain and self.terrain and self.terrain_shader:
+            glEnable(GL_DEPTH_TEST)
+            glDepthMask(GL_TRUE)
+            light_dir_world = np.array(
+                [0.5, 1.0, 0.3], dtype=np.float32)
+            self.terrain.render(self.terrain_shader, view, proj,
+                                  light_dir_world)
 
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
@@ -6572,7 +6613,8 @@ class Viewer:
             # Master debug-overlay flag (Debug checkbox).  Replaces
             # the pre-v1.50 split keys; both old keys are dropped
             # so the JSON ends up with only `debug`.
-            self._cfg['debug'] = bool(self._debug)
+            self._cfg['debug']         = bool(self._debug)
+            self._cfg['show_terrain']  = bool(self.show_terrain)
             self._cfg.pop('show_hardpoints', None)
             self._cfg.pop('show_fire_cards', None)
             _config.save(self._cfg)
@@ -6607,6 +6649,8 @@ class Viewer:
             self.fire_flipbook.cleanup()
         if self.skybox:
             self.skybox.cleanup()
+        if self.terrain:
+            self.terrain.cleanup()
         # Free every cached tier tree (UIManager.cleanup will also try to
         # free self.ui.tree, which is one of these -- UITreeView.cleanup
         # is idempotent so the second pass is a no-op).

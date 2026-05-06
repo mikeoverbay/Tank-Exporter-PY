@@ -9,6 +9,58 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Procedural terrain (tank stops floating in space) (1.57.0)
+
+Tanks were rendering against a skybox with nothing under them.
+Added a procedural ground mesh -- Perlin fractal Brownian motion
+heightmap, smooth-shaded mesh, three-band height + slope colour
+blend (grass / dirt / rock).  Toggle is the new **Terrain**
+button in the left-panel UI section, off by default so a clean
+tank screenshot still works.
+
+Why Perlin fBm specifically: diamond-square (the textbook
+"implement-in-30-minutes" alternative) produces visible diagonal
+creases at quad boundaries from its midpoint-displacement
+structure, and is locked to a 2^n+1 grid.  fBm Perlin has neither
+problem and is the algorithm every modern terrain generator
+(Skyrim, Elite Dangerous's planet engine, No Man's Sky, World
+Machine, Gaea) is built on.  Cost is about 30 extra lines of
+numpy.
+
+New module: `tankExporterPy/terrain.py`
+* `Terrain` class -- heightmap generation + indexed-triangle mesh
+  build + smooth-shaded vertex normals + render.  Default 257-
+  vertex grid (66 049 verts, ~131 K triangles) over 40 m of
+  world; configurable via constructor args.
+* `_make_heightmap` -- standalone Perlin fBm generator that
+  vectorises every cell across numpy arrays.  ~50 ms for the
+  default size on a typical CPU; runs once at viewer construction.
+* `_vertex_normals` -- smooth normals via face-area-weighted
+  averaging (no normalisation of face contributions before
+  summing; gives noticeably better creases on irregular slopes).
+
+New shader pair: `shaders/terrain.{vert,frag}` + `TerrainShader`
+class in `shaders.py`.
+* Vertex passes world position + normal + raw Y to the fragment.
+* Fragment does a two-segment height blend (grass -> dirt over
+  the lower band, dirt -> rock over the upper) plus a slope
+  override that biases steep faces toward rock.  Single
+  directional light, generous ambient (0.35) so cliffs don't
+  go to coal-black.
+
+Localised: `Terrain` is wired through `_()` like every other
+button, with translations seeded for all 20 supported languages
+(Gelände / 地形 / Местность / Terreno / ...).
+
+Persistence: `show_terrain` saves to `tankExporterPy.json` so
+the user's last preference survives across sessions.
+
+Files: new `tankExporterPy/terrain.py`,
+`shaders/terrain.{vert,frag}`.  Edits to
+`tankExporterPy/shaders.py`, `tankExporterPy/viewer.py`,
+`tankExporterPy/locale/<lang>/LC_MESSAGES/tepy.{po,mo}` for all
+21 languages.
+
 ### Console chevron matches the left-panel spine style (1.56.1)
 
 The bottom console's collapse / expand button used `+` / `-`
