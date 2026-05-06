@@ -9,6 +9,37 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Migrate + drop legacy smoke/fire config keys (1.48.1)
+
+A bug from the v1.46.0 per-engine-class refactor: cleanup() wrote
+the new `smoke_groups` / `fire_groups` dicts but never deleted the
+old flat keys (`smoke_start_size`, `smoke_end_size`, `smoke_speed`,
+`smoke_fade_start_frame`, `smoke_fade_end_frame`, `fire_size`,
+`fire_fps`).  Result: any config written by v1.45 or earlier kept
+those legacy keys forever, and the new `smoke_groups` /
+`fire_groups` never appeared in the JSON because we hadn't loaded
+them on startup either -- so users saw "old-format" config files
+even after running the new build.
+
+Two parts to the fix:
+
+1. **Read-side migration**: `Viewer._migrate_legacy_smoke_fire_config`
+   runs once at startup and folds any legacy keys into the
+   `gas_medium` slot of the new dicts.  Runs only when neither
+   `smoke_groups` nor `fire_groups` is already present (i.e. no
+   re-migration after first clean save).
+2. **Write-side cleanup**: cleanup() now `pop()`s every legacy
+   key from `self._cfg` after writing the new dicts, so the JSON
+   ends up with only the new structure.
+
+Legacy keys lists live in `_LEGACY_SMOKE_KEYS`,
+`_LEGACY_FIRE_KEYS`, and `_LEGACY_DROPPED_KEYS` so reader and
+writer can't drift.  After one clean exit on v1.48.1, the JSON
+will look like the per-engine-class structure documented in the
+v1.46.0 entry; existing tuning is preserved into `gas_medium`.
+
+Files touched: `tankviewer/viewer.py`.
+
 ### Stop shipping WoT pixels + entry-point rename (1.48.0)
 
 Every PNG that lived under `resources/fire/` and

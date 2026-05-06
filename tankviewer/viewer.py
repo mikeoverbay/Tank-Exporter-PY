@@ -780,6 +780,15 @@ class Viewer:
         self._fire_groups  = self._merge_group_dict(
             self._cfg.get('fire_groups', {}) or {},
             self._FIRE_GROUP_DEFAULTS)
+        # One-time migration: a config written by v1.45 or older
+        # carries flat single-slot keys ('smoke_start_size',
+        # 'smoke_end_size', 'smoke_speed', 'smoke_fade_start_frame',
+        # 'smoke_fade_end_frame', 'fire_size').  Fold them into the
+        # 'gas_medium' slot of the new dicts so the user's tuning
+        # isn't thrown away when v1.46+ first runs against an old
+        # JSON.  cleanup() drops the legacy keys from self._cfg so
+        # the next save writes the new structure cleanly.
+        self._migrate_legacy_smoke_fire_config()
         # Default editing target = the fallback class (gas_medium)
         # until a tank loads and tells us its real engine class.
         self._active_group = self._DEFAULT_PIXIE_CLASS
@@ -1035,6 +1044,69 @@ class Viewer:
             slot = persisted.get(g, {}) or {}
             out[g] = {f: float(slot.get(f, dflt[f])) for f in dflt}
         return out
+
+    # Legacy single-slot keys written by v1.45 and older.  Listed
+    # here so both _migrate_legacy_smoke_fire_config (read-side)
+    # and cleanup() (drop-side) can't drift out of sync.  Each tuple
+    # is (legacy_key, new_field).
+    _LEGACY_SMOKE_KEYS = (
+        ('smoke_start_size',       'start_size'),
+        ('smoke_end_size',         'end_size'),
+        ('smoke_speed',            'speed'),
+        ('smoke_fade_start_frame', 'fade_start_frame'),
+        ('smoke_fade_end_frame',   'fade_end_frame'),
+    )
+    _LEGACY_FIRE_KEYS = (
+        ('fire_size',       'size'),
+        ('fire_start_size', 'size'),  # even older alias from before
+                                       # the billboard refactor
+    )
+    # Pure deletion list -- removed at cleanup() unconditionally
+    # whether or not their value got migrated above.
+    _LEGACY_DROPPED_KEYS = ('fire_fps',)
+
+    def _migrate_legacy_smoke_fire_config(self):
+        """Fold pre-v1.46 flat smoke / fire keys into the new
+        per-engine-class dicts so the user's existing tuning
+        survives the first run against the new build.
+
+        Migration rules:
+            * Each legacy `smoke_*` value lands in
+              `self._smoke_groups['gas_medium']` (the fallback
+              class) under the new field name.
+            * `fire_size` (or older alias `fire_start_size`) lands
+              in `self._fire_groups['gas_medium']['size']`.
+            * Values are coerced to float; non-numeric / missing
+              keys are silently skipped.
+            * Legacy keys are NOT removed from `self._cfg` here --
+              cleanup() drops them at save time so a crash before
+              save still preserves the originals.
+
+        No-op when the new dicts already came back from
+        `self._cfg.get('smoke_groups', ...)` -- we treat the
+        presence of the new keys as "user has already saved at
+        least once with the new layout, don't re-migrate."
+        """
+        if 'smoke_groups' in self._cfg or 'fire_groups' in self._cfg:
+            return
+        target_smoke = self._smoke_groups.get(self._DEFAULT_PIXIE_CLASS)
+        if target_smoke is not None:
+            for legacy, new_field in self._LEGACY_SMOKE_KEYS:
+                if legacy in self._cfg:
+                    try:
+                        target_smoke[new_field] = float(self._cfg[legacy])
+                    except (TypeError, ValueError):
+                        pass
+        target_fire = self._fire_groups.get(self._DEFAULT_PIXIE_CLASS)
+        if target_fire is not None:
+            for legacy, new_field in self._LEGACY_FIRE_KEYS:
+                if legacy in self._cfg:
+                    try:
+                        target_fire[new_field] = float(self._cfg[legacy])
+                        break  # first match wins; don't overwrite
+                               # with the older alias
+                    except (TypeError, ValueError):
+                        pass
 
     def _save_active_group(self):
         """Read the live slider values back into the active group dict.
@@ -5937,15 +6009,22 @@ class Viewer:
                 self._cfg['light_value']      = float(self._metal_slider.value)
             if self._shine_slider:
                 self._cfg['ambient_value']    = float(self._shine_slider.value)
-            # Smoke + fire settings are now per-group dicts.  Snapshot
-            # the live sliders into the active group first, then write
-            # both group dicts as a unit.  Legacy keys (smoke_start_size
-            # / smoke_end_size / fire_fps / etc.) are NOT re-emitted --
-            # any old config that still has them gets transparently
-            # ignored on the next load (defaults take over).
+            # Smoke + fire settings are now per-engine-class dicts.
+            # Snapshot the live sliders into the active class first,
+            # then write both dicts as a unit AND delete every
+            # legacy single-slot key so the JSON ends up clean (no
+            # leftover smoke_start_size / fire_fps / etc.).  The
+            # legacy values were already migrated into the new
+            # dicts at startup by _migrate_legacy_smoke_fire_config.
             self._save_active_group()
             self._cfg['smoke_groups'] = self._smoke_groups
             self._cfg['fire_groups']  = self._fire_groups
+            for legacy, _new_field in self._LEGACY_SMOKE_KEYS:
+                self._cfg.pop(legacy, None)
+            for legacy, _new_field in self._LEGACY_FIRE_KEYS:
+                self._cfg.pop(legacy, None)
+            for legacy in self._LEGACY_DROPPED_KEYS:
+                self._cfg.pop(legacy, None)
             if self._normals_slider:
                 self._cfg['normals_length']          = float(self._normals_slider.value)
             if self._normals_mode_cb is not None:
