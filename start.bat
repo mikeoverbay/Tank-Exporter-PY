@@ -17,16 +17,26 @@
 
 cd /d "%~dp0"
 
-where python >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo ERROR: Python is not on PATH.  Install Python 3.10+ or run go.bat.
-    echo.
-    pause
-    exit /b 1
+:: Prefer `py -3` over bare `python` -- on Windows `python` often
+:: resolves to the WindowsApps Store stub rather than the real
+:: install (see go.bat for the long version of this gotcha).
+where py >nul 2>&1
+if not errorlevel 1 (
+    set "PY=py -3"
+) else (
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Neither `py` nor `python` is on PATH.
+        echo Install Python 3.10+ or run go.bat.
+        echo.
+        pause
+        exit /b 1
+    )
+    set "PY=python"
 )
 
-python tankExporterPy.py %*
+%PY% tankExporterPy.py %*
 
 if errorlevel 1 (
     echo.

@@ -21,11 +21,20 @@ cd /d "%~dp0"
 set "REQ_DIR=%~dp0requirements"
 set "BACKUP_DIR=%~dp0resources\requirements_backup"
 
-where python >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Python is not on PATH.
-    pause
-    exit /b 1
+:: Prefer `py -3` over bare `python` -- on Windows `python` often
+:: resolves to the WindowsApps Store stub rather than the real install.
+:: See go.bat for the long version of this gotcha.
+where py >nul 2>&1
+if not errorlevel 1 (
+    set "PY=py -3"
+) else (
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo ERROR: Neither `py` nor `python` is on PATH.
+        pause
+        exit /b 1
+    )
+    set "PY=python"
 )
 
 if not exist "%BACKUP_DIR%\requirements.txt" (
@@ -51,7 +60,7 @@ xcopy /E /I /Y "%BACKUP_DIR%" "%REQ_DIR%" >nul
 echo.
 echo Force-reinstalling every dependency ...
 echo.
-python -m pip install --upgrade --force-reinstall ^
+%PY% -m pip install --upgrade --force-reinstall ^
     --find-links "%REQ_DIR%" ^
     -r "%REQ_DIR%\requirements.txt"
 if errorlevel 1 (
@@ -63,7 +72,7 @@ if errorlevel 1 (
 )
 
 :: -------- Verify ------------------------------------------------------------
-python -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
+%PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
 if errorlevel 1 (
     echo.
     echo ERROR: reinstall succeeded but imports are still failing.

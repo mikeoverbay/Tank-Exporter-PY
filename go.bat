@@ -31,21 +31,55 @@ cd /d "%~dp0"
 set "REQ_DIR=%~dp0requirements"
 set "BACKUP_DIR=%~dp0resources\requirements_backup"
 
-:: -------- 1. Python availability --------------------------------------------
-where python >nul 2>&1
-if errorlevel 1 (
+:: -------- 1. Python launcher discovery --------------------------------------
+::  Prefer `py -3` (the official Windows Python launcher bundled with
+::  every python.org installer).  It explicitly skips the
+::  WindowsApps\python.exe stub that ships with Windows 10/11 -- a stub
+::  whose only behaviour is opening the Microsoft Store, but which
+::  comes BEFORE the real Python 3.x install on most users' PATH.
+::  Without this, `python -c "import pygame..."` finds the stub, fails
+::  the probe, and we trip into the install path against the wrong
+::  interpreter.  Detected one user with three pythons on PATH:
+::    WindowsApps\python.exe (stub) -> Python 3.7 -> Python 3.13
+::  py -3 routes to 3.13; bare `python` resolves to the stub and the
+::  install never sticks.
+::
+::  Fall back to bare `python` only when `py` is missing entirely
+::  (rare -- some Anaconda installs skip it).
+where py >nul 2>&1
+if not errorlevel 1 (
+    set "PY=py -3"
+) else (
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Neither `py` nor `python` found on PATH.
+        echo Install Python 3.10 or newer from https://www.python.org/downloads/
+        echo and re-run go.bat.
+        echo.
+        pause
+        exit /b 1
+    )
+    set "PY=python"
+)
+
+:: Resolve to an absolute path so subsequent `pip install --user` /
+:: WindowsApps redirection can't bite us mid-script.
+for /f "delims=" %%i in ('%PY% -c "import sys; print(sys.executable)" 2^>nul') do set "PY_EXE=%%i"
+if "%PY_EXE%"=="" (
     echo.
-    echo ERROR: Python is not on PATH.
-    echo Install Python 3.10 or newer from https://www.python.org/downloads/
-    echo and re-run go.bat.
+    echo ERROR: %PY% reported no executable.  Try running:
+    echo     %PY% --version
+    echo manually to see what's wrong.
     echo.
     pause
     exit /b 1
 )
+echo Using Python: %PY_EXE%
 
 :: -------- 2. Quick import probe ---------------------------------------------
 ::  Print nothing on success; non-zero exit triggers the install path.
-python -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
+%PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
 if not errorlevel 1 goto :launch
 
 echo.
@@ -87,14 +121,14 @@ if not exist "%BACKUP_DIR%\requirements.txt" (
 ::  there are no wheels (find-links missing files just no-ops).
 echo.
 echo Upgrading pip ...
-python -m pip install --upgrade pip
+%PY% -m pip install --upgrade pip
 if errorlevel 1 (
     echo WARNING: pip upgrade failed -- continuing with the existing pip.
 )
 
 echo.
 echo Installing dependencies ...
-python -m pip install --find-links "%INSTALL_SRC%" -r "%INSTALL_SRC%\requirements.txt"
+%PY% -m pip install --find-links "%INSTALL_SRC%" -r "%INSTALL_SRC%\requirements.txt"
 if errorlevel 1 (
     echo.
     echo ERROR: pip install failed.  See output above.
@@ -104,7 +138,7 @@ if errorlevel 1 (
 )
 
 :: -------- 3d. Verify --------------------------------------------------------
-python -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
+%PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
 if errorlevel 1 (
     echo.
     echo ERROR: install reported success but imports are still failing.
@@ -124,5 +158,5 @@ rmdir /S /Q "%REQ_DIR%"
 echo.
 echo Launching Tank Exporter PY ...
 echo.
-python tankExporterPy.py %*
+%PY% tankExporterPy.py %*
 endlocal

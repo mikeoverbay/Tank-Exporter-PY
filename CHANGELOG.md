@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Bat-file launcher: switch from `python` to `py -3` (1.57.1)
+
+Bug: on Windows 10/11 the `python` command on PATH usually
+resolves to `C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\
+python.exe` -- a Windows-Store redirector stub that opens the
+Microsoft Store rather than running an actual Python.  Even users
+with a real python.org install have the stub ahead of it on PATH
+(it's added by Windows itself).  Result: `go.bat`'s import probe
+ran against the stub, failed (no deps in the stub's env even when
+it does run), and the install path then `pip install`-ed against
+the wrong interpreter (or against nothing if the stub redirected
+to the Store).  Net effect: dependencies "would not install."
+
+Fix: every bat file now prefers `py -3` over `python`.  The `py`
+launcher is bundled with the python.org installer, ignores the
+WindowsApps stub by design, and routes to the user's real
+Python 3.x install.  Falls back to bare `python` only when `py`
+itself isn't found (rare; some Anaconda installs).  go.bat also
+prints the resolved interpreter path on launch so future
+"is it picking the right Python?" questions answer themselves at
+a glance:
+
+    Using Python: C:\Users\<user>\AppData\Local\Programs\Python\
+                  Python313\python.exe
+
+Files: `go.bat`, `start.bat`, `uninstall.bat`, `reinstall.bat`.
+
 ### Procedural terrain (tank stops floating in space) (1.57.0)
 
 Tanks were rendering against a skybox with nothing under them.
