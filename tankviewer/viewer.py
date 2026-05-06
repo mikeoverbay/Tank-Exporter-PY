@@ -1132,15 +1132,41 @@ class Viewer:
                     except (TypeError, ValueError):
                         pass
 
-    def _save_active_group(self):
-        """Read the live slider values back into the active group dict.
+    def _persist_all_sliders(self, write_json=True):
+        """Single source of truth for slider persistence.
 
-        Run before switching `self._active_group` (so the user's
-        in-progress edits aren't lost) and at exit (so they persist).
-        Touches `self._smoke_groups` + `self._fire_groups`; the radio
-        checkbox state isn't touched here.
+        Snapshots EVERY slider's current value onto `self._cfg`.
+        Per-engine-class sliders (smoke / fire) get routed into
+        `self._smoke_groups[self._active_group]` /
+        `self._fire_groups[self._active_group]` -- the routing key
+        is `self._active_group` (the engine-class auto-wired from
+        the loaded tank's `<exhaust><pixie>` value, e.g. `gas_small`,
+        `diesel_large`).  Global sliders (Light / Ambient / Normals)
+        land in flat config keys regardless of engine class.
+
+        Called from three places, all going through this same routine
+        so the routing logic can't drift:
+
+            1. Mouse-up after a slider drag (`handle_input`) --
+               pass `write_json=True` so tweaks persist instantly.
+            2. Per-frame mirror in `render()` -- `write_json=False`
+               (no disk I/O on every frame; just keeps the dicts
+               in sync so a `_set_active_group` swap doesn't lose
+               in-progress edits).
+            3. `cleanup()` on window close -- `write_json=False`
+               since cleanup writes its own JSON after also
+               capturing checkbox state + dropping legacy keys.
+
+        Args:
+            write_json (bool): when True, also writes self._cfg to
+                disk via _config.save.  Failures are logged, not
+                raised -- a missed mid-session save still leaves
+                cleanup()'s on-exit save as a fallback.
         """
-        g = self._smoke_groups.get(self._active_group)
+        # ---- Per-engine-class sliders -- route by self._active_group
+        # (the engine level) into the matching slot.
+        engine = self._active_group
+        g = self._smoke_groups.get(engine)
         if g is not None:
             if self._smoke_start_slider:
                 g['start_size']       = float(self._smoke_start_slider.value)
@@ -1152,9 +1178,28 @@ class Viewer:
                 g['fade_start_frame'] = float(self._smoke_fade_slider.value)
             if self._smoke_fade_end_slider:
                 g['fade_end_frame']   = float(self._smoke_fade_end_slider.value)
-        gf = self._fire_groups.get(self._active_group)
+        gf = self._fire_groups.get(engine)
         if gf is not None and self._fire_size_slider:
             gf['size'] = float(self._fire_size_slider.value)
+        # Re-link the dicts onto self._cfg.  Idempotent when nothing
+        # changed; needed when first establishing the link or when
+        # a fresh dict was rebuilt by `_merge_group_dict`.
+        self._cfg['smoke_groups'] = self._smoke_groups
+        self._cfg['fire_groups']  = self._fire_groups
+
+        # ---- Global (non-engine-keyed) sliders -- flat config keys.
+        if self._metal_slider:
+            self._cfg['light_value']    = float(self._metal_slider.value)
+        if self._shine_slider:
+            self._cfg['ambient_value']  = float(self._shine_slider.value)
+        if self._normals_slider:
+            self._cfg['normals_length'] = float(self._normals_slider.value)
+
+        if write_json:
+            try:
+                _config.save(self._cfg)
+            except Exception as exc:
+                print(f"[viewer] slider persist write failed: {exc}")
 
     def _load_active_group(self):
         """Push the active group's stored values onto the sliders."""
@@ -1174,41 +1219,6 @@ class Viewer:
         if gf is not None and self._fire_size_slider:
             self._fire_size_slider.value = gf['size']
 
-    def _persist_slider_state(self):
-        """Snapshot every slider's value into self._cfg + write the JSON.
-
-        Called from `handle_input` whenever the user releases the
-        mouse after dragging a slider so tweaks persist instantly
-        instead of only at window close.  Mirrors the slider-related
-        portion of cleanup()'s save block -- if you add a new slider
-        whose value persists, update both places.
-
-        Cheap (one JSON encode + write per release; release fires once
-        per drag, NOT per pixel of motion).  Disk error during the
-        write is logged but doesn't bubble up -- a failed mid-session
-        save still leaves cleanup()'s on-exit save as a fallback.
-        """
-        try:
-            # Per-engine-class smoke / fire dicts -- snapshot the
-            # active class first so the in-progress drag lands in
-            # self._smoke_groups / self._fire_groups before we copy
-            # them to self._cfg.
-            self._save_active_group()
-            self._cfg['smoke_groups'] = self._smoke_groups
-            self._cfg['fire_groups']  = self._fire_groups
-            # Lighting + normals sliders persist alongside the
-            # smoke / fire ones since the user releases ANY slider
-            # via the same mouse-up event.
-            if self._metal_slider:
-                self._cfg['light_value']    = float(self._metal_slider.value)
-            if self._shine_slider:
-                self._cfg['ambient_value']  = float(self._shine_slider.value)
-            if self._normals_slider:
-                self._cfg['normals_length'] = float(self._normals_slider.value)
-            _config.save(self._cfg)
-        except Exception as exc:
-            print(f"[viewer] mouse-up slider persist failed: {exc}")
-
     def _set_active_group(self, group):
         """Switch which engine-class the smoke / fire sliders edit.
 
@@ -1227,7 +1237,11 @@ class Viewer:
             group = self._DEFAULT_PIXIE_CLASS
         if group == self._active_group:
             return
-        self._save_active_group()
+        # Capture the OUTGOING engine class's slider values into its
+        # group slot before we re-key.  No JSON write here -- the
+        # mouse-up handler already persisted on release; this is just
+        # the in-memory snapshot.
+        self._persist_all_sliders(write_json=False)
         self._active_group = group
         self._load_active_group()
 
@@ -5478,7 +5492,7 @@ class Viewer:
                     slider_was_active = self.ui._active_slider is not None
                     self.ui.handle_mouse_up()
                     if slider_was_active:
-                        self._persist_slider_state()
+                        self._persist_all_sliders(write_json=True)
 
             elif event.type == MOUSEMOTION:
                 self.ui.update_hover(*event.pos)
@@ -5869,14 +5883,11 @@ class Viewer:
             self.hp_lines.render(self.color_shader, view, proj)
 
         # ---- Mirror live slider values back into the active engine
-        # class.  The sliders ARE the canonical store while a tank is
-        # loaded; this just makes sure every per-frame tweak is
-        # captured into self._smoke_groups[self._active_group] (and
-        # self._fire_groups[...]) so a subsequent load of a different
-        # tank can persist it via _save_active_group.  Cheap (six
-        # float assignments) and keeps the cleanup() save path
-        # universally correct without extra mouse-up plumbing.
-        self._save_active_group()
+        # class.  Single-source-of-truth sub: routing logic lives
+        # inside `_persist_all_sliders`, which uses
+        # `self._active_group` (the engine class) as the routing
+        # ref.  No JSON write here -- mouse-up handles that.
+        self._persist_all_sliders(write_json=False)
 
         # ---- Smoke particles ----------------------------------------------
         # Update + render the billboard flipbook system.  Update advances
@@ -6114,31 +6125,23 @@ class Viewer:
 
         # Persist slider values so the next session restores them.
         # Done before GPU cleanup so a crash inside cleanup doesn't lose the
-        # settings.  Other persisted keys (paths, info-panel state) were
-        # written eagerly when changed; sliders only flush on exit.
+        # settings.  Mouse-up has already been writing the JSON on
+        # every drag release (see handle_input + _persist_all_sliders),
+        # so this final pass mostly catches non-slider state
+        # (checkboxes, debug flag, legacy-key drops).
         try:
-            if self._metal_slider:
-                self._cfg['light_value']      = float(self._metal_slider.value)
-            if self._shine_slider:
-                self._cfg['ambient_value']    = float(self._shine_slider.value)
-            # Smoke + fire settings are now per-engine-class dicts.
-            # Snapshot the live sliders into the active class first,
-            # then write both dicts as a unit AND delete every
-            # legacy single-slot key so the JSON ends up clean (no
-            # leftover smoke_start_size / fire_fps / etc.).  The
-            # legacy values were already migrated into the new
-            # dicts at startup by _migrate_legacy_smoke_fire_config.
-            self._save_active_group()
-            self._cfg['smoke_groups'] = self._smoke_groups
-            self._cfg['fire_groups']  = self._fire_groups
+            # Snapshot every slider value into self._cfg via the
+            # single-source-of-truth sub.  No write here -- we'll
+            # save once below after also folding in the checkboxes.
+            self._persist_all_sliders(write_json=False)
+            # Drop legacy single-slot keys (pre-v1.46 schema).
             for legacy, _new_field in self._LEGACY_SMOKE_KEYS:
                 self._cfg.pop(legacy, None)
             for legacy, _new_field in self._LEGACY_FIRE_KEYS:
                 self._cfg.pop(legacy, None)
             for legacy in self._LEGACY_DROPPED_KEYS:
                 self._cfg.pop(legacy, None)
-            if self._normals_slider:
-                self._cfg['normals_length']          = float(self._normals_slider.value)
+            # Non-slider widgets that share the same write cycle.
             if self._normals_mode_cb is not None:
                 self._cfg['normals_per_vertex']      = bool(self._normals_mode_cb.checked)
             # Master debug-overlay flag (Debug checkbox).  Replaces

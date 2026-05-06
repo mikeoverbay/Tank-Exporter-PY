@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Single-source-of-truth slider persist (1.50.2)
+
+Refactored slider persistence into one routine, `_persist_all_sliders`,
+that uses the engine class (`self._active_group`) as the routing
+reference.  Replaces the prior `_save_active_group` /
+`_persist_slider_state` / inline cleanup logic which had three
+copies of the same routing logic that could (and would) drift.
+
+The new sub:
+
+* Reads `self._active_group` (the engine level: `gas_small`,
+  `diesel_large`, etc.) once.
+* Routes per-engine slider values (smoke / fire) into the matching
+  slot of `self._smoke_groups` / `self._fire_groups`.
+* Sends global sliders (Light / Ambient / Normals) to flat keys.
+* Optionally writes JSON via `_config.save` (caller's choice).
+
+Three callers now go through it:
+
+| Caller             | `write_json` |
+| ------------------ | ------------ |
+| Mouse-up release   | True         |
+| Per-frame mirror   | False        |
+| `cleanup()` exit   | False (cleanup writes once at the end after also folding in checkboxes + legacy-key drops) |
+
+Files: `tankviewer/viewer.py`.
+
 ### Persist sliders on mouse-up, not just on window close (1.50.1)
 
 Slider tweaks used to write to `tankExporterPy.json` only when the
