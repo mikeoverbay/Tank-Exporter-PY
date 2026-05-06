@@ -9,6 +9,48 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Fuzzy tank-name match + auto tank-list rebuild (1.52.0)
+
+Two related FBX-import quality-of-life fixes:
+
+**1. Fuzzy match on tank-name lookup.**  When an imported FBX's
+basename doesn't match any nation's `list.xml` exactly,
+`_resolve_tank_nation` now falls back to
+`difflib.get_close_matches` against every basename across every
+nation (cutoff 0.6, top match wins).  Smoke emitters / hardpoints /
+exhaust spec all light up for files that previously fell through
+silently because the name wasn't byte-identical.
+
+Example match (the case that prompted the fix):
+* FBX named `Type 59.fbx` -> WoT XML `Ch01_Type59.xml`
+* `T-34-85_typo` -> `T-34-85_2`
+
+The substituted basename is logged so the user sees what was
+matched.  Cutoff of 0.6 catches single-letter typos and missing
+prefixes without false-matching unrelated names (`lion` doesn't
+match `It21_Lion`; you'd want `It21_Lion` or `Lion_KL_3DSt`).
+
+**2. Tank list rebuild piggy-backs on ItemList rebuild.**  Every
+time `_rebuild_itemlist_now` finishes a successful
+`TheItemList.xml` rebuild, it now also calls
+`_rebuild_tank_list_now` to dump a flat `tanks_index.txt` next
+to the project's `tanks.txt`.  Format is one tab-separated row
+per tank:
+
+    british     1   GB01_Vickers_Medium_Mk_I
+    chinese     10  Ch28_WZ_111_5A
+    ...
+
+Sorted by nation -> tier -> basename so diffs across game
+patches stay readable.  Atomic write (`<path>.tmp` + os.replace).
+File regenerated from scratch on every rebuild so it always
+reflects the current `list.xml` state of the user's WoT install.
+
+Failure of the tank-list step is non-fatal -- ItemList itself
+remains the critical artefact.
+
+Files: `tankviewer/viewer.py`.
+
 ### Auto-upgrade pre-7.1 FBX on import (1.51.0)
 
 Blender's FBX importer rejects binary FBX files with header

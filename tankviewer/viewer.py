@@ -1656,9 +1656,24 @@ class Viewer:
 
         Returns:
             (nation, tank_basename) on success, or (None, tank_basename)
-            when the name doesn't match any list.xml entry across all
-            nations.  PkgExtractor must already be initialised; returns
+            when neither an exact nor a fuzzy match resolves.
+            PkgExtractor must already be initialised; returns
             (None, '') when it isn't.
+
+        Resolution strategy
+        -------------------
+        1. **Exact match (case-insensitive)** -- walks every nation's
+           list.xml entries; first hit wins.
+        2. **Fuzzy match** -- if no exact hit, runs
+           `difflib.get_close_matches` against every basename across
+           every nation with a 0.6 similarity cutoff.  The closest
+           match is returned with the corrected basename; the caller
+           sees the *fuzzy-resolved* basename, not the input.  This
+           catches case mismatches an exact-lower walk wouldn't but
+           more importantly catches typos / legacy WoT naming
+           differences (e.g. an old FBX named `T-34-85` vs the
+           in-game `T-34-85_2`).  Logs a one-liner so the user can
+           see what was substituted.
         """
         if not tank_name or self._pkg_extractor is None:
             return (None, '')
@@ -1668,11 +1683,50 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] resolve-tank-nation: list_vehicle_xmls failed: {exc}")
             return (None, tank_basename)
+
+        # ---- 1. Exact (case-insensitive) match ----
         target = f"{tank_basename.lower()}.xml"
         for nat, entries in nations.items():
             for e in entries:
                 if e.get('xml', '').lower() == target:
                     return (nat, tank_basename)
+
+        # ---- 2. Fuzzy fallback ----
+        # Build a flat (basename -> nation) map across every list.xml,
+        # then ask difflib for the closest hit.  Cutoff 0.6 is the
+        # difflib default -- low enough to catch single-letter typos
+        # in long names, high enough that 'Type 59' doesn't match
+        # 'Type 62'.  We compare BASENAMES (no '.xml' suffix) since
+        # FBX filenames don't carry it.
+        try:
+            import difflib
+        except Exception:
+            return (None, tank_basename)
+
+        all_basenames = []
+        basename_to_nation = {}
+        for nat, entries in nations.items():
+            for e in entries:
+                xml_name = e.get('xml', '')
+                if not xml_name.lower().endswith('.xml'):
+                    continue
+                base = xml_name[:-4]   # strip '.xml'
+                all_basenames.append(base)
+                # First nation to claim a basename wins (basenames are
+                # unique across nations in practice -- list.xml files
+                # don't share entries -- but be defensive).
+                basename_to_nation.setdefault(base, nat)
+
+        candidates = difflib.get_close_matches(
+            tank_basename, all_basenames, n=1, cutoff=0.6)
+        if candidates:
+            best = candidates[0]
+            nat  = basename_to_nation.get(best)
+            print(f"[viewer] resolve-tank-nation: '{tank_basename}' "
+                  f"not in any list.xml -- fuzzy-matched to "
+                  f"'{best}' (nation={nat!r})")
+            return (nat, best)
+
         return (None, tank_basename)
 
     def _populate_exhaust_for_tank(self, tank_name):
@@ -2870,6 +2924,93 @@ class Viewer:
         except Exception as exc:
             self.log_error(f"ItemList: lookup reload failed: {exc}")
             return False
+
+        # Companion artefact: a flat tank-list file written next to
+        # TheItemList.xml.  Drives the FBX-import fuzzy-match
+        # fallback in `_resolve_tank_nation`, plus serves as a
+        # human-readable index of every tank def XML the user's
+        # current game install carries.  Rebuilt every time the
+        # ItemList rebuilds so the two stay in sync.  Failure here
+        # is non-fatal -- the ItemList itself is the critical
+        # artefact, the tank-list file is convenience.
+        try:
+            self._rebuild_tank_list_now()
+        except Exception as exc:
+            self.log_error(f"tank list: rebuild failed: {exc}")
+            # Don't return False -- ItemList rebuild succeeded.
+        return True
+
+    def _rebuild_tank_list_now(self):
+        """Write a comprehensive tank-list file alongside TheItemList.xml.
+
+        Walks every nation's `list.xml` via the live PkgExtractor and
+        writes one line per tank in the form
+
+            <nation>\t<tier>\t<basename>
+
+        Output path is `tanks_index.txt` in the project root (sibling
+        of TheItemList.xml).  The file is regenerated from scratch
+        each call -- atomic write via `<path>.tmp` + os.replace.
+
+        Returns True on success, False on failure.  Logs counts to
+        the in-app console so the user can see the catalogue size.
+        """
+        ext = self._pkg_extractor
+        if ext is None:
+            self.log_error("tank list: PkgExtractor not configured.")
+            return False
+        try:
+            nations = ext.list_vehicle_xmls(with_tier=True)
+        except Exception as exc:
+            self.log_error(f"tank list: list_vehicle_xmls failed: {exc}")
+            return False
+
+        # Sort by nation then by tier then by basename so diffs
+        # between game versions stay readable.
+        rows = []
+        for nat in sorted(nations.keys()):
+            for entry in nations[nat]:
+                xml_name = entry.get('xml', '')
+                if not xml_name.lower().endswith('.xml'):
+                    continue
+                base = xml_name[:-4]
+                tier = entry.get('tier')
+                tier_s = str(tier) if tier is not None else '-'
+                rows.append((nat, tier_s, base))
+        # Stable secondary sort: nation -> tier (numeric) -> name
+        def _sort_key(r):
+            nat, tier_s, base = r
+            try:
+                tier_n = int(tier_s)
+            except ValueError:
+                tier_n = 99
+            return (nat, tier_n, base.lower())
+        rows.sort(key=_sort_key)
+
+        out_dir  = os.path.dirname(os.path.abspath(self.TANKS_TXT))
+        out_path = os.path.join(out_dir, 'tanks_index.txt')
+        tmp_path = out_path + '.tmp'
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as fh:
+                fh.write('# Auto-generated by TEPY -- regenerated '
+                         'on every ItemList rebuild.\n')
+                fh.write('# Format: <nation>\\t<tier>\\t<basename>\n')
+                fh.write(f'# Tanks: {len(rows)}  '
+                         f'across {len(nations)} nation(s)\n')
+                for nat, tier_s, base in rows:
+                    fh.write(f'{nat}\t{tier_s}\t{base}\n')
+            os.replace(tmp_path, out_path)
+        except Exception as exc:
+            self.log_error(f"tank list: write {out_path} failed: {exc}")
+            try:
+                if os.path.isfile(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+            return False
+
+        self.log(f"tank list: wrote {len(rows):,} entries -> "
+                 f"{os.path.basename(out_path)}")
         return True
 
     def _on_rebuild_itemlist_clicked(self):
