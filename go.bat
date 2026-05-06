@@ -126,23 +126,61 @@ if errorlevel 1 (
     echo WARNING: pip upgrade failed -- continuing with the existing pip.
 )
 
+:: Try a normal (system / venv) install first; if pip bails out --
+:: the most common failure mode on Windows is a Python installed
+:: under Program Files which the current user can't write to --
+:: retry with `--user` so the packages land under
+:: %APPDATA%\Python\... where the user always has write access.
+:: We do BOTH attempts before giving up so the verify probe below
+:: has a chance whichever path succeeded.
 echo.
 echo Installing dependencies ...
 %PY% -m pip install --find-links "%INSTALL_SRC%" -r "%INSTALL_SRC%\requirements.txt"
-if errorlevel 1 (
+set "INSTALL_RC=!errorlevel!"
+
+if not "!INSTALL_RC!"=="0" (
     echo.
-    echo ERROR: pip install failed.  See output above.
+    echo Default install failed (rc=!INSTALL_RC!).  Retrying with --user
+    echo so the packages land under your AppData rather than a system
+    echo Python's protected site-packages ...
+    echo.
+    %PY% -m pip install --user --find-links "%INSTALL_SRC%" -r "%INSTALL_SRC%\requirements.txt"
+    set "INSTALL_RC=!errorlevel!"
+)
+
+if not "!INSTALL_RC!"=="0" (
+    echo.
+    echo ERROR: pip install failed even with --user fallback.
+    echo See pip output above for the specific failing package.
     echo The requirements\ folder has been left in place so you can retry.
+    echo.
+    echo Manual fallback ^(run from any cmd window^):
+    echo     %PY% -m pip install --user pygame PyOpenGL numpy Pillow
+    echo.
     pause
     exit /b 1
 )
 
 :: -------- 3d. Verify --------------------------------------------------------
+::  Probe each package separately so a failure points at the
+::  actual missing one instead of a generic "imports failing".
 %PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo ERROR: install reported success but imports are still failing.
-    echo Run uninstall.bat, then reinstall.bat to start over.
+    echo ERROR: install reported success but imports still fail.
+    echo Diagnostic dump:
+    echo.
+    echo    sys.executable / sys.path:
+    %PY% -c "import sys; print('     ', sys.executable); [print('     ', p) for p in sys.path]"
+    echo.
+    echo    per-package probe:
+    %PY% -c "import importlib; [print('      ', m, ':', 'OK' if importlib.util.find_spec(m) else 'MISSING') for m in ('pygame','OpenGL','numpy','PIL')]"
+    echo.
+    echo If a package shows MISSING, the install went to a different
+    echo Python than the launcher is using.  Try:
+    echo     %PY% -m pip install --user pygame PyOpenGL numpy Pillow
+    echo from a cmd window manually.
+    echo.
     pause
     exit /b 1
 )

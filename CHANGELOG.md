@@ -9,6 +9,27 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### go.bat: --user fallback + per-package failure diagnostics (1.57.2)
+
+Hardening on top of 1.57.1's `py -3` switch.  When pip's default
+install fails (the most common Windows cause: a Python under
+`C:\Program Files\` whose `site-packages\` the current user can't
+write to), `go.bat` now retries with `--user` so the packages
+land under `%APPDATA%\Python\...`.  If that ALSO fails, the
+script dumps:
+
+  * the resolved `sys.executable` and `sys.path` so you can see
+    which Python pip was running against,
+  * a per-package `find_spec` probe so you see exactly which
+    of `pygame / OpenGL / numpy / PIL` is missing,
+  * a copy-paste manual fallback command.
+
+Previously a partial-failure install (e.g. numpy didn't pick up a
+cp313 wheel) would show "imports still failing" with no detail
+and the user was stuck rerunning uninstall/reinstall blind.
+
+Files: `go.bat`.
+
 ### Bat-file launcher: switch from `python` to `py -3` (1.57.1)
 
 Bug: on Windows 10/11 the `python` command on PATH usually
