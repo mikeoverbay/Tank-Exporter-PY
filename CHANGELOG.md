@@ -9,6 +9,34 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Show Fire debug outlines (1.49.0)
+
+New checkbox in the right control panel: **Show Fire** -- when on,
+draws a yellow rectangle around each fire billboard tracing the
+quad's four world-space corners.  Useful for verifying HP_Fire
+placement, billboard size, and the bottom-anchored math after the
+v1.46.1 corner-offset fix.  Off by default; persisted in
+`tankExporterPy.json` under `show_fire_cards`.
+
+How it works:
+
+* New `LineBatch` instance `self.fire_outlines` lives next to
+  `self.hp_lines`.
+* Each frame, when the toggle is on AND `fire_billboards.emitters`
+  isn't empty, the render loop computes four corners per emitter
+  using the same camera-facing math the vertex shader uses
+  (`pos +/- cam_right * 0.5*size + cam_up * (0 or 1)*size`),
+  pushes them as four `GL_LINES` segments per quad, and renders
+  via the existing `SimpleColorShader`.
+* Cheap (~4 segments x 1-4 emitters = 4-16 segments per frame),
+  so no perf consideration.
+
+Layout: `Show Fire` sits on its own row below `PerVtx | Show HP`
+in the right panel; `RIGHT_CONTROLS_H` auto-grows by one
+`CB_ROW_H` to fit.
+
+Files: `tankviewer/viewer.py`.
+
 ### Ship the default config (1.48.3)
 
 `tankExporterPy.json` is now tracked + shipped with the repo so a

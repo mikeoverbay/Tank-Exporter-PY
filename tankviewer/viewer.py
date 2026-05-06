@@ -566,6 +566,14 @@ class Viewer:
         # 0.5-unit ray showing the smoke emit direction.  Re-uploaded on
         # every load_vehicle call.
         self.hp_lines     = LineBatch(line_width=2.5)
+        # Line batch for fire-billboard outlines (debug-only).  When
+        # the "Show Fire" checkbox is on, render() rebuilds this from
+        # `self.fire_billboards.emitters` each frame -- four segments
+        # per quad forming a yellow rectangle that traces the
+        # bottom-anchored billboard the textured pass draws.  Lets
+        # the user verify HP_Fire placement, billboard size, and the
+        # camera-facing math at a glance.
+        self.fire_outlines = LineBatch(line_width=1.5)
 
         # ---- Particle system (engine smoke, billboard flipbook) ------------
         # Flipbook is N PNG frames (256x256 RGBA) at resources/smoke/.
@@ -757,12 +765,22 @@ class Viewer:
         self._invert_metal_cb    = None
         self._invert_shine_cb    = None
         self._show_hp_cb         = None
+        # Debug: outline the fire billboards as yellow rectangles
+        # tracing each card's four corners.  Off by default; persisted
+        # in config under 'show_fire_cards'.  See render() for the
+        # per-frame outline build.
+        self._show_fire_cb       = None
 
         # New: hardpoint-marker visibility (orange spheres + cyan
         # direction vectors at exhaust nodes).  Persisted in config.
         # Default off -- the data is still populated on every load so
         # the toggle just gates the rendering.
         self._show_hardpoints = bool(self._cfg.get('show_hardpoints', False))
+        # Debug-overlay flag for fire billboard outlines.  Mirrored
+        # into / out of self._show_fire_cb each frame so the checkbox
+        # state and the rendering decision stay in sync (same
+        # pattern as `_show_hardpoints` <-> `_show_hp_cb`).
+        self._show_fire_cards = bool(self._cfg.get('show_fire_cards', False))
 
         # Per-engine-class smoke / fire settings.  Loaded from config
         # (each class is a dict of float fields) and merged with the
@@ -1358,6 +1376,11 @@ class Viewer:
         self._show_hp_cb = self.ui.add_checkbox(
             'Show HP', cx, cy6 - cb_size // 2, cb_size,
             checked=self._show_hardpoints, group_id='smoke')
+        # Fire-card outline toggle (debug).  Same panel + same row
+        # pattern as Show HP; final position set by _layout_widgets.
+        self._show_fire_cb = self.ui.add_checkbox(
+            'Show Fire', cx, cy6 - cb_size // 2, cb_size,
+            checked=self._show_fire_cards, group_id='smoke')
 
     # ------------------------------------------------------------------
     # Window / GL state
@@ -5240,8 +5263,9 @@ class Viewer:
         CB_ROW_H      = 16     # checkbox cell + tiny gap
         BOTTOM_MARGIN_R = 10
         n_sliders     = sum(1 for sl in right_sliders if sl)
+        # Two checkbox rows: row 1 = PerVtx + Show HP, row 2 = Show Fire.
         required_h    = (TOP_PAD + n_sliders * ROW_H
-                         + CB_ROW_H + BOTTOM_MARGIN_R)
+                         + 2 * CB_ROW_H + BOTTOM_MARGIN_R)
         self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
                                      required_h)
 
@@ -5283,6 +5307,12 @@ class Viewer:
             self._show_hp_cb.x = right_x + 150
             self._show_hp_cb.y = cb_row_y
             self._show_hp_cb.visible = True
+        # Show Fire sits on its own row below the PerVtx / Show HP
+        # row.  Same left margin as PerVtx; CB_ROW_H below.
+        if self._show_fire_cb:
+            self._show_fire_cb.x = right_x + 8
+            self._show_fire_cb.y = cb_row_y + CB_ROW_H
+            self._show_fire_cb.visible = True
 
         # All other widgets stay visible
         for w in self.ui.sliders + self.ui.checkboxes:
@@ -5867,6 +5897,43 @@ class Viewer:
             self.fire_billboards.update(self._frame_dt)
             self.fire_billboards.render(self.particle_shader, view, proj)
 
+        # ---- Fire-card outlines (debug) ----------------------------------
+        # Mirror the Show Fire checkbox into the boolean each frame so
+        # toggling it lights up the outlines without an event hook.
+        if self._show_fire_cb is not None:
+            self._show_fire_cards = bool(self._show_fire_cb.checked)
+        if (self._show_fire_cards
+                and self.fire_billboards is not None
+                and self.fire_billboards.emitters):
+            # Mirror the bottom-anchored offsets the textured pass uses
+            # (see particles.py / _CORNER_OFFSETS_BOTTOM): bottom edge
+            # straddles the HP_Fire point horizontally, top edge sits
+            # `size` units up along cam_up.  view is row-major so
+            # row 0 = camera right, row 1 = camera up.  Numbers come
+            # from view directly so the rectangle stays camera-facing
+            # exactly like the textured quad.
+            cam_right = view[0, :3]
+            cam_up    = view[1, :3]
+            size      = float(self.fire_billboards.size)
+            half_w    = 0.5 * size
+            top_h     = 1.0 * size
+            yellow    = (1.0, 1.0, 0.0)
+            segs = []
+            for em in self.fire_billboards.emitters:
+                pos = np.asarray(em['pos'], dtype=np.float32)
+                bl = pos - cam_right * half_w
+                br = pos + cam_right * half_w
+                tr = br  + cam_up    * top_h
+                tl = bl  + cam_up    * top_h
+                segs.append((tuple(bl), tuple(br), yellow))
+                segs.append((tuple(br), tuple(tr), yellow))
+                segs.append((tuple(tr), tuple(tl), yellow))
+                segs.append((tuple(tl), tuple(bl), yellow))
+            # LineBatch uploads + draws GL_LINES; cheap for the handful
+            # of HP_Fire points a tank carries (1-4 typical).
+            self.fire_outlines.update(segs)
+            self.fire_outlines.render(self.color_shader, view, proj)
+
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
         glViewport(0, 0, self.width, self.height)
@@ -6031,6 +6098,7 @@ class Viewer:
                 self._cfg['normals_per_vertex']      = bool(self._normals_mode_cb.checked)
             # Hardpoint marker visibility (Show HP checkbox in smoke panel)
             self._cfg['show_hardpoints']     = bool(self._show_hardpoints)
+            self._cfg['show_fire_cards']     = bool(self._show_fire_cards)
             _config.save(self._cfg)
         except Exception as exc:
             print(f"[viewer] config save (sliders) failed: {exc}")
@@ -6050,6 +6118,7 @@ class Viewer:
         self.light_sphere.cleanup()
         self.hp_sphere.cleanup()
         self.hp_lines.cleanup()
+        self.fire_outlines.cleanup()
         if self.smoke_particles is not None:
             self.smoke_particles.cleanup()
         if self.fire_smoke_particles is not None:
