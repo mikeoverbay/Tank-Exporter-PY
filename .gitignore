@@ -47,13 +47,16 @@ resources/smoke/
 # case anyone still has stale copies on disk.
 resources/fire_legacy_explosion/
 
-# Local user config -- the viewer writes pkg / res_mods paths +
-# per-engine-class smoke / fire tunings here on first run.  Both
-# the live filename and the legacy one are gitignored so a fresh
-# clone can't accidentally pick up someone else's machine paths.
-# (The legacy `tankviewer.json` was renamed to `tankExporterPy.json`
-# in v1.48.2; tankviewer/config.py auto-migrates on first run.)
-tankExporterPy.json
+# Default config SHIPS with the repo so new clones boot with sane
+# smoke / fire tunings + an obvious place to set their WoT paths.
+# The launcher's Set Paths dialog overwrites pkg_dir / res_mods /
+# lookup_xml on first run -- subsequent commits would push those
+# back upstream though, so don't `git add` your local copy unless
+# you intend to update the shipped defaults.
+#
+# `tankExporterPy.json` is TRACKED (no rule below).
+# `tankviewer.json` is the pre-v1.48.2 filename; gitignored so a
+# stale local copy from an older session never sneaks back in.
 tankviewer.json
 
 # requirements/ folder is consumed by go.bat on first install and

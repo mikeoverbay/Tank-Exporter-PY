@@ -9,6 +9,25 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Ship the default config (1.48.3)
+
+`tankExporterPy.json` is now tracked + shipped with the repo so a
+fresh clone boots with sane defaults instead of an empty config:
+
+* Per-engine-class `smoke_groups` and `fire_groups` filled with
+  the v1.46.0 built-in defaults plus any tuning the project owner
+  has dialled in.
+* `pkg_dir` / `res_mods` / `lookup_xml` carry the project owner's
+  paths -- the **Set Paths** dialog (left panel, IO group)
+  overwrites these on first launch so users point TEPY at their
+  own WoT install.
+
+`.gitignore` updated: `tankExporterPy.json` removed (now tracked),
+`tankviewer.json` (the pre-v1.48.2 name) still ignored so a stale
+file from an older session can't sneak back in.
+
+Files: `.gitignore`, `tankExporterPy.json`.
+
 ### Config rename + key-whitelist removal (1.48.2)
 
 Two related fixes that explain why users were still seeing old-format
