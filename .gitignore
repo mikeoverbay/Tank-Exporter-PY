@@ -3,6 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# AI-session handoff folder.  Holds notes the user wants kept on
+# the local working copy across Claude sessions but NOT pushed to
+# the public repo.  Self-managed by the AI at end-of-session.
+# Anything under hand_off/ is local-only; safe to wipe.
+hand_off/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
