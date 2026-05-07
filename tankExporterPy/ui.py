@@ -68,6 +68,13 @@ class UIButton:
         # when False.  Set by Viewer._on_resize so the info-panel
         # collapse spine hides the entire left-panel control block.
         self.visible = True
+        # Optional per-button accent.  When set, the button renders
+        # with this colour in its idle state instead of the default
+        # neutral grey, and a slightly brightened version on hover.
+        # Use for action buttons that want a category cue (Export
+        # = burnt orange, Import = olive, etc.).  None = default
+        # behaviour.  Tuple is (r, g, b, a) in 0..1.
+        self.accent_color = None
 
     def contains(self, mx, my):
         return self.x <= mx <= self.x + self.w and self.y <= my <= self.y + self.h
@@ -2477,6 +2484,16 @@ class UIManager:
                 # tree-row highlight so the user gets a consistent
                 # "this is on" cue across the whole UI.
                 col = (0.92, 0.45, 0.10, 1.0) if btn.hovered else (0.78, 0.33, 0.05, 1.0)
+            elif btn.accent_color is not None:
+                # Per-button accent override (Export, Import, ...).
+                # Brighten 25% on hover so the button still feels
+                # responsive even though it's not a toggle.
+                r, g, b, a = btn.accent_color
+                if btn.hovered:
+                    col = (min(1.0, r * 1.25), min(1.0, g * 1.25),
+                           min(1.0, b * 1.25), a)
+                else:
+                    col = (r, g, b, a)
             else:
                 col = (0.32, 0.32, 0.36, 1.0) if btn.hovered else (0.22, 0.22, 0.25, 1.0)
             self._solid(*col, btn.x, btn.y, btn.w, btn.h)

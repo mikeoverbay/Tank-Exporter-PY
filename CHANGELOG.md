@@ -9,6 +9,32 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Reorg Import / Export -- equal width, swapped order, accent colours (1.59.0)
+
+The IO group used to render Import as a 2-cell-wide button next
+to a 1-cell-wide Export, with Import on the left.  Both visually
+similar to the neutral-grey toggles around them.
+
+Now:
+* Both buttons span the full 3-cell row width -- guaranteed
+  identical size.
+* Export sits ABOVE Import (flipped from the previous order).
+* Per-button accent colour drives visual identity:
+    - **Export** -> burnt orange (0.65, 0.32, 0.10)
+                    "this exits the app's data boundary"
+    - **Import** -> olive       (0.42, 0.45, 0.18)
+                    "this brings data IN"
+  Hover state brightens the accent ~25%.  Active toggles still
+  use the existing global burnt-orange "this is on" colour --
+  accents only override the IDLE state.
+
+Implementation: new `UIButton.accent_color` field (None = default
+neutral grey).  Render path checks it before falling back to the
+old behaviour.  Other buttons unaffected; only Export and Import
+opt in via assignments in `_build_ui`.
+
+Files: `tankExporterPy/ui.py`, `tankExporterPy/viewer.py`.
+
 ### Tank-tree clicks dropped while a load is in flight (1.58.0)
 
 Tank loads take 1-7 seconds; previously the user could click a

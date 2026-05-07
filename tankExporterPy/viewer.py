@@ -1375,16 +1375,25 @@ class Viewer:
         # 'Export' opens a Save dialog and spawns Blender (--background)
         # to write FBX / GLB / GLTF / OBJ.  Disabled visually when no
         # tank is loaded -- the action callback also short-circuits.
-        self.ui.add_button(_('Export'), x, y, 70, h, active=False,
-                           action=self._on_export_clicked)
+        # Export button.  Accent: burnt orange (matches the
+        # selected-tree-row highlight; "this exits the app's data
+        # boundary" cue).
+        export_btn = self.ui.add_button(
+            _('Export'), x, y, 70, h, active=False,
+            action=self._on_export_clicked)
+        export_btn.accent_color = (0.65, 0.32, 0.10, 1.0)   # burnt orange
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Import' opens a file picker and spawns Blender to read an
         # FBX/GLB/OBJ back into the viewer's scene.  Round-trip companion
         # to Export -- decodes WoT* color attributes and reconstructs the
         # original per-vertex stream.
-        self.ui.add_button(_('Import'), x, y, 70, h, active=False,
-                           action=self._on_import_clicked)
+        # Accent: olive green ("this brings data INTO the app" cue,
+        # complementary to Export's burnt orange).
+        import_btn = self.ui.add_button(
+            _('Import'), x, y, 70, h, active=False,
+            action=self._on_import_clicked)
+        import_btn.accent_color = (0.42, 0.45, 0.18, 1.0)   # olive
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Flip' toggles the active mesh set between FBX (imported) and
@@ -5684,8 +5693,14 @@ class Viewer:
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
-                (_('Import'),    0, 2),
-                (_('Export'),    2, 1),
+                # Export above Import (flipped from the previous
+                # Import-on-top arrangement) -- both span the full
+                # 3-col width so they're guaranteed identical sized.
+                # Per-button accent colours set in _build_ui drive
+                # their visual identity (burnt-orange Export,
+                # olive Import).
+                (_('Export'),    0, 3),
+                (_('Import'),    0, 3),
                 (_('Save Prim'), 0, 3),
                 (_('Language'),  0, 3),
             ]),
