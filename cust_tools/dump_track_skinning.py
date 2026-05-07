@@ -278,7 +278,14 @@ def main(argv=None):
     parser.add_argument('tank',
         help="tank tag, e.g. `A83_T110E4`")
     parser.add_argument('--side', default='L', choices=['L', 'R'],
-        help="which track to dump (default: L)")
+        help="which side to dump (default: L)")
+    parser.add_argument('--part', default='track',
+        choices=['track', 'chass'],
+        help="which chassis sub-mesh to analyse: 'track' (the "
+             "deforming track ribbon -- expect ~40 % 2-bone "
+             "blends) or 'chass' (the rigid wheel / sprocket / "
+             "idler / return-roller sub-meshes -- expect 100 % "
+             "single-bone bound).  Default 'track'.")
     parser.add_argument('--out',  default=None,
         help="output PNG path (default: <tank>_track_<side>_skinning.png)")
     parser.add_argument('--pkg-dir', default=None,
@@ -328,12 +335,54 @@ def main(argv=None):
             f"the tag prefix -> nation mapping at the top of main().")
 
     # ---- 3. Parse primitives ----------------------------------------
+    # Auto-resolve geometry name across the WoT authoring variants.
+    # The dominant patterns we've seen:
+    #
+    #   * `track_<side>_Shape`    -- T110E4, T92, Bat-Chat, AMX 13, ...
+    #   * `track_<side>Shape`     -- AMX 50B and other older French tanks
+    #     (Maya export quirk -- no underscore between side and Shape).
+    #
+    #   * `exportChass<side>1_Shape` -- modern default (T110E4 family).
+    #   * `exportChass<side>1_Shape1` -- Object 268/4 family (extra "1").
+    #   * `chassis_<side>Shape_split_<N>` -- AMX 50B and others
+    #     (the chassis was split into multiple sub-meshes during
+    #     authoring).  Multiple groups; we pick the first that
+    #     matches and analyse just it -- the other splits typically
+    #     hold sub-parts of the same surface (different materials).
     parsed = MeshParser.parse_primitives_processed(prim_path)
-    geom_name = f'track_{args.side}_Shape'
+    avail = [g.get('name') for g in parsed]
+    side  = args.side
+
+    if args.part == 'track':
+        candidates = [
+            f'track_{side}_Shape',
+            f'track_{side}Shape',
+        ]
+    else:
+        candidates = [
+            f'exportChass{side}1_Shape',
+            f'exportChass{side}1_Shape1',
+            f'chassis_{side}Shape_split_0',
+            f'chassis_{side}Shape',
+            f'chassis_{side}_Shape',
+        ]
+
+    geom_name = None
+    for c in candidates:
+        if any(name == c for name in avail):
+            geom_name = c
+            break
+    if geom_name is None:
+        parser.error(
+            f"No matching {args.part} group for side {side}.\n"
+            f"  tried: {candidates}\n"
+            f"  available: {avail}\n"
+            f"Use --part to switch, or extend the candidate list "
+            f"in dump_track_skinning.py:main().")
     grp = find_group(parsed, geom_name)
     if not grp:
-        avail = [g.get('name') for g in parsed]
-        parser.error(f"Group {geom_name!r} not found.  Available: {avail}")
+        parser.error(f"Group {geom_name!r} found in name list but "
+                     f"failed to fetch.  Bug?")
 
     positions = np.asarray(grp['vertices']['positions'], dtype=np.float32)
     indices   = np.asarray(grp['indices'], dtype=np.uint32)
@@ -370,10 +419,19 @@ def main(argv=None):
     dom_bones = np.clip(dom_bones, 0, len(palette) - 1)
 
     # ---- 6. Outer-X mask --------------------------------------------
-    outer = outer_x_mask(positions, args.side)
+    # Track ribbon: thin in X, so the OUTER face (-X for left side,
+    # +X for right) is the visible "loop" we want to highlight.
+    # Chassis sub-meshes (wheels / sprockets / rollers): full 3D
+    # discs, no outer-X face -- treat every vert as "in the loop"
+    # for the visual.
+    if args.part == 'track':
+        outer = outer_x_mask(positions, args.side)
+    else:
+        outer = np.ones(len(positions), dtype=bool)
 
     # ---- 7. Text dump -----------------------------------------------
-    out_png = args.out or f'{args.tank}_track_{args.side}_skinning.png'
+    out_png = (args.out
+               or f'{args.tank}_{args.part}_{args.side}_skinning.png')
     out_txt = os.path.splitext(out_png)[0] + '.txt'
 
     by_bone = defaultdict(list)
@@ -381,16 +439,48 @@ def main(argv=None):
         if outer[i]:
             by_bone[dom_bones[i]].append(i)
 
+    # Per-group summary: centroid + bbox.  Useful at a glance for
+    # spotting which bone owns which wheel / roller / sprocket.
+    summary_rows = []
+    for k in sorted(by_bone):
+        verts = by_bone[k]
+        p = positions[verts]
+        c = p.mean(axis=0)
+        ext = p.max(axis=0) - p.min(axis=0)
+        name = palette[k] if k < len(palette) else f'<idx {k}>'
+        summary_rows.append((k, name, len(verts), c, ext))
+
+    # Multi-bone slot fill counts.
+    slot_nz = (bw > 0.001).sum(axis=1)
+
     with open(out_txt, 'w', encoding='utf-8') as f:
-        f.write(f'-- Track skinning dump -- {args.tank} side {args.side}\n')
+        kind = ('Track ribbon' if args.part == 'track'
+                else 'Chassis sub-meshes (wheels / sprockets / rollers)')
+        f.write(f'-- {kind} skinning dump -- {args.tank} side {args.side}\n')
         f.write(f'   geometry: {geom_name}\n')
         f.write(f'   verts: {n}   tris: {len(indices)//3}\n')
-        f.write(f'   outer-X face verts: {int(outer.sum())}\n\n')
+        f.write(f'   verts in scope (outer-X / all): {int(outer.sum())}\n')
+        f.write(f'   slot fill: '
+                f'1-slot={int((slot_nz==1).sum())}  '
+                f'2-slot={int((slot_nz==2).sum())}  '
+                f'3-slot={int((slot_nz==3).sum())}  '
+                f'4-slot={int((slot_nz==4).sum())}\n\n')
         f.write('Bone palette:\n')
         for k, name in enumerate(palette):
             f.write(f'  [{k:2d}]  {name}\n')
         f.write('\n')
-        f.write('Outer-X verts grouped by dominant bone, sorted by Z (rear -> front):\n\n')
+        # Compact summary table.
+        f.write('Vertex-group summary (centroid + bbox extent per bone):\n')
+        f.write(f'  {"byte":>4s} {"idx":>3s}  {"bone":<28s}  '
+                f'{"verts":>5s}  centroid (x, y, z)         '
+                f'bbox-XYZ extent\n')
+        for k, name, vc, c, ext in summary_rows:
+            f.write(f'  {k*3:>4d} {k:>3d}  {name:<28s}  {vc:>5d}  '
+                    f'({c[0]:+.3f}, {c[1]:+.3f}, {c[2]:+.3f})  '
+                    f'(dx={ext[0]:.3f}, dy={ext[1]:.3f}, dz={ext[2]:.3f})\n')
+        f.write('\n')
+        # Per-vertex detail.
+        f.write('Verts per group (sorted by Z, rear -> front):\n\n')
         for k in sorted(by_bone):
             verts = by_bone[k]
             verts.sort(key=lambda i: positions[i, 2])
@@ -405,9 +495,11 @@ def main(argv=None):
             f.write('\n')
 
     # ---- 8. PNG render ----------------------------------------------
-    title = (f'{args.tank}  -  track_{args.side}_Shape  -  '
+    title = (f'{args.tank}  -  {geom_name}  -  '
              f'{n} verts / {len(indices)//3} tris  -  '
-             f'colour = dominant bone (outlined dots = outer-X face)')
+             f'colour = dominant bone'
+             + ('  (outlined dots = outer-X face)'
+                if args.part == 'track' else ''))
     render_png(out_png, positions, indices, dom_bones, dom_weights,
                outer, palette, title=title)
 

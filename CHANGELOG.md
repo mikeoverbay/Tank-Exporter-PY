@@ -9,6 +9,27 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### dump_track_skinning auto-resolves geom names + `--part chass` (1.79.1)
+
+Generalised the dumper so it works across the WoT chassis
+geometry-naming variants we've found in the wild:
+
+  * `track_<side>_Shape`           (T110E4, T92, Bat-Chat, AMX 13)
+  * `track_<side>Shape`            (AMX 50B, older French)
+  * `exportChass<side>1_Shape`     (modern default)
+  * `exportChass<side>1_Shape1`    (Object 268/4 family)
+  * `chassis_<side>Shape_split_<N>` (AMX 50B multi-split chassis)
+
+The `--part chass` flag analyses the WHEEL / sprocket / roller
+sub-mesh instead of the track ribbon -- complementary view of the
+same skeleton.  Cross-tank summary written to
+`hand_off/CHASSIS_RIG_VARIANTS.md`: T110E4 hides its suspension
+in `V_BlendBone` (no animated arms), but Bat-Chat / AMX 13 / AMX 50B /
+Object 268/4 all bind their suspension-arm geometry to
+`Track_L<i>_BlendBone` so the arm visibly rotates with the wheel.
+No tank has a separate `Shock_L<i>` bone -- the shock cylinder is
+either static (heavy TDs) or rolls along with the arm.
+
 ### Bone-skinning analysis + terrain-Y sampler (1.79.0)
 
 Two new tools and a new on-class API land together to support
