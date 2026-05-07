@@ -5693,14 +5693,15 @@ class Viewer:
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
-                # Export above Import (flipped from the previous
-                # Import-on-top arrangement) -- both span the full
-                # 3-col width so they're guaranteed identical sized.
-                # Per-button accent colours set in _build_ui drive
-                # their visual identity (burnt-orange Export,
-                # olive Import).
-                (_('Export'),    0, 3),
-                (_('Import'),    0, 3),
+                # Export + Import share one row at equal widths.
+                # The list-form entry triggers the even-split
+                # packing path in the loop below -- each gets
+                # (full_row - gap) / 2 pixels, so they're
+                # guaranteed identical sized regardless of how
+                # the 3-col grid would have packed them.
+                # Accent colours (burnt-orange Export, olive
+                # Import) set in `_build_ui`.
+                [_('Export'), _('Import')],
                 (_('Save Prim'), 0, 3),
                 (_('Language'),  0, 3),
             ]),
@@ -5733,13 +5734,53 @@ class Viewer:
                                     color=(150, 165, 200))
             next_y += SECTION_LABEL_H + SECTION_GAP_AFTER
 
-            # Pack rows: each entry is (label, col, span).  When a span
-            # would overflow the next column boundary, that row sits on
-            # its own line; consecutive single-cell entries stack
-            # left-to-right and only bump y when the column wraps.
+            # Pack rows: each entry is one of:
+            #   (label, col, span)    -- a single button at a 3-col
+            #                            grid slot (existing layout)
+            #   [label_a, label_b]    -- two-or-more buttons that
+            #                            split a full-width row
+            #                            EVENLY (each gets the same
+            #                            pixel width).  Used for
+            #                            Import / Export which the
+            #                            user wants on the same row
+            #                            at identical widths -- the
+            #                            3-col grid can't quite do
+            #                            that with integer spans.
+            #
+            # When a span would overflow the next column boundary,
+            # that row sits on its own line; consecutive single-cell
+            # entries stack left-to-right and only bump y when the
+            # column wraps.
             row_y    = next_y
             cur_col  = 0
-            for label, col, span in rows:
+            full_w   = BTN_W * 3 + BTN_GAP_X * 2     # full row width
+            for item in rows:
+                if isinstance(item, list):
+                    # Even-split row.  Always lands on its own line;
+                    # close any partial row above, then walk the
+                    # labels and place them with equal width.
+                    if cur_col != 0:
+                        row_y += BTN_H + BTN_GAP_Y
+                        cur_col = 0
+                    labels = [s for s in item]
+                    n = max(1, len(labels))
+                    each_w = (full_w - BTN_GAP_X * (n - 1)) // n
+                    cx = BTN_PAD_X
+                    for lbl in labels:
+                        b = btn_by_label.get(lbl)
+                        if b is None:
+                            cx += each_w + BTN_GAP_X
+                            continue
+                        b.x = cx
+                        b.y = row_y
+                        b.w = each_w
+                        cx += each_w + BTN_GAP_X
+                    row_y += BTN_H + BTN_GAP_Y
+                    cur_col = 0
+                    continue
+
+                # Standard (label, col, span) tuple.
+                label, col, span = item
                 btn = btn_by_label.get(label)
                 if not btn:
                     continue

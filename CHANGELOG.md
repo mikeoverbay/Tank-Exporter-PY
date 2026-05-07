@@ -9,6 +9,34 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Export / Import on one row at equal widths (1.60.2)
+
+`v1.59.0` stacked Export and Import on separate full-width rows
+because the 3-col / 70-px grid couldn't divide evenly between
+two buttons.  This pass extends the layout packer to recognise
+a **list** entry in `button_groups` as "pack these evenly on a
+single row" -- each gets `(full_row_width - gap) / 2` pixels,
+guaranteed identical.
+
+```python
+(_('IO'), [
+    (_('Set Paths'), 0, 3),
+    [_('Export'), _('Import')],   # <-- list = even-split row
+    (_('Save Prim'), 0, 3),
+    (_('Language'),  0, 3),
+]),
+```
+
+Single-button (3-tuple) entries continue to work unchanged --
+the type check is `isinstance(item, list)`.  Side-effect: the
+packer can now do 3-or-more-button even-split rows for free
+(e.g. for a future `[Save, Apply, Cancel]` toolbar row).
+
+Burnt-orange Export and olive Import accents from v1.59.0 carry
+through unchanged; they're per-button, not per-row.
+
+Files: `tankExporterPy/viewer.py`.
+
 ### Suppress phantom animation block on every export format (1.60.1)
 
 Tester saw an unwanted Take001 animation track on the exported
