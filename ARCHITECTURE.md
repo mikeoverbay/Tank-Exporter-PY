@@ -25,6 +25,11 @@ tankExporterPy/
     scene.py            Camera + scene geometry helpers (grid, axes, sphere)
     shaders.py          GLSL program wrappers
     skybox.py           Cubemap loader, GPU IBL pre-filter pass, skybox renderer
+    terrain.py          Procedural ground: image-driven OR Perlin-fBm
+                        heightmap, mesh build, area-weighted vertex normals
+                        (IQ technique), sand-diffuse texture loader
+                        (mip-chain + 16x anisotropic), tiled detail-
+                        displacement layer
     ui.py               2-D overlay: bar widgets, tank browser tree, modal dialog
     viewer.py           Main application class, render loop, scene lifecycle
     xloader.py          Text-format DirectX .x file parser (skybox cube)
@@ -40,6 +45,10 @@ shaders/
     ibl_prefilter.vert / .frag  GL-3.3 port of Khronos IBL filter:
                                 Lambertian irradiance, GGX prefiltered specular,
                                 BRDF split-sum LUT
+    terrain.vert / .frag        Pass-through vert; frag uses IQ-flavoured
+                                domain warp + cosine palette + slope desat
+                                + sun warm/cool tint + distance fog +
+                                optional sand-diffuse sample
 
 resources/
     environment_maps/   Skybox cube faces (cube1_FR/BK/LF/RT/UP/DN.png)
@@ -451,6 +460,55 @@ Skybox + IBL setup.
 
 The prefilter bake uses `direction.y = -direction.y`; the mesh shader applies
 the same Y-flip when sampling, otherwise the sky and ground swap.
+
+---
+
+## `tankExporterPy/terrain.py`
+
+Procedural ground mesh + GL renderer.  Static after construction --
+heightmap, mesh, normals, and (optionally) sand texture all built
+once in `__init__`.
+
+### Heightmap sources
+
+| Path | Description |
+|------|-------------|
+| `image_path` | On-disk grayscale image (PNG/JPG/TIFF/anything Pillow opens).  Pipeline: LANCZOS resample → Gaussian smooth (kills bilinear stair-stepping) → edge-fade (terrain ramps to 0 at world edges, no vertical cliff) → optional power-curve remap → min-anchor at y=0.  Auto-detected at `resources/heightmap.png`, or via config key `terrain_heightmap`. |
+| Procedural fallback | Perlin fBm via `_make_heightmap` -- octaves / persistence / lacunarity tunable; same min-anchor convention. |
+| `detail_image_path` | Second grayscale image, tiled at `detail_tile_size` metres per repeat, sampled and added on top of the macro heights.  Min-lifted to zero so it only adds height (never digs negative).  Auto-paired with `sand_painted_height.png` when the painter's colour PNG is the active diffuse. |
+
+### `Terrain`
+
+| Method / attr | Purpose | Notes |
+|---|---|---|
+| `__init__(seed, size, world_size, height_scale, ..., image_path, sand_path, detail_image_path, ...)` | Build heightmap, vertex grid, indices, normals, GL buffers; load sand texture if present | `size` defaults to 1025; `world_size` to 160 m |
+| `render(shader, view, proj, light_dir)` | One indexed draw call.  Uploads `u_view / u_proj / u_light_dir / u_height_min / u_height_max / u_eye / u_sand_tex / u_has_sand_tex / u_sand_tile_size` and binds the sand texture to unit 0 | — |
+| `cleanup()` | Free VAO, VBOs, sand texture | Idempotent |
+| `height_range` | (min_y, max_y) in world units | property |
+
+### Module helpers
+
+| Function | Purpose |
+|---|---|
+| `_make_heightmap(...)` | Perlin-fBm procedural heightmap |
+| `_heightmap_from_image(path, size, height_scale, ...)` | Pillow → numpy, smooth, edge-fade, curve-remap, min-anchor at 0 |
+| `_detail_displacement(detail_path, world_size, mesh_size, tile_meters, height_scale)` | Tile a grayscale heightmap across world (xz) modulo `tile_meters`, bilinear sample at each macro vertex, return per-vertex displacement |
+| `_load_terrain_diffuse(path)` | Pillow load → glTexImage2D → glGenerateMipmap → trilinear + 16x anisotropic + GL_REPEAT.  Returns GL texture name (0 on failure) |
+| `_build_grid_indices(size)` | Triangle-list indices for a `size × size` quad grid (CCW from +Y) |
+| `_vertex_normals(positions, indices)` | IQ's averaged-normals technique: cross product of triangle edges added UNNORMALISED to each vertex (area-weighting comes free), normalised once at the end |
+
+### Anisotropic-filter constants
+
+`_GL_TEXTURE_MAX_ANISOTROPY = 0x84FE` and `_GL_MAX_TEXTURE_MAX_ANISOTROPY = 0x84FF`.
+Hard-coded so we don't depend on a specific PyOpenGL build exposing
+the symbols.  Falls back gracefully (no anisotropy) if the
+`EXT_texture_filter_anisotropic` extension isn't supported.
+
+### Mesh density
+
+Default `size = 1025` → ~1 M verts, ~2 M tris on a 160 m world =
+15.6 cm per quad.  Sufficient for the 67 cm primary sand-ripple
+wavelength to register as ~4 verts across.
 
 ---
 

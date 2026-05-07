@@ -122,6 +122,36 @@ Wargaming bytes never enter the repo.  Same rule applies to any
 future texture pulled from a pkg: gitignore the destination,
 trigger an extract from the user's install on demand.
 
+### Tileable textures must be UNIFORM at far mip levels
+
+Two separate problems show up when you tile a procedural
+texture across a large terrain via `GL_REPEAT`:
+
+1. **Seam discontinuity at the edge.**  Fix: every layer the
+   painter emits must wrap.  The canonical recipe in
+   `cust_tools/paint_sand_desert.py` is:
+   * Sin waves at integer cycles per tile (`freq * tile_meters`
+     must land exactly on a whole number).
+   * Noise / fBm built via FFT-domain low-pass filtering -- the
+     DFT inherently treats input as periodic so anything filtered
+     in frequency space comes out spatial-periodic for free.
+   * Gradient passes (e.g. fake-shading) via `np.roll` central
+     differences, NOT `np.gradient` (which has open boundaries
+     and leaves a thin frame around each tile).
+   * Rotating a sin wave's direction breaks integer-cycles -- the
+     warp-the-coordinates approach gives directional variety
+     without losing periodicity.
+
+2. **Per-tile colour shift visible at distance.**  Even with
+   perfectly tileable seams, low-frequency content within the
+   tile shows up at far mip levels as a "rectangle grid" because
+   GL averages each tile down to a pixel.  Fix: FFT high-pass
+   the surface BEFORE colorizing; suppresses anything below ~12
+   cycles per tile so block-mean variation at any mip level
+   stays under 1 % of dynamic range.  Without this, tonal-drift
+   layers (low-freq noise contributing to colour) become
+   wallpaper at distance.
+
 ### First-tank-load slowness was Pillow + GL warm-up
 
 A separate, later 6-second first-load stall turned out to NOT be
@@ -163,6 +193,13 @@ the second.
   diffs every `.primitives_processed` under a res_mods tank against
   its pkg original at the section-table level.  How we verify
   round-trip correctness.
+* `paint_sand_desert.py [--size 8192] [--seed 42]` -- paints a
+  tileable procedural sand-desert texture (FFT-built, all layers
+  guaranteed to wrap under `GL_REPEAT`) plus a grayscale height
+  companion (`*_height.png`) the Terrain class auto-pairs as a
+  detail-displacement layer.  Output defaults to
+  `resources/sand_painted.png`; the terrain auto-loader picks
+  that up over `resources/sand.png` when both exist.
 
 ---
 
