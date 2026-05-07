@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Spine icon: Wingdings 't'/'u' (Segoe UI tofu fix) (1.62.2)
+
+Tester reported the spine glyph rendering as a tofu rectangle.
+Some Windows Segoe UI installs lack the BLACK LEFT/RIGHT-
+POINTING TRIANGLE codepoints (U+25C0 / U+25B6) at the
+supplementary-symbol range, so v1.61.1's `◀` / `▶` showed
+empty boxes.
+
+Switched to **Wingdings** -- Microsoft's universally-shipped
+symbol font (ships with every Windows install since 3.1).
+Wingdings maps ASCII codepoints to fixed icon glyphs:
+
+  - `'t'` -- expanded state (panel open)
+  - `'u'` -- collapsed state (panel closed)
+
+Easy to swap to other Wingdings letters if these aren't right.
+Bottom-console chevron still uses Segoe UI ▲ / ▼ (no tofu
+report there yet); if it lands on the same machine we'll move
+it too.
+
+Files: `tankExporterPy/ui.py`.
+
 ### README: tkinter-required documentation (1.62.1)
 
 A tester hit the "can not open file picker" failure mode (which

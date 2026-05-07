@@ -2444,22 +2444,31 @@ class UIManager:
     def _ensure_chevron(self):
         """Build (or rebuild) the chevron texture for the current state.
 
-        Solid filled triangles -- '◀' (BLACK LEFT-POINTING) when
-        expanded so the user sees an arrow pointing left ("click to
-        collapse leftward"), '▶' (BLACK RIGHT-POINTING) when
-        collapsed so the arrow points right ("click to expand").
-        Same Unicode-triangle treatment as the bottom-console
-        chevron (▲ / ▼) -- both spine and console read as
-        a coherent solid-arrow family rather than the old mix of
-        line glyphs (`<`, `>`) and ASCII (`+`, `-`).
+        On some Windows installs Segoe UI's BLACK LEFT/RIGHT-
+        POINTING TRIANGLE glyphs (U+25C0 / U+25B6) render as
+        tofu rectangles -- the font version doesn't carry the
+        supplementary-symbol range.  Switched to **Wingdings**
+        which is a Microsoft "symbol font" whose ASCII codepoints
+        each map to a fixed glyph; ships with every Windows
+        install since Win 3.1 so it's always present.
+
+        Glyphs (chosen visually -- swap the letters below to pick
+        different symbols if these look wrong):
+            't'  -- expanded state ("panel open, click to close")
+            'u'  -- collapsed state ("panel closed, click to open")
+
+        Both render at ~13-18px wide in Wingdings 18-pt.  Use
+        the standard Wingdings table to pick alternatives:
+        https://en.wikipedia.org/wiki/Wingdings
         """
-        glyph = '▶' if self.info_collapsed else '◀'
+        glyph = 'u' if self.info_collapsed else 't'
         if glyph == self._chevron_glyph and self._chevron_tex is not None:
             return
         if self._chevron_tex is not None:
             glDeleteTextures(1, [self._chevron_tex])
-        # Slightly larger font for the glyph so it's readable on a 16-px-wide spine
-        big = pygame.font.SysFont('Segoe UI', 16, bold=True)
+        # Wingdings at 18pt -- the symbol font expects a slightly
+        # larger size than the prose-text Segoe UI it replaced.
+        big = pygame.font.SysFont('Wingdings', 18, bold=False)
         surf = big.render(glyph, True, (220, 220, 230))
         data = pygame.image.tostring(surf, 'RGBA', False)
         w, h = surf.get_width(), surf.get_height()
