@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Tank-tree clicks dropped while a load is in flight (1.58.0)
+
+Tank loads take 1-7 seconds; previously the user could click a
+second tank during the load and queue up confused state -- the
+in-flight load was already mutating MeshSet, the second click
+restarted the same path, and intermediate frames showed
+half-decoded geometry.
+
+New `self._tank_loading` flag, set the moment a Load Tank
+dialog's `_on_load` callback fires, cleared after the load
+returns (try/finally so an exception still releases the gate).
+While set, `_on_tree_tank_selected` early-returns with a status-
+strip note ("Load in progress -- click ignored") instead of
+processing the click.
+
+Doesn't touch the dialog itself -- that's the active flow the
+user just initiated.  Only blocks NEW selections from the tree
+while one is in flight.  Hover thumbnails still update so the
+user can preview "what would I click next" without committing.
+
+Files: `tankExporterPy/viewer.py`.
+
 ### Startup tkinter probe -> in-app warning (1.57.4)
 
 A tester reported "can not open file picker" and the source

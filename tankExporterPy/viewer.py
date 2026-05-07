@@ -751,6 +751,12 @@ class Viewer:
         self.show_terrain = bool(self._cfg.get('show_terrain', False))
         self.wireframe    = False
         self.use_normal_map = True
+        # Re-entrancy guard.  True from the moment the user picks a
+        # tank to the moment that load returns (success OR error);
+        # tree clicks made while True are dropped so the user can't
+        # queue up a second load on top of an in-flight one.
+        # Cleared in `_load_tank_with_options`'s try/finally.
+        self._tank_loading = False
         # Source type of the currently loaded scene:
         #   None  -- nothing loaded
         #   'wot' -- loaded via load_mesh / load_vehicle (full PBR pipeline,
@@ -4154,6 +4160,17 @@ class Viewer:
             print("[viewer] No PKG extractor available -- cannot load tank")
             return
 
+        # Re-entrancy guard.  Drops clicks while a load is already
+        # in flight so the user can't stack a second load on top of
+        # the first.  Flag is cleared (success OR error) by
+        # `_load_tank_with_options`'s try/finally below.
+        if self._tank_loading:
+            try:
+                self.log_status('Load in progress -- click ignored')
+            except Exception:
+                print("[viewer] tree click ignored -- load in progress")
+            return
+
         info       = node.payload or {}
         nation     = info.get('nation', '')
         xml_name   = info.get('xml',    '')
@@ -4215,16 +4232,28 @@ class Viewer:
                                  status_callback=None):
         """Trigger load_vehicle with explicit skin / part overrides chosen
         from the load dialog.  status_callback is forwarded to the load
-        so progress messages reach the dialog's bottom status line."""
-        self.load_vehicle(
-            xml_path,
-            damaged=damaged,
-            skin=skin,
-            chassis_tag=chassis_tag,
-            turret_tag=turret_tag,
-            gun_tag=gun_tag,
-            status_callback=status_callback,
-        )
+        so progress messages reach the dialog's bottom status line.
+
+        Sets `self._tank_loading = True` for the duration so any
+        tree clicks the user makes while the load runs are silently
+        dropped (see `_on_tree_tank_selected`).  Cleared in `finally`
+        so an exception still re-enables the tree -- the user
+        recovers by retrying instead of being permanently locked
+        out.
+        """
+        self._tank_loading = True
+        try:
+            self.load_vehicle(
+                xml_path,
+                damaged=damaged,
+                skin=skin,
+                chassis_tag=chassis_tag,
+                turret_tag=turret_tag,
+                gun_tag=gun_tag,
+                status_callback=status_callback,
+            )
+        finally:
+            self._tank_loading = False
 
     # ------------------------------------------------------------------
     # Tank-thumbnail helpers
