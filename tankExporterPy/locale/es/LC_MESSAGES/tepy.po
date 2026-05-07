@@ -151,3 +151,6 @@ msgstr "Humo"
 
 msgid "Pick Tri"
 msgstr "Elegir Tri"
+
+msgid "Susp"
+msgstr ""

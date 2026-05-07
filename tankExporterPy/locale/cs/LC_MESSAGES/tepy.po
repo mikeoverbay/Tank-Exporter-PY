@@ -151,3 +151,6 @@ msgstr "Kour"
 
 msgid "Pick Tri"
 msgstr "Vyber Tri"
+
+msgid "Susp"
+msgstr ""

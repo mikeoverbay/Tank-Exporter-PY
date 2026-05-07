@@ -151,3 +151,6 @@ msgstr "Fumo"
 
 msgid "Pick Tri"
 msgstr "Sel. Tri"
+
+msgid "Susp"
+msgstr ""

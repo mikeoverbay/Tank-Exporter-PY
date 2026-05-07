@@ -151,3 +151,6 @@ msgstr "Fumaça"
 
 msgid "Pick Tri"
 msgstr "Esc. Tri"
+
+msgid "Susp"
+msgstr ""

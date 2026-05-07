@@ -9,6 +9,32 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Suspension-test checkbox + Normals-header dedup (1.80.1)
+
+* New right-panel **`Susp`** checkbox under the Debug section,
+  third on the same row as `PerVtx` and `Debug`.  Drives
+  `self.tank_physics_enabled` -- check it to engage per-wheel
+  terrain conformance, uncheck to restore the old "tank floats
+  at world origin" view.  State persists in
+  `tankExporterPy.json` under `suspension_test`; default OFF
+  so the tank loads at origin like before until you opt in.
+  When unchecked mid-session, the next render-frame restores
+  every sub-mesh's bind-pose `model_matrix` so the toggle is
+  bidirectional + instant.  Localised across all 21 catalogs
+  via the standard sync (`Susp` falls back to msgid in non-
+  English -- consistent with the existing NMap / AO / PerVtx
+  abbreviation convention).
+
+* Right-panel sub-header dedup.  When a slider group has
+  exactly one slider AND the slider's label matches the group
+  label (the way `Normals` group + `Normals` slider stacked
+  the same string twice), the group sub-header is now skipped.
+  The right-panel height calculation got a matching tweak --
+  `n_headers` (the post-skip count) drives the sub-header
+  contribution, while inter-group spacing still scales by
+  `n_groups` so groups remain visually separated.  Net effect:
+  ~16 px reclaimed in the Debug body for the same content.
+
 ### Tank-on-terrain physics, rigid-body conformance (1.80.0)
 
 The first slice of "tank rides the terrain" -- a per-wheel

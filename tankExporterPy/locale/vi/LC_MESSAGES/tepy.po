@@ -151,3 +151,6 @@ msgstr "Khoi"
 
 msgid "Pick Tri"
 msgstr "Chon Tri"
+
+msgid "Susp"
+msgstr ""

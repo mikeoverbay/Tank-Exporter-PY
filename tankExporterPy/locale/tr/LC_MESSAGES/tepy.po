@@ -151,3 +151,6 @@ msgstr "Duman"
 
 msgid "Pick Tri"
 msgstr "Tri Sec"
+
+msgid "Susp"
+msgstr ""

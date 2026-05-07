@@ -151,3 +151,6 @@ msgstr "Fust"
 
 msgid "Pick Tri"
 msgstr "Tri valas"
+
+msgid "Susp"
+msgstr ""

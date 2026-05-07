@@ -151,3 +151,6 @@ msgstr "烟雾"
 
 msgid "Pick Tri"
 msgstr "选三角"
+
+msgid "Susp"
+msgstr ""

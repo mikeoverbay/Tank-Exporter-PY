@@ -151,3 +151,6 @@ msgstr "Rauch"
 
 msgid "Pick Tri"
 msgstr "Tri wahlen"
+
+msgid "Susp"
+msgstr ""

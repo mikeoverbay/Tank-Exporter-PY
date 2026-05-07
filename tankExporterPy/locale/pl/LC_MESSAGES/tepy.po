@@ -151,3 +151,6 @@ msgstr "Dym"
 
 msgid "Pick Tri"
 msgstr "Wybor Tri"
+
+msgid "Susp"
+msgstr ""

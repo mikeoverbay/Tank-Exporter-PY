@@ -151,3 +151,6 @@ msgstr "Дым"
 
 msgid "Pick Tri"
 msgstr "Выбор тр."
+
+msgid "Susp"
+msgstr ""

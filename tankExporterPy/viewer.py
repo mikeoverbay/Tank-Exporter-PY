@@ -944,7 +944,15 @@ class Viewer:
         # "tank centred at world origin" behaviour back.
         from .tank_physics import TankPhysics
         self.tank_physics         = TankPhysics.for_t110e4()
-        self.tank_physics_enabled = True
+        # User-controlled toggle.  Lives on the right-panel "Susp"
+        # checkbox so Professor Coffee can flip the test on / off
+        # without restarting the app.  Persisted under
+        # `suspension_test` in `tankExporterPy.json`.  Default
+        # OFF so the tank loads at world origin like before; flip
+        # the checkbox to engage per-wheel terrain conformance.
+        self._suspension_test     = bool(
+            self._cfg.get('suspension_test', False))
+        self.tank_physics_enabled = self._suspension_test
 
         # Toggleable display flags
         self.show_grid    = False
@@ -1016,6 +1024,10 @@ class Viewer:
         # ever wants to see), gate it on `self._debug`.  Persisted
         # in config under `debug`.  Default off.
         self._debug_cb           = None
+        # Suspension-test checkbox.  Mirrors / drives
+        # `self._suspension_test` and (via the per-frame mirror in
+        # render()) `self.tank_physics_enabled`.
+        self._suspension_cb      = None
 
         # Master debug-overlay flag.  Gated by the right-panel
         # `Debug` checkbox; mirrored into / out of `self._debug_cb`
@@ -1891,6 +1903,15 @@ class Viewer:
         self._debug_cb = self.ui.add_checkbox(
             _('Debug'), cx, cy6 - cb_size // 2, cb_size,
             checked=self._debug, group_id='smoke')
+        # Suspension-test toggle.  Drives the per-wheel terrain-
+        # conformance physics.  Position finalised in
+        # `_layout_widgets`; group_id='smoke' tags it as a right-
+        # panel widget so the spine-collapse override leaves it
+        # alone (left-vs-right discrimination is by group_id, see
+        # PITFALLS / CLAUDE.md).
+        self._suspension_cb = self.ui.add_checkbox(
+            _('Susp'), cx, cy6 - cb_size // 2, cb_size,
+            checked=self._suspension_test, group_id='smoke')
 
     # ------------------------------------------------------------------
     # Window / GL state
@@ -7651,6 +7672,24 @@ class Viewer:
                           for sl, _lbl in lst if sl)
         n_groups  = len(slider_groups)
 
+        # Sub-header skip rule: when a group has exactly ONE slider
+        # AND the slider's own label matches the group label, the
+        # group sub-header would duplicate text that the slider
+        # already renders one line below.  Caught while staring at
+        # the Normals group, where both group and the only slider
+        # were `_('Normals')`, producing a stacked-text bug.
+        # Comparison is on the live `slider.label` so it works
+        # across translations -- both group label and slider label
+        # come out of `gettext` so their translated strings match
+        # iff the source strings did.
+        def _group_header_redundant(grp, slis):
+            if len(slis) != 1:
+                return False
+            sl, _lbl = slis[0]
+            return sl is not None and sl.label == grp
+        n_headers = sum(1 for grp, slis in slider_groups
+                          if not _group_header_redundant(grp, slis))
+
         # Required panel height -- depends on collapse state.
         # Collapsed: just the header strip + paddings.
         # Expanded: header + groups + sliders + checkbox row + bottom.
@@ -7660,8 +7699,8 @@ class Viewer:
         else:
             required_h = (R_TOP_PAD
                           + R_DEBUG_HEADER_H + R_DEBUG_HEADER_GAP
-                          + n_groups * (R_SUB_HEADER_H + R_SUB_HEADER_GAP
-                                        + R_GROUP_GAP_AFTER)
+                          + n_headers * (R_SUB_HEADER_H + R_SUB_HEADER_GAP)
+                          + n_groups  * R_GROUP_GAP_AFTER
                           + n_sliders * R_ROW_H
                           + R_CB_ROW_H + R_BOTTOM_MARGIN)
             self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
@@ -7704,14 +7743,18 @@ class Viewer:
                      + R_DEBUG_HEADER_H + R_DEBUG_HEADER_GAP)
             # Walk the groups, painting sub-headers via
             # add_panel_label and positioning each slider in turn.
+            # Sub-headers are skipped for redundant single-slider
+            # groups (see `_group_header_redundant` above) so we
+            # don't double-print the same name.
             for grp_label, sliders in slider_groups:
-                self.ui.add_panel_label(
-                    grp_label,
-                    x=R_LABEL_X,
-                    y=cur_y,
-                    color=(150, 165, 200),
-                )
-                cur_y += R_SUB_HEADER_H + R_SUB_HEADER_GAP
+                if not _group_header_redundant(grp_label, sliders):
+                    self.ui.add_panel_label(
+                        grp_label,
+                        x=R_LABEL_X,
+                        y=cur_y,
+                        color=(150, 165, 200),
+                    )
+                    cur_y += R_SUB_HEADER_H + R_SUB_HEADER_GAP
                 for sl, _lbl in sliders:
                     if not sl:
                         continue
@@ -7724,19 +7767,25 @@ class Viewer:
                     cur_y += R_ROW_H
                 cur_y += R_GROUP_GAP_AFTER
 
-            # PerVtx + Debug checkboxes sit on a shared row at the
-            # bottom of the Normals group.  Checkboxes don't have
-            # track_x; we use the centroid of their box so y aligns
-            # with the slider tracks above visually.
+            # PerVtx + Debug + Susp checkboxes sit on a shared row
+            # at the bottom of the Normals group.  Three columns at
+            # +8 / +90 / +172 px so labels don't run together inside
+            # the 286-px panel.  Checkboxes don't have track_x; we
+            # use the centroid of their box so y aligns with the
+            # slider tracks above visually.
             cb_row_cy = cur_y + R_CB_ROW_H // 2
             if self._normals_mode_cb:
                 self._normals_mode_cb.x = right_x + 8
                 self._normals_mode_cb.y = cb_row_cy - self._normals_mode_cb.size // 2
                 self._normals_mode_cb.visible = True
             if self._debug_cb:
-                self._debug_cb.x = right_x + 150
+                self._debug_cb.x = right_x + 90
                 self._debug_cb.y = cb_row_cy - self._debug_cb.size // 2
                 self._debug_cb.visible = True
+            if self._suspension_cb:
+                self._suspension_cb.x = right_x + 172
+                self._suspension_cb.y = cb_row_cy - self._suspension_cb.size // 2
+                self._suspension_cb.visible = True
 
         # All other widgets stay visible
         for w in self.ui.sliders + self.ui.checkboxes:
@@ -7760,6 +7809,8 @@ class Viewer:
                 self._normals_mode_cb.visible = False
             if self._debug_cb:
                 self._debug_cb.visible = False
+            if self._suspension_cb:
+                self._suspension_cb.visible = False
 
     # ------------------------------------------------------------------
     # Logging helpers (mirror to stdout AND the in-app console)
@@ -8547,6 +8598,16 @@ class Viewer:
         if self._debug_cb is not None:
             self._debug = bool(self._debug_cb.checked)
 
+        # Mirror the Susp checkbox into the tank-physics enable
+        # flag.  Cheap to flip on / off mid-session -- physics
+        # branch in the early `render()` block reads
+        # `tank_physics_enabled` each frame, and its False path
+        # restores `mesh.model_matrix = bind_model_matrix.copy()`,
+        # so the tank pops back to the world origin instantly.
+        if self._suspension_cb is not None:
+            self._suspension_test     = bool(self._suspension_cb.checked)
+            self.tank_physics_enabled = self._suspension_test
+
         # Hardpoint markers -- orange sphere at each discovered exhaust
         # node + 0.5-unit cyan direction vector.  Debug-only.
         if self._debug:
@@ -9038,6 +9099,7 @@ class Viewer:
             # so the JSON ends up with only `debug`.
             self._cfg['debug']         = bool(self._debug)
             self._cfg['show_terrain']  = bool(self.show_terrain)
+            self._cfg['suspension_test'] = bool(self._suspension_test)
             self._cfg.pop('show_hardpoints', None)
             self._cfg.pop('show_fire_cards', None)
             _config.save(self._cfg)
