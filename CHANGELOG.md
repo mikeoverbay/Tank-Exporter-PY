@@ -7,6 +7,261 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-08
+
+### Terrain rebuild: image heightmap, sand texture, detail displacement (1.76.0)
+
+Pulled the procedural ground from a "small Perlin patch under the
+tank" into a real desert landscape.  Several layered changes that
+collectively land 1.76.0:
+
+**IQ-flavoured terrain shader rewrite (`shaders/terrain.frag`)**
+
+Replaced the three-band hard-RGB palette with techniques borrowed
+from Inigo Quilez's published landscape shaders (techniques only;
+no IQ source code reproduced):
+
+* Domain-warp on the colour-band sampling so the bands wobble
+  organically across (xz) instead of running as horizontal
+  contours that expose the heightmap grid.
+* IQ cosine palette (`a + b*cos(2π*(c*t+d))`) for a smooth earthy
+  gradient -- replaces the three hardcoded RGB colours that were
+  fighting each other.
+* Slope desaturation: cliffs trend toward neutral grey while
+  keeping a hint of the palette tone.
+* Sun-direction warm/cool tint -- subtle warm bias on the lit
+  side, cool bias in shadow.
+* Distance fog: exponential falloff to a soft sky-tone so far
+  peaks fade and near terrain reads sharp.
+* Optional sand-texture path: when a diffuse texture is bound to
+  unit 0, the cosine palette is bypassed and the surface samples
+  the texture as the base albedo, tiled at the configured tile
+  size with a subtle UV warp to break grid alignment.  Lambert
+  + sun tint + fog still apply.  No specular -- pure diffuse
+  ground.
+
+**Image-driven heightmap (`tankExporterPy/terrain.py`)**
+
+`Terrain` accepts `image_path` -- any Pillow-decodable grayscale
+image is loaded, resampled (LANCZOS), Gaussian-smoothed (kills
+JPEG / bilinear stair-stepping), edge-faded (so the mesh doesn't
+end in a vertical cliff at the world edge), and curve-remapped
+before scaling to world units.  Lowest pixel anchored at y=0 so
+the tank's tracks always sit on flat ground.  Auto-detected at
+`resources/heightmap.png` or via the `terrain_heightmap` config
+key.  The procedural Perlin path is preserved as a fallback when
+no image is configured.
+
+**4x world expansion**
+
+`world_size` 40 m → 160 m so the tank reads as inside a real
+landscape rather than perched on a small island.  Both the
+image-loaded and procedural Perlin paths now anchor the lowest
+sample at y=0, so `base_y` is no longer needed and the tank's
+tracks meet flat ground at the world origin without an offset.
+
+**Sand-diffuse texture pipeline**
+
+`Terrain` accepts `sand_path` + `sand_tile_size`.  Auto-detected:
+config override > `resources/sand_painted.png` > `resources/sand.png`.
+
+* Pillow load + RGB convert + Y-flip (OpenGL bottom-left origin
+  convention).
+* Mip chain generated at upload time (no per-frame JIT stall).
+* Trilinear filtering (`GL_LINEAR_MIPMAP_LINEAR` / `GL_LINEAR`).
+* `GL_REPEAT` wrap on both axes so the tile cleanly stitches.
+* Anisotropic filtering at the GPU's reported max (typically 16x
+  via `EXT_texture_filter_anisotropic`) -- huge win on grazing-
+  angle terrain samples receding into the horizon.
+* Tile size default 50 m per repeat (config:
+  `terrain_sand_tile_size`).
+
+**Sand-desert painter tool (`cust_tools/paint_sand_desert.py`)**
+
+CLI tool that paints a tileable procedural sand-desert texture.
+Output: `resources/sand_painted.png` (colour) + a grayscale
+`sand_painted_height.png` companion (the underlying surface
+field, suitable for displacement).  Default 8192² (~85 MB
+colour, ~23 MB height); supports up to 16384² with `--size`
+(`GL_MAX_TEXTURE_SIZE` on every desktop GPU).
+
+Layered build (all FFT-domain tileable so output wraps perfectly
+under `GL_REPEAT`):
+
+* Two warp passes (medium + fine) that pre-displace the (xz)
+  coordinates so ripple lines bend organically.  Direction-
+  rotation was tried but rotating the sine wave breaks the
+  integer-cycles-per-tile invariant; the warp gives directional
+  variety while staying tileable.
+* Primary sin ripples on X at 1.5 cycles/m (~67 cm wavelength)
+  -- 75 whole cycles per 50 m tile, exact integer = perfect
+  periodicity.
+* Cross sin ripples on Y at 0.7 cycles/m (35 cycles / tile,
+  also integer).
+* Fine grain noise via FFT-low-pass-filtered Gaussian random
+  (~2.5 cm features at 8K / 50 m).
+* FFT high-pass post-process kills any signal below 12 cycles
+  per tile so far mip levels render as a uniform colour.  This
+  is what eliminates the visible "rectangle grid" you'd
+  otherwise see at distance when GL averages each tile down to a
+  pixel.
+* Three-stop palette ramp (trough → face → crest) with
+  smoothstep transitions.
+* Cyclic-gradient fake-shading -- gradient via `np.roll +/-1`
+  (not `np.gradient`, which has open boundaries that break
+  tileability) dotted with a "light from upper-left" direction.
+
+Per-block-mean variation at far-mip block sizes (128² and
+larger) measures < 1 % of dynamic range, so the texture reads
+as essentially uniform colour at distance with crisp ripple
+detail close-up.
+
+**Detail-displacement layer (`Terrain.detail_image_path`)**
+
+A second grayscale heightmap, tiled at `detail_tile_size` metres
+per repeat, sampled and added on top of the macro heights.
+Bilinear sampled, min-lifted to zero so it only adds height (no
+digging negative under the tank).  Auto-paired with
+`sand_painted_height.png` when `sand_painted.png` is the active
+diffuse, so colour ripples and geometry ripples line up
+perfectly.  Default amplitude 5 cm (config:
+`terrain_detail_height_scale`).
+
+**Mesh density bump 257 → 1025 verts/side**
+
+~1 M verts / ~2 M tris on the 160 m terrain.  At 15.6 cm per
+quad, the 67 cm primary ripples now get ~4 verts across --
+visible as actual geometry.  Static mesh, single draw call --
+comfortable for any modern desktop GPU.
+
+### Wireframe override: nearly black (1.75.1)
+
+`mesh.frag` and `imported.frag` wireframe override (the
+single-colour fragment emitted when `wireframe_mode == 1`)
+changed from light grey `(0.75, 0.75, 0.75)` to nearly black
+`(0.02, 0.02, 0.02)`.  Lines now pop against the bright IBL-lit
+tank surface instead of vanishing into specular highlights.
+
+### Shaded mode flat colour: hardcoded light grey (1.75.1)
+
+`imported.frag` `use_flat_color` branch now writes
+`vec3(0.22, 0.22, 0.22)` directly instead of reading the
+theme-tracking `flat_color` uniform.  The 0.22 linear value
+lifts to roughly mid/light grey after the Lambert multiply
+(~3.3x at full lit) plus the sRGB gamma encode at the end of
+main(), giving a neutral matte surface for shape evaluation
+regardless of the active theme.  The `flat_color` uniform is
+still set per-frame from python (silent no-op) so the path can
+be re-enabled by reverting one line if a future change wants
+theme tracking back.
+
+### Locked-on button border (1.76.0)
+
+When a button is `active`, the renderer draws four 2-px wheat-
+coloured strips along the inside perimeter (`(0.96, 0.87, 0.70,
+1.0)`).  Independent of the active fill colour, so it reads as
+a clear "toggle is ON" affordance regardless of theme / accent.
+Drawn after the fill but before the text/icon so the centred
+label still renders on top.
+
+### Light/Ambient slider width centred + narrowed (1.76.0)
+
+`viewer.py` `_layout_widgets` `L_TRACK_W` reduced from 160 to
+128 (20 %) and the track is now horizontally centred in the
+info panel: `L_TRACK_X = (INFO_PANEL_W - L_TRACK_W) // 2`.
+Value-text gap bumped 6 → 10 px so the digits don't crowd the
+handle when the slider is at value_max.  Init-time `tw` is
+still passed to `add_slider` for consistency, but it's
+overridden every layout pass -- a NOTE comment was added there
+warning future-me about the override.
+
+### G00_ prop filter (1.75.1)
+
+Extended the non-tank tag filter in `PkgExtractor.list_vehicle_xmls`
+(loaders.py ~line 2168) to drop tags containing the `G00_` token
+in addition to the existing `StoryMode` substring drop.
+
+`G00_` is the prefix WoT uses for German "vehicle" entries that
+are actually props / scenery -- bunkers, pillboxes, coastal-gun
+emplacements, the Fireball bomber.  They have a tier and a class
+in `list.xml` so they ride the same loader path as real tanks,
+but there's no real tank visual behind them and loading one ends
+in a broken mesh.  All known entries on a current install:
+G00_Bomber_SH, G00_Pillbox_Gun_{10cm,15cm,38cm,7_5cm}_SM24,
+G00_Pillbox_Tank_Turret_SM24.
+
+Both tokens are unioned through a single `DROP_TOKENS` tuple +
+`any(tok in t for tok in DROP_TOKENS)` so adding the next prop
+prefix is a one-line tuple edit.  Single chokepoint = every
+downstream consumer (tier tree, load dialog, FBX auto-twin,
+ItemList rebuild) sees a clean list with no extra plumbing.
+
+### res_mods button accents (1.75.2)
+
+Tagged the three res_mods-section buttons with theme slots so
+they tint per-preset instead of rendering with the default
+"untagged" accent:
+
+* **Extract**             -> `c1` (primary action)
+* **Open Extract Loc**    -> `c2` (secondary / navigation)
+* **Remove from res_mods** -> `c4` (warm-but-distinct warning)
+
+c3 is intentionally skipped on this row -- it's the
+text-on-dark slot (wheat cream on TEPY Default) and reads as
+near-white when used as a button fill, so the Remove button
+took the c4 slot instead (burnt yellow on default; warm
+tertiary on every other preset).
+
+Applied at `_build_ui` time alongside the existing
+`btn.accent_color = _theme.cN()` / `btn.theme_slot = 'cN'`
+pattern, so `_apply_theme_live` re-tints the trio correctly
+when the user switches preset.  No changes to layout,
+click-handlers, or hit-tests.
+
+### G00_ prop filter (1.75.1)
+
+Extended the non-tank tag filter in `PkgExtractor.list_vehicle_xmls`
+(loaders.py ~line 2168) to drop tags containing the `G00_` token
+in addition to the existing `StoryMode` substring drop.
+
+`G00_` is the prefix WoT uses for German "vehicle" entries that
+are actually props / scenery -- bunkers, pillboxes, coastal-gun
+emplacements, the Fireball bomber.  They have a tier and a class
+in `list.xml` so they ride the same loader path as real tanks,
+but there's no real tank visual behind them and loading one ends
+in a broken mesh.  All known entries on a current install:
+G00_Bomber_SH, G00_Pillbox_Gun_{10cm,15cm,38cm,7_5cm}_SM24,
+G00_Pillbox_Tank_Turret_SM24.
+
+Both tokens are unioned through a single `DROP_TOKENS` tuple +
+`any(tok in t for tok in DROP_TOKENS)` so adding the next prop
+prefix is a one-line tuple edit.  Single chokepoint = every
+downstream consumer (tier tree, load dialog, FBX auto-twin,
+ItemList rebuild) sees a clean list with no extra plumbing.
+
+### Wireframe override: nearly black (1.75.1)
+
+`mesh.frag` and `imported.frag` wireframe override (the
+single-colour fragment emitted when `wireframe_mode == 1`)
+changed from light grey `(0.75, 0.75, 0.75)` to nearly black
+`(0.02, 0.02, 0.02)`.  Lines now pop against the bright IBL-lit
+tank surface instead of vanishing into specular highlights.
+
+### Shaded mode flat colour: hardcoded light grey (1.75.1)
+
+`imported.frag` `use_flat_color` branch now writes
+`vec3(0.22, 0.22, 0.22)` directly instead of reading the
+theme-tracking `flat_color` uniform.  The 0.22 linear value
+lifts to roughly mid/light grey after the Lambert multiply
+(~3.3x at full lit) plus the sRGB gamma encode at the end of
+main(), giving a neutral matte surface for shape evaluation
+regardless of the active theme.  The `flat_color` uniform is
+still set per-frame from python (silent no-op) so the path can
+be re-enabled by reverting one line if a future change wants
+theme tracking back.
+
+---
+
 ## 2026-05-07
 
 A long session covering the full theme-system rewrite, the new

@@ -192,6 +192,9 @@ class TerrainShader:
     def set_float(self, name, value):
         glUniform1f(glGetUniformLocation(self.program, name), float(value))
 
+    def set_int(self, name, value):
+        glUniform1i(glGetUniformLocation(self.program, name), int(value))
+
 
 class ShaderProgram:
     """Main textured mesh shader (Phong + normal map + alpha test + AO)."""

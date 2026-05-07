@@ -778,23 +778,121 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] Skybox not loaded: {exc}")
 
-        # Procedural ground.  Generated once at startup via Perlin
-        # fBm; kept hidden by default so a clean tank screenshot
-        # still works.  Toggle is the `Terrain` button in the
-        # left-panel UI section.
+        # Procedural ground.  Generated once at startup; kept hidden
+        # by default so a clean tank screenshot still works.  Toggle
+        # is the `Terrain` button in the left-panel UI section.
+        #
+        # Source priority:
+        #   1. config['terrain_heightmap'] -- on-disk grayscale image
+        #      that we resample + smooth into a height grid.  This
+        #      is the preferred path -- gives the user full control
+        #      over the surface shape via any image editor.
+        #   2. Falls back to the procedural Perlin-fBm generator if
+        #      no image is configured (or the configured path is
+        #      missing / undecodable).
         self._splash_status('Generating procedural terrain...')
         self.terrain        = None
         self.terrain_shader = None
         try:
             self.terrain_shader = TerrainShader()
-            # Default: 257-vertex grid, 40 m of world, ±1.5 m
-            # vertical band, base_y just below 0 so the tank's
-            # tracks don't sink into a peak.  Seed = 0 for now;
-            # could expose the seed via config later.
-            self.terrain = Terrain(seed=0, size=257,
-                                    world_size=40.0,
-                                    height_scale=3.0,
-                                    base_y=-0.05)
+            # Image path can come from the config or the bundled
+            # default location (resources/heightmap.png).  When
+            # neither exists, fall through to the Perlin path.
+            cfg_img = (self._cfg.get('terrain_heightmap') or '').strip()
+            default_img = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'resources', 'heightmap.png')
+            terrain_img = None
+            if cfg_img and os.path.isfile(cfg_img):
+                terrain_img = cfg_img
+            elif os.path.isfile(default_img):
+                terrain_img = default_img
+
+            # Default: 1025-vertex grid (was 257) -- bumped 4x per
+            # side so each ~67 cm sand ripple gets ~4 verts across,
+            # which is what the detail-displacement companion needs
+            # to actually read as ripples instead of an averaged-out
+            # smear.  ~1 M verts / ~2 M tris -- comfortable for any
+            # remotely modern desktop GPU on a static mesh.
+            #
+            # 160 m world (4x the original 40 m so the tank reads as
+            # inside a real landscape rather than perched on a small
+            # island), 3 m macro height range.  base_y stays 0 --
+            # both heightmap generators (image + procedural) anchor
+            # the lowest sample at y=0 so the tank's tracks sit on
+            # flat ground at the world origin without an offset.
+            kwargs = dict(seed=0, size=1025, world_size=160.0,
+                          height_scale=3.0, base_y=0.0)
+
+            # Sand diffuse texture.  Search order:
+            #   1. config['terrain_sand_texture']  (explicit override)
+            #   2. resources/sand_painted.png  (procedural -- generated
+            #      by `cust_tools/paint_sand_desert.py`)
+            #   3. resources/sand.png  (user-supplied photo / external)
+            # Tiled at 50 m per repeat so the 160 m terrain shows
+            # ~3 tile-cycles across -- dense enough that distant
+            # detail doesn't smear, sparse enough that the seam
+            # direction doesn't dominate.
+            res_root = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'resources')
+            cfg_sand     = (self._cfg.get('terrain_sand_texture') or '').strip()
+            painted_sand = os.path.join(res_root, 'sand_painted.png')
+            photo_sand   = os.path.join(res_root, 'sand.png')
+
+            sand_path = None
+            if cfg_sand and os.path.isfile(cfg_sand):
+                sand_path = cfg_sand
+            elif os.path.isfile(painted_sand):
+                sand_path = painted_sand
+            elif os.path.isfile(photo_sand):
+                sand_path = photo_sand
+            if sand_path:
+                kwargs['sand_path']      = sand_path
+                kwargs['sand_tile_size'] = float(
+                    self._cfg.get('terrain_sand_tile_size', 50.0))
+                print(f"[viewer] Terrain sand: {sand_path}")
+
+            # Detail-displacement heightmap: companion to the sand
+            # colour texture.  When `paint_sand_desert.py` runs it
+            # writes both a colour PNG and a `<name>_height.png`
+            # grayscale next to it; we auto-pair them so the
+            # geometry ripples line up with the colour texture
+            # ripples without the user having to configure anything.
+            cfg_det = (self._cfg.get('terrain_detail_heightmap') or '').strip()
+            painted_det = os.path.join(res_root, 'sand_painted_height.png')
+            detail_path = None
+            if cfg_det and os.path.isfile(cfg_det):
+                detail_path = cfg_det
+            elif sand_path and sand_path.lower().endswith('_painted.png'):
+                # Pair-by-suffix: explicit user override wins; otherwise
+                # use the painted-height companion when sand_painted.png
+                # is the active colour.
+                if os.path.isfile(painted_det):
+                    detail_path = painted_det
+            elif os.path.isfile(painted_det):
+                detail_path = painted_det
+            if detail_path:
+                kwargs['detail_image_path']   = detail_path
+                kwargs['detail_tile_size']    = float(
+                    self._cfg.get('terrain_detail_tile_size',
+                                   kwargs.get('sand_tile_size', 50.0)))
+                kwargs['detail_height_scale'] = float(
+                    self._cfg.get('terrain_detail_height_scale', 0.05))
+                print(f"[viewer] Terrain detail: {detail_path} "
+                      f"(±{kwargs['detail_height_scale']:.2f} m)")
+            if terrain_img:
+                self._splash_status(
+                    f'Loading terrain from {os.path.basename(terrain_img)}...')
+                kwargs['image_path']         = terrain_img
+                kwargs['image_smooth_sigma'] = float(
+                    self._cfg.get('terrain_smooth_sigma', 1.0))
+                kwargs['image_edge_fade']    = float(
+                    self._cfg.get('terrain_edge_fade', 0.10))
+                kwargs['image_curve_gamma']  = float(
+                    self._cfg.get('terrain_curve_gamma', 1.0))
+                print(f"[viewer] Terrain source: {terrain_img}")
+            self.terrain = Terrain(**kwargs)
         except Exception as exc:
             print(f"[viewer] Terrain disabled: {exc}")
             self.terrain        = None
@@ -1592,15 +1690,35 @@ class Viewer:
         #                          typed-confirmation safeguard)
         # Layout placement (and the section header) is owned by
         # `_layout_widgets`; here we just register the buttons.
-        self.ui.add_button(_('Extract'), x, y, 70, h, active=False,
-                           action=self._on_extract_clicked)
+        # Per-button accent tagging (c1 / c2 / c4) so the three
+        # res_mods buttons read as a related-but-distinct trio at
+        # a glance: Extract = primary action (c1), Open Extract
+        # Loc = secondary nav (c2), Remove = warm-but-distinct
+        # warning (c4 -- burnt yellow on TEPY Default).  c3 is
+        # skipped here because it's the text-on-dark slot (wheat
+        # cream on default) and looks washed-out as a button fill.
+        # `theme_slot` carries the slot name through to
+        # `_apply_theme_live` so the trio re-tints correctly when
+        # the user switches preset.
+        extract_btn = self.ui.add_button(
+            _('Extract'), x, y, 70, h, active=False,
+            action=self._on_extract_clicked)
+        extract_btn.accent_color = _theme.c1()
+        extract_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
-        self.ui.add_button(_('Open Extract Loc'), x, y, 70, h, active=False,
-                           action=self._on_open_extract_loc_clicked)
+
+        open_loc_btn = self.ui.add_button(
+            _('Open Extract Loc'), x, y, 70, h, active=False,
+            action=self._on_open_extract_loc_clicked)
+        open_loc_btn.accent_color = _theme.c2()
+        open_loc_btn.theme_slot   = 'c2'
         x       += 70 + self.ui.BUTTON_SPACING
-        self.ui.add_button(_('Remove from res_mods'), x, y, 70, h,
-                           active=False,
-                           action=self._on_remove_from_resmods_clicked)
+
+        remove_btn = self.ui.add_button(
+            _('Remove from res_mods'), x, y, 70, h, active=False,
+            action=self._on_remove_from_resmods_clicked)
+        remove_btn.accent_color = _theme.c4()
+        remove_btn.theme_slot   = 'c4'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # --- Sliders + Invert checkboxes --------------------------------
@@ -1614,6 +1732,10 @@ class Viewer:
 
         # Initial values come from the persisted config -- the user's last
         # session is restored.  Falls back to _DEFAULTS if absent.
+        # NOTE: track_w supplied here is REPLACED by `_layout_widgets`
+        # (uses its own L_TRACK_W) every layout pass.  Pass `tw` for
+        # consistency with the other sliders, but the on-screen width
+        # is whatever L_TRACK_W is set to in `_layout_widgets`.
         light_init   = float(self._cfg.get('light_value',   0.10))
         ambient_init = float(self._cfg.get('ambient_value', 0.50))
         self._metal_slider = self.ui.add_slider(_('Light'),   tx, cy1, tw,
@@ -7274,9 +7396,16 @@ class Viewer:
         # Lighting sliders inside the left panel.  Slider value text sits
         # to the right of the track.  NMap/AO checkboxes get their own
         # row below the Ambient slider so the slider tracks can run wider.
-        L_TRACK_X = 56
-        L_TRACK_W = 160   # ~10% narrower for cleaner panel fit
-        L_VAL_X   = L_TRACK_X + L_TRACK_W + 6
+        #
+        # Geometry: track is centered horizontally in the info panel
+        # (so the empty space on either side of the track is equal),
+        # and the value-text column sits one comfortable gap to the
+        # right of the track end so the digits don't crowd the
+        # handle when the slider is at value_max.
+        L_TRACK_W = 128                                  # track width
+        L_TRACK_X = (self.INFO_PANEL_W - L_TRACK_W) // 2 # centered in panel
+        L_VAL_GAP = 10                                   # bar->number gap
+        L_VAL_X   = L_TRACK_X + L_TRACK_W + L_VAL_GAP
         # Sliders sit below the grouped button block.  `next_y` from the
         # group-packing loop above is already pointing at the first free
         # line after the Tools group, so we just add a small breathing

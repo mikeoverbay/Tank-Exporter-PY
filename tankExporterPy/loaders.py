@@ -2165,26 +2165,42 @@ class PkgExtractor:
             per_nation[nation] = self._read_tank_table(
                 scripts_pkg, list_path, nation)
 
-        # Filter out tanks whose tag CONTAINS 'StoryMode' -- those
-        # are campaign variants that share assets with the regular
-        # tanks but aren't standalone vehicles for our purposes.
-        # Real-world suffixes seen on a current WoT install include
-        # `_StoryMode`, `_StoryModeStealth`, `_StoryModeHard`,
-        # `_StoryMode_3_4`, etc., so an `endswith('StoryMode')`
-        # match misses three quarters of them.  Substring match is
-        # safe because no production tank tag carries that token
-        # for any other reason.  Done at the single source-of-truth
-        # so every downstream consumer (tier tree, load dialog,
-        # FBX auto-twin, etc.) sees a clean list.
+        # Filter out non-tank tags that share the vehicle-list
+        # plumbing but aren't standalone playable vehicles for our
+        # purposes.  Two token families are dropped:
+        #
+        #   'StoryMode' -- campaign variants (suffixes seen on a
+        #     current install: `_StoryMode`, `_StoryModeStealth`,
+        #     `_StoryModeHard`, `_StoryMode_3_4`).  An
+        #     `endswith('StoryMode')` match misses three quarters
+        #     of them, so substring is the right call.
+        #
+        #   'G00_' -- the prefix WoT uses for German "vehicle"
+        #     entries that are actually props / scenery: bunkers,
+        #     pillboxes, coastal-gun emplacements, the Fireball
+        #     bomber, etc.  They have a tier and a class but no
+        #     real tank assets behind them; loading them ends in
+        #     a broken visual.  All known entries on a current
+        #     install: G00_Bomber_SH, G00_Pillbox_Gun_*_SM24,
+        #     G00_Pillbox_Tank_Turret_SM24.
+        #
+        # Both substrings are safe -- no production tank tag
+        # carries either token for any other reason.  Done at the
+        # single source-of-truth so every downstream consumer
+        # (tier tree, load dialog, FBX auto-twin, etc.) sees a
+        # clean list.
+        DROP_TOKENS = ('StoryMode', 'G00_')
         n_dropped = 0
         for nation, tbl in per_nation.items():
-            drop_tags = [t for t in tbl if 'StoryMode' in t]
+            drop_tags = [t for t in tbl
+                         if any(tok in t for tok in DROP_TOKENS)]
             for tag in drop_tags:
                 del tbl[tag]
                 n_dropped += 1
         if n_dropped:
             print(f"[PkgExtractor] vehicle xmls: dropped {n_dropped} "
-                  f"StoryMode variant(s)")
+                  f"non-tank variant(s) "
+                  f"(StoryMode / G00_ props)")
 
         if not with_tier:
             result = {

@@ -543,7 +543,7 @@ void main()
     // a uniform light grey so the line work is readable regardless of
     // the underlying material shading / lighting state.
     if (wireframe_mode == 1) {
-        FragColor = vec4(0.75, 0.75, 0.75, 1.0);
+        FragColor = vec4(0.02, 0.02, 0.02, 1.0);
     } else {
         FragColor = vec4(result, 1.0);
     }

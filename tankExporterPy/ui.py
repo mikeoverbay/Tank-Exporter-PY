@@ -2707,6 +2707,34 @@ class UIManager:
             else:
                 col = (0.32, 0.32, 0.36, 1.0) if btn.hovered else (0.22, 0.22, 0.25, 1.0)
             self._solid(*col, btn.x, btn.y, btn.w, btn.h)
+
+            # Locked-on (active) cue: a wheat-coloured border drawn
+            # ON the inside edge of the button rect.  Four 2-px-wide
+            # strips, all clipped to btn.x..btn.x+btn.w /
+            # btn.y..btn.y+btn.h so the border lives inside the click
+            # hit-box (never bleeds past it).  Independent of the
+            # active fill colour, so it reads as a clear "toggle is
+            # ON" affordance regardless of theme / accent.
+            if btn.active:
+                BORDER_W   = 2
+                BORDER_COL = (0.96, 0.87, 0.70, 1.0)   # wheat
+                # top strip
+                self._solid(*BORDER_COL,
+                            btn.x, btn.y,
+                            btn.w, BORDER_W)
+                # bottom strip
+                self._solid(*BORDER_COL,
+                            btn.x, btn.y + btn.h - BORDER_W,
+                            btn.w, BORDER_W)
+                # left strip
+                self._solid(*BORDER_COL,
+                            btn.x, btn.y,
+                            BORDER_W, btn.h)
+                # right strip
+                self._solid(*BORDER_COL,
+                            btn.x + btn.w - BORDER_W, btn.y,
+                            BORDER_W, btn.h)
+
             # Layout: if the button has an icon, draw icon + small
             # gap + text, the whole pair centered horizontally.
             # Otherwise just centre the text the way it always was.

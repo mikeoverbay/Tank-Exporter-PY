@@ -77,7 +77,15 @@ void main()
     // not even a diffuse fetch.
     vec3 base;
     if (use_flat_color == 1) {
-        base = flat_color;
+        // Hard-coded light grey for Shaded mode -- theme-tracking via
+        // the `flat_color` uniform is intentionally bypassed here so
+        // the surface always reads as a neutral matte for shape
+        // evaluation regardless of the active theme.  0.22 in linear
+        // space lifts to roughly mid/light grey after the Lambert
+        // multiply (~3.3x at full lit) + sRGB gamma encode below;
+        // raise toward 0.30 for brighter, drop toward 0.15 for
+        // darker.
+        base = vec3(0.22, 0.22, 0.22);
     } else {
         base = texture(diffuse_map, fs_in.uv0).rgb;
     }
@@ -120,7 +128,7 @@ void main()
     result = pow(clamp(result, 0.0, 1.0), vec3(1.0 / 2.2));
 
     if (wireframe_mode == 1) {
-        FragColor = vec4(0.75, 0.75, 0.75, 1.0);
+        FragColor = vec4(0.02, 0.02, 0.02, 1.0);
     } else {
         FragColor = vec4(result, 1.0);
     }
