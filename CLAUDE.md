@@ -152,6 +152,53 @@ texture across a large terrain via `GL_REPEAT`:
    layers (low-freq noise contributing to colour) become
    wallpaper at distance.
 
+### Picker / overlay shaders MUST consume `u_model`
+
+The off-screen triangle picker and its overlay shader take the
+same `mat4 u_model` uniform the main mesh shader uses.  Skip it
+and the picker FBO renders every mesh from MODEL space while
+the visible scene transforms each mesh by its per-frame
+`mesh.model_matrix` (turret rotation, gun pitch, hardpoint
+offsets).  Symptom: hover the (correctly-positioned) tank, get
+hits on empty space below where the model-space geometry
+happened to land in screen.  Both `picking.vert` and
+`overlay_solid.vert` set `gl_Position = u_proj * u_view *
+u_model * vec4(a_position, 1.0)`; `picker.update_pass` uploads
+each mesh's matrix per draw and `picker.draw_overlay` re-applies
+the picked mesh's matrix when painting the highlight.
+
+### Spine-collapse override classifies by `group_id`, not x
+
+The spine-collapse override at the end of `Viewer._on_resize`
+hides every left-panel widget when `info_collapsed` is True.
+Earlier versions discriminated "left vs right panel" by checking
+`widget.x < INFO_PANEL_W` -- which mis-classified right-panel
+widgets that hadn't been positioned yet (sliders default
+`track_x = 0`, checkboxes default to `SLIDER_CB_X = 278`, both
+< INFO_PANEL_W = 280) as left-panel and force-set
+`visible = True`.  The result: when the right-panel Debug
+section was pre-collapsed at startup, its sliders + checkboxes
+appeared at (0, 0), painted over the top of the left pane.
+
+The override now uses `widget.group_id` instead.  Right-panel
+widgets carry `'smoke'` / `'fire'` / `'normals'` group tags at
+`add_slider` / `add_checkbox` time; the override skips any
+widget whose `group_id` is in that set, regardless of where it
+happens to be positioned.  Robust against any future
+"layout-skipped-on-startup" case.
+
+### Wireframe polygon offset
+
+The wireframe-over-solid recipe uses
+`glPolygonOffset(4.0, 4.0)` + `GL_POLYGON_OFFSET_FILL` on the
+solid pass; the line pass renders at natural Z with the offset
+flag disabled and the value reset to `(0, 0)`.  We tried
+`(1, 1)` (z-fought on track segments), then a stacked `+2 / -2`
+recipe with `GL_POLYGON_OFFSET_LINE` (still flickering at
+grazing angles); `(4, 4)` push-back on fills only is the
+landing place.  Don't bump higher without testing -- pushing
+too far produces visible gaps where adjacent tris meet.
+
 ### First-tank-load slowness was Pillow + GL warm-up
 
 A separate, later 6-second first-load stall turned out to NOT be

@@ -9,6 +9,17 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Wireframe polygon offset bumped to 4 (1.78.1)
+
+The stacked `+2 / -2` recipe in 1.78.0 still flickered at grazing
+angles on dense / coplanar geometry.  Reverted to the simpler
+"push fills only" form but at `glPolygonOffset(4.0, 4.0)`.  Four
+depth-buffer-units of clearance is enough to win z-test against
+the surface the lines ride on, on every driver / view-distance
+combo we've tested, without introducing the visible-gap failure
+mode you'd get pushing further.  Line pass renders at natural Z
+with both offset flags off.
+
 ### Camera + viewport polish round (1.78.0)
 
 A pile of usability + correctness fixes accumulated while we

@@ -25,6 +25,8 @@ tankExporterPy/
     scene.py            Camera + scene geometry helpers (grid, axes, sphere)
     shaders.py          GLSL program wrappers
     skybox.py           Cubemap loader, GPU IBL pre-filter pass, skybox renderer
+    picker.py           Off-screen colour-pick FBO + overlay renderer
+                        for the Tools -> Pick Tri triangle picker
     terrain.py          Procedural ground: image-driven OR Perlin-fBm
                         heightmap, mesh build, area-weighted vertex normals
                         (IQ technique), sand-diffuse texture loader
@@ -49,6 +51,14 @@ shaders/
                                 domain warp + cosine palette + slope desat
                                 + sun warm/cool tint + distance fog +
                                 optional sand-diffuse sample
+    picking.vert / .frag        Off-screen picker; vert applies u_model so
+                                the FBO matches the visible scene's world
+                                positions; frag encodes (mesh_id, primID)
+                                into the RGBA8 attachment.
+    overlay_solid.vert / .frag  Tiny uniform-colour shader used by the
+                                picker's filled-triangle / edge-line /
+                                vertex-point passes; honours u_model so
+                                the highlight tracks turret rotation etc.
 
 resources/
     environment_maps/   Skybox cube faces (cube1_FR/BK/LF/RT/UP/DN.png)
@@ -509,6 +519,54 @@ the symbols.  Falls back gracefully (no anisotropy) if the
 Default `size = 1025` → ~1 M verts, ~2 M tris on a 160 m world =
 15.6 cm per quad.  Sufficient for the 67 cm primary sand-ripple
 wavelength to register as ~4 verts across.
+
+---
+
+## `tankExporterPy/picker.py`
+
+Off-screen "back-buffer" triangle picker + overlay renderer.
+
+### `TrianglePicker`
+
+| Method / attr | Purpose | Notes |
+|---|---|---|
+| `enabled` (bool) | Master switch.  `False` = `update_pass` and `draw_overlay` are no-ops; zero per-frame cost when not in use. | flips on the **Pick Tri** Tools-group button |
+| `update_pass(meshes, view, proj, mouse_xy, window_h, viewport, on_hit_change)` | Render every visible mesh into the FBO with the picking shader, read pixel under cursor, dispatch hover-change callback | runs BEFORE the main mesh pass each frame |
+| `draw_overlay(view, proj, c1, c2)` | Render the picked triangle filled in c1 (alpha-blended), edges in c2, three vertex points in red/green/blue | runs AFTER the main mesh pass, before the UI 2-D pass |
+| `last_hit` | `(mesh_idx, tri_idx)` or `None` | Public read-only |
+| `cleanup()` | Free FBO, RBO, color tex, dynamic VAO/VBO, shader programs | called from `Viewer.cleanup` |
+
+### Encoding
+
+24-bit primitive ID + 8-bit mesh ID packed into RGBA8:
+
+| Byte | Value |
+|------|-------|
+| R | mesh_id + 1 (0 reserved as "no hit", clear colour) |
+| G | primID & 0xFF |
+| B | (primID >> 8) & 0xFF |
+| A | (primID >> 16) & 0xFF |
+
+Up to 255 sub-meshes per tank, ~16 M tris per mesh.  Comfortable
+margin over real WoT data.
+
+### State contract
+
+`update_pass` is defensive at entry: forces `GL_DEPTH_TEST` on,
+`glDepthFunc(GL_LESS)`, `glDepthMask(GL_TRUE)`, disables blend +
+polygon offset, mirrors per-mesh `mesh.double_sided` -> cull
+state.  `draw_overlay` documents an explicit "state contract"
+matching what the main render leaves and restoring it at exit.
+
+### Shader uniforms
+
+The picking shader and overlay-solid shader both consume
+`u_view`, `u_proj`, **`u_model`**.  The model matrix is the
+critical fix that makes the FBO line up with the visible scene
+when a mesh has a per-frame transform (turret rotation, gun
+pitch, hardpoint offset).  Without it the picker projects from
+model space while the visible scene renders at world position
+-- you'd hover over the tank and get hits on empty space below.
 
 ---
 

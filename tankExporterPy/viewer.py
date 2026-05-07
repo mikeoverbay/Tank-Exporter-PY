@@ -8038,28 +8038,22 @@ class Viewer:
 
         # 3D pass always starts in GL_FILL.  When the Wireframe toggle
         # is on we run TWO passes in sequence:
-        #   1) solid pass with GL_POLYGON_OFFSET_FILL enabled, which
-        #      nudges every filled triangle AWAY from the camera in
-        #      depth.  The pixels cover the same screen area; only
-        #      their depth values move.
-        #   2) line pass with GL_POLYGON_OFFSET_LINE enabled and a
-        #      NEGATIVE offset, pulling the line fragments TOWARD
-        #      the camera.  The two offsets work together so the
-        #      lines reliably win the depth test against the fills
-        #      at any view distance / camera angle.
-        # Earlier versions used only the FILL offset at (1,1) and
-        # left the line pass at natural Z.  That works on most
-        # drivers but Z-fights at grazing angles on dense meshes
-        # (track segments stacked at near-coplanar distances).  The
-        # double-offset recipe below is robust everywhere.
+        #   1) solid pass with GL_POLYGON_OFFSET_FILL enabled at
+        #      `(4.0, 4.0)`, pushing every filled triangle AWAY from
+        #      the camera in depth-buffer space.  Pixels cover the
+        #      same screen area; only their depth values move.
+        #   2) line pass at natural Z (no offset), so line draws win
+        #      the depth test against the offset-back fills.
+        #
+        # Offset value tuned empirically -- (1,1) z-fought on dense
+        # geometry, (2,2) was still flickering at grazing angles, (4,4)
+        # gives clean separation across every angle / distance combo
+        # we've tested without producing visible gaps where adjacent
+        # tris meet (which is the failure mode if you push too far).
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         if self.wireframe:
-            # Push fills back 2 units in depth-buffer space.  Bumped
-            # from the previous (1, 1) so we get visible separation
-            # even at far distances where the depth buffer's
-            # precision drops.
             glEnable(GL_POLYGON_OFFSET_FILL)
-            glPolygonOffset(2.0, 2.0)
+            glPolygonOffset(4.0, 4.0)
 
         view = self.camera.get_view_matrix()
         proj = self.camera.get_projection_matrix()
@@ -8339,16 +8333,13 @@ class Viewer:
         # so the fragment stage outputs a flat dark colour rather
         # than re-running PBR for the line draws.
         if self.wireframe:
-            # Line pass uses POLYGON_OFFSET_LINE -- the FILL flag we
-            # enabled in the solid pass does NOT apply to GL_LINE
-            # polygon mode, so we need a separate line-mode offset
-            # to pull line fragments TOWARD the camera.  Combined
-            # with the +2 fill offset above, we get ~4 units of
-            # separation in depth-buffer space which beats z-fight
-            # on every driver we've tested.
+            # Line pass at natural Z.  We disable POLYGON_OFFSET_FILL
+            # (which only acted on the solid pass anyway) so the
+            # lines render unbiased; the +4 fill push above gives
+            # them ~4 depth-buffer-units of clearance to win the
+            # z-test against the surface they ride on.
             glDisable(GL_POLYGON_OFFSET_FILL)
-            glEnable(GL_POLYGON_OFFSET_LINE)
-            glPolygonOffset(-2.0, -2.0)
+            glPolygonOffset(0.0, 0.0)
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             glLineWidth(1.0)
             # Force the wireframe colour path in the fragment shader.
@@ -8362,12 +8353,7 @@ class Viewer:
                     continue
                 active.set_mat4('model', mesh.model_matrix)
                 mesh.render(active)
-            # Restore everything we touched.  Both offsets disabled
-            # AND the offset value reset to (0, 0) so any later code
-            # that re-enables either flag without setting its own
-            # offset doesn't inherit our negative line bias.
-            glDisable(GL_POLYGON_OFFSET_LINE)
-            glPolygonOffset(0.0, 0.0)
+            # Restore everything we touched.
             glEnable(GL_CULL_FACE)
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             active.set_int('wireframe_mode', 0)

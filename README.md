@@ -382,6 +382,7 @@ takes ~70 s and ~1.5 GB CPU peak.
 | Button       | What it does                                                   |
 | ------------ | -------------------------------------------------------------- |
 | **ItemList** | Rebuild `TheItemList.xml` from every kept pkg.                 |
+| **Pick Tri** | Toggle the off-screen triangle picker.  When ON, hover the loaded tank to see per-vertex bone indices, weights, and vertex-colour bone-tag in the console.  The hovered triangle paints in the active theme's c1 (fill) / c2 (edges) with red / green / blue vertex markers; the console lines carry colour-coded `#` markers matching the on-screen vertices. |
 
 ### Right panel -- Debug group
 
@@ -404,13 +405,25 @@ regardless of the checkbox.
 | Input                  | Action                                            |
 | ---------------------- | ------------------------------------------------- |
 | Right-click drag       | Orbit                                             |
-| Middle-click drag      | Pan                                               |
+| Middle-click drag      | Pan on the XZ ground plane                        |
+| `Shift` + drag         | Lift / drop the look-at point on the world Y axis (drag DOWN raises, drag UP lowers).  Suspends orbit/pan while held. |
 | Scroll                 | Zoom (or scroll the tree when cursor is over it)  |
 | `W`                    | Toggle wireframe                                  |
 | `N`                    | Toggle normal map                                 |
 | `R`                    | Reset camera                                      |
 | `F11`                  | Toggle maximized ↔ windowed                       |
 | `ESC`                  | Quit                                              |
+
+While `Shift` is held OR the middle mouse button is held, a
+**pale-pink crosshair** (10 units total per axis: X / Y / Z)
+draws at the look-at point so the camera pivot is always
+visible during a move.  Hidden otherwise.
+
+When the cursor enters the TEPY window, focus is automatically
+transferred so the next click registers as a UI action --
+without the standard Windows "first click eaten by the OS"
+double-tap.  Focus is handed back to the previous foreground
+window when the cursor leaves.
 
 ---
 
