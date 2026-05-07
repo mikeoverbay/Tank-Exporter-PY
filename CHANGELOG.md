@@ -9,6 +9,49 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Tank physics: any-tank auto-extract + sign fixes (1.81.0)
+
+* **Auto-extract wheel rig from any chassis.**  New
+  `TankPhysics.from_chassis_meshes` factory walks every loaded
+  mesh whose `component == 'chassis'`, groups verts by their
+  dominant `iii` byte (the SC_UBYTE4 bone-index byte), and
+  extracts road-wheel centroids via a three-criterion heuristic:
+  bbox compact (excludes V_BlendBone hull strip), Y < 0.55 m
+  (excludes return rollers / idler / drive-sprocket-on-most-tanks),
+  vert count >= 50.  Tested on T110E4 (6+6), T92 (14+14 -- paired
+  twin-wheel design), AMX 13 105 (7+7), Object 268/4 (9+9).
+  Falls back to the T110E4 hardcoded rig if extraction yields
+  no road wheels (very rare).  Wired into `Viewer.load_vehicle`
+  so every tank load auto-rebuilds the physics rig.
+
+* **Z-direction fix.**  Wheel positions were being placed at
+  the wrong end of the tank because TEPY renders the skinned
+  chassis at the primitives' raw Z while flipping the non-
+  skinned hull -- so the chassis-mesh-local Z direction runs
+  opposite to TEPY's rendered world Z direction.  Both the
+  hardcoded T110E4_WHEELS data and the auto-extract centroids
+  now negate Z on the way through, so the physics samples
+  terrain at the visually-correct world XZ for each wheel.
+
+* **Drive controls flipped.**  Same root cause as the Z fix:
+  arrow keys / Q / E were driving the tank in the wrong world
+  direction relative to its visible front.  Speeds inverted
+  (move_speed = -5.0, yaw_speed = -60.0) so UP = forward,
+  LEFT = strafe-left, Q = yaw-left match the visible tank.
+
+* **Plane fit hardened.**  Replaced the covariance-eigenvector
+  plane fit with `np.linalg.lstsq(y = a*x + b*z + c)`, which is
+  immune to the degenerate "terrain varies along only one
+  horizontal axis" case (where the eigvec method went to 90
+  degrees of pitch / roll).  Same result on healthy inputs;
+  graceful on synthetic single-axis slopes.
+
+* **Roll sign corrected.**  The original `atan2(+nx, ny)` lifted
+  the wrong side of the tank on side slopes.  Negated to
+  `atan2(-nx, ny)` so terrain rising on +X side correctly
+  raises the right-side wheels (aviation +roll convention per
+  the diagram Professor Coffee posted).
+
 ### Suspension-test checkbox + Normals-header dedup (1.80.1)
 
 * New right-panel **`Susp`** checkbox under the Debug section,

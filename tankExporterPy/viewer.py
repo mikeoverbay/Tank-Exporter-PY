@@ -7138,6 +7138,33 @@ class Viewer:
             # opens to the crash subfolder rather than the normal
             # one (paths matter).
             self._stash_extract_paths()
+
+            # Auto-extract the wheel rig from the freshly-loaded
+            # chassis sub-meshes so tank physics works on ANY tank
+            # rather than just T110E4.  Heuristic: group every
+            # vertex of every `component == 'chassis'` mesh by its
+            # dominant `iii` byte, take centroids of groups whose
+            # mean Y is below ~0.75 m (the road-wheel band -- this
+            # excludes drive sprockets, idlers, and return rollers
+            # which sit higher up).  Falls back to the T110E4
+            # hardcoded rig if no groups match (very rare).
+            try:
+                from .tank_physics import TankPhysics
+                chass = [m for m in self.meshes
+                         if getattr(m, 'component', '') == 'chassis']
+                self.tank_physics = TankPhysics.from_chassis_meshes(chass)
+                # Reset position state on tank reload so old
+                # positions don't carry over.
+                self.tank_physics.pos[:]   = 0.0
+                self.tank_physics.yaw_deg  = 0.0
+                self.tank_physics.pitch_deg = 0.0
+                self.tank_physics.roll_deg  = 0.0
+                self.tank_physics.vy        = 0.0
+                # Re-arm the drive-key hint so the next time Susp
+                # is toggled on the controls get re-printed.
+                self._drive_keys_seen = False
+            except Exception as exc:
+                print(f"[viewer] tank-physics auto-extract failed: {exc}")
             er = self._active_set.extract_variant_dir
             if er:
                 variant_word = ('damaged' if self._active_set.extract_damaged
@@ -8002,34 +8029,57 @@ class Viewer:
         # Useful for watching the suspension respond to the heightmap
         # in real time.  Speed scales with frame dt so movement feels
         # uniform regardless of FPS.  Q / E rotate the chassis yaw.
+        #
+        # Speeds NEGATED from the natural mathematical convention
+        # because TEPY's rendered world Z direction runs opposite
+        # to the chassis-mesh-local Z (skinned chassis is not
+        # Z-flipped on load while the hull/turret/gun are, so the
+        # visible front of the tank ends up at world -Z).  This
+        # negation makes UP=forward, LEFT=strafe-left, Q=yaw-left
+        # match the visible tank.
         if (self.tank_physics_enabled and self.tank_physics
                 and self.show_terrain and self.terrain):
             keys = pygame.key.get_pressed()
             dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
-            move_speed = 5.0   # m/s
-            yaw_speed  = 60.0  # deg/s
+            move_speed = -5.0   # m/s, sign flipped (see comment above)
+            yaw_speed  = -60.0  # deg/s, sign flipped
+            tp = self.tank_physics
+            yaw = math.radians(tp.yaw_deg)
+            cyy, syy = math.cos(yaw), math.sin(yaw)
+            moved = False
             if keys[pygame.K_UP]:
-                # Move "forward" relative to current yaw.
-                yaw = math.radians(self.tank_physics.yaw_deg)
-                self.tank_physics.pos[0] += math.sin(yaw) * move_speed * dt
-                self.tank_physics.pos[2] += math.cos(yaw) * move_speed * dt
+                tp.pos[0] += syy * move_speed * dt
+                tp.pos[2] += cyy * move_speed * dt
+                moved = True
             if keys[pygame.K_DOWN]:
-                yaw = math.radians(self.tank_physics.yaw_deg)
-                self.tank_physics.pos[0] -= math.sin(yaw) * move_speed * dt
-                self.tank_physics.pos[2] -= math.cos(yaw) * move_speed * dt
+                tp.pos[0] -= syy * move_speed * dt
+                tp.pos[2] -= cyy * move_speed * dt
+                moved = True
             if keys[pygame.K_LEFT]:
-                # Strafe left.
-                yaw = math.radians(self.tank_physics.yaw_deg)
-                self.tank_physics.pos[0] -= math.cos(yaw) * move_speed * dt
-                self.tank_physics.pos[2] += math.sin(yaw) * move_speed * dt
+                tp.pos[0] -= cyy * move_speed * dt
+                tp.pos[2] += syy * move_speed * dt
+                moved = True
             if keys[pygame.K_RIGHT]:
-                yaw = math.radians(self.tank_physics.yaw_deg)
-                self.tank_physics.pos[0] += math.cos(yaw) * move_speed * dt
-                self.tank_physics.pos[2] -= math.sin(yaw) * move_speed * dt
+                tp.pos[0] += cyy * move_speed * dt
+                tp.pos[2] -= syy * move_speed * dt
+                moved = True
             if keys[pygame.K_q]:
-                self.tank_physics.yaw_deg -= yaw_speed * dt
+                tp.yaw_deg -= yaw_speed * dt
+                moved = True
             if keys[pygame.K_e]:
-                self.tank_physics.yaw_deg += yaw_speed * dt
+                tp.yaw_deg += yaw_speed * dt
+                moved = True
+            # One-shot diagnostic so we can tell whether the issue
+            # is "keys not detected at all" (focus) vs "detected
+            # but tank not visibly responding".  Logged once per
+            # tank load.
+            if moved and not getattr(self, '_drive_keys_seen', False):
+                self.log(
+                    f"drive: tank pos = "
+                    f"({tp.pos[0]:+.2f}, _, {tp.pos[2]:+.2f})  "
+                    f"yaw = {tp.yaw_deg:+.1f}",
+                    color=(180, 220, 255))
+                self._drive_keys_seen = True
 
         if not self.ui.is_pointer_over_ui(*mouse_pos):
             dx = mouse_pos[0] - self.mouse_last[0]
@@ -8277,36 +8327,57 @@ class Viewer:
             ])
             self.lookat_lines.render(self.color_shader, view, proj)
 
-        # Tank physics overlay: per-wheel ground / wheel-centre dots
-        # connected by yellow suspension lines.  Drawn behind the
-        # main mesh pass via the shared "no depth test" pass below
-        # so the markers are always visible.  Gated by Debug
-        # checkbox + physics-enabled + at least one wheel sampled.
+        # Tank physics overlay: per-wheel ground / wheel-centre
+        # markers + yellow suspension lines.  Gated only by the
+        # Susp checkbox (NOT the master Debug flag) so the user
+        # gets visual feedback whenever the physics is active --
+        # treat the markers as part of "what Susp does".  Without
+        # them you can't see WHERE the wheels think they're
+        # touching, which is half the point of the test.
         if (self.tank_physics_enabled and self.tank_physics is not None
-                and self._debug and self.meshes
+                and self.meshes
                 and self.show_terrain and self.terrain
                 and len(self.tank_physics.last_wheel_world)):
             tp     = self.tank_physics
-            PINK   = (1.0, 0.55, 0.75)   # ground-contact dots
-            CYAN   = (0.50, 0.95, 0.95)  # target wheel-centre dots
-            YELLOW = (1.0, 0.95, 0.30)
-            DOT_R  = 0.06   # 6 cm marker radius -- visible at any zoom
-            segs = []
+            PINK   = (1.0, 0.40, 0.65)   # ground-contact dots
+            CYAN   = (0.40, 0.95, 0.95)  # target wheel-centre dots
+            YELLOW = (1.0, 0.92, 0.20)
+            # 20 cm asterisk: visible at any zoom level.  Drawn as a
+            # 3-axis cross + diagonal so the marker reads as a "star"
+            # against the terrain texture even when the camera is
+            # far back.
+            DOT_R  = 0.20
+            DIAG   = DOT_R * 0.71   # 1/sqrt(2) -- equal-length diagonals
+            segs   = []
             for i, (wx, _wy, wz) in enumerate(tp.last_wheel_world):
                 ty = float(tp.last_terrain_y[i])
-                wc = float(tp.last_target_y[i])   # wheel CENTRE Y target
-                # Pink "X" at ground contact.
+                wc = float(tp.last_target_y[i])
+
+                # ---- Ground contact: pink star (XZ + diagonals) ----
+                # Render in the XZ plane at terrain Y so it reads as
+                # "footprint on the ground".
                 segs.append(((wx - DOT_R, ty, wz),
                              (wx + DOT_R, ty, wz), PINK))
                 segs.append(((wx, ty, wz - DOT_R),
                              (wx, ty, wz + DOT_R), PINK))
-                # Cyan "X" at the wheel-centre target.
+                segs.append(((wx - DIAG, ty, wz - DIAG),
+                             (wx + DIAG, ty, wz + DIAG), PINK))
+                segs.append(((wx - DIAG, ty, wz + DIAG),
+                             (wx + DIAG, ty, wz - DIAG), PINK))
+
+                # ---- Wheel-centre target: cyan star in XY plane ---
+                # Use vertical (Y) axis so the marker is always
+                # visible regardless of camera angle.
                 segs.append(((wx - DOT_R, wc, wz),
                              (wx + DOT_R, wc, wz), CYAN))
-                segs.append(((wx, wc, wz - DOT_R),
-                             (wx, wc, wz + DOT_R), CYAN))
-                # Yellow line from contact -> wheel centre = the
-                # suspension shaft for that wheel.
+                segs.append(((wx, wc - DOT_R, wz),
+                             (wx, wc + DOT_R, wz), CYAN))
+                segs.append(((wx - DIAG, wc - DIAG, wz),
+                             (wx + DIAG, wc + DIAG, wz), CYAN))
+                segs.append(((wx - DIAG, wc + DIAG, wz),
+                             (wx + DIAG, wc - DIAG, wz), CYAN))
+
+                # ---- Suspension shaft: yellow line ----------------
                 segs.append(((wx, ty, wz),
                              (wx, wc, wz), YELLOW))
             self.physics_lines.update(segs)
@@ -8605,8 +8676,17 @@ class Viewer:
         # restores `mesh.model_matrix = bind_model_matrix.copy()`,
         # so the tank pops back to the world origin instantly.
         if self._suspension_cb is not None:
-            self._suspension_test     = bool(self._suspension_cb.checked)
-            self.tank_physics_enabled = self._suspension_test
+            new_susp = bool(self._suspension_cb.checked)
+            # On the off->on transition, log the drive controls
+            # so they're discoverable instead of hidden in the
+            # CHANGELOG.  Once per toggle, cleared when Susp goes
+            # back off so re-enabling reprints.
+            if new_susp and not self._suspension_test:
+                self.log("Susp ON -- drive controls:", color=(180, 220, 255))
+                self.log("  arrow keys = move along heading", color=(160, 200, 230))
+                self.log("  Q / E      = yaw left / right",   color=(160, 200, 230))
+            self._suspension_test     = new_susp
+            self.tank_physics_enabled = new_susp
 
         # Hardpoint markers -- orange sphere at each discovered exhaust
         # node + 0.5-unit cyan direction vector.  Debug-only.
