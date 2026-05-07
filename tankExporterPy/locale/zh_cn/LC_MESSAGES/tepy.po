@@ -148,3 +148,6 @@ msgstr "火"
 
 msgid "Smoke"
 msgstr "烟雾"
+
+msgid "Pick Tri"
+msgstr "选三角"

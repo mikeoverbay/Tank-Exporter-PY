@@ -146,3 +146,6 @@ msgstr "FBX import aborted"
 
 msgid "FBX import failed"
 msgstr "FBX import failed"
+
+msgid "Pick Tri"
+msgstr "Pick Tri"

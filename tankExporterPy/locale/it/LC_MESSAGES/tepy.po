@@ -148,3 +148,6 @@ msgstr "Fuoco"
 
 msgid "Smoke"
 msgstr "Fumo"
+
+msgid "Pick Tri"
+msgstr "Sel. Tri"

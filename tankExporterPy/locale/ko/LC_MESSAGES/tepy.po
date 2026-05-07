@@ -148,3 +148,6 @@ msgstr "불"
 
 msgid "Smoke"
 msgstr "연기"
+
+msgid "Pick Tri"
+msgstr "삼각선택"

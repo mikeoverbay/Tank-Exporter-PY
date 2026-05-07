@@ -148,3 +148,6 @@ msgstr "Feuer"
 
 msgid "Smoke"
 msgstr "Rauch"
+
+msgid "Pick Tri"
+msgstr "Tri wahlen"

@@ -635,6 +635,29 @@ class Viewer:
         # camera-facing math at a glance.
         self.fire_outlines = LineBatch(line_width=1.5)
 
+        # Line batch for the look-at crosshair.  Three perpendicular
+        # 10-unit-total lines (±5 on each axis from camera.center)
+        # in pale pink, only drawn while the user is actively
+        # changing the look-at point: Shift held (lift on Y) or
+        # middle-mouse-button held (pan on XZ).  When neither is
+        # held, the crosshair is hidden so it doesn't clutter the
+        # normal viewing scene.
+        self.lookat_lines = LineBatch(line_width=1.5)
+        # Flag set by `handle_input` each tick; checked by
+        # `render` to decide whether to draw the crosshair.  Lives
+        # on `self` (not a render-time recheck) so we can capture
+        # the held state at exactly the same instant as the camera
+        # mutation it pairs with.
+        self._show_lookat_lines = False
+
+        # Previous-foreground HWND saved on WINDOWENTER so we can
+        # restore that window's focus when the cursor leaves.
+        # `None` between leave/enter cycles -- we only save when
+        # we actually steal focus, not on every event.  Windows-
+        # only state; meaningless on Linux / macOS where SDL2
+        # already does the right thing on cursor enter.
+        self._prev_foreground_hwnd = None
+
         # ---- Particle system (engine smoke, billboard flipbook) ------------
         # Flipbook is N PNG frames (256x256 RGBA) at resources/smoke/.
         # Loaded once at startup and held for the life of the viewer.
@@ -897,6 +920,12 @@ class Viewer:
             print(f"[viewer] Terrain disabled: {exc}")
             self.terrain        = None
             self.terrain_shader = None
+
+        # Triangle picker (Tools -> Pick Tri).  Lazily constructs its
+        # FBO + shaders on the first frame the picker is enabled, so
+        # there's no startup cost when the feature isn't in use.
+        from .picker import TrianglePicker
+        self.picker = TrianglePicker()
 
         # Toggleable display flags
         self.show_grid    = False
@@ -1681,6 +1710,24 @@ class Viewer:
                            action=self._on_rebuild_itemlist_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
+        # 'Pick Tri' toggles the off-screen back-buffer triangle picker.
+        # Lives in the Tools group so it doesn't bloat the main UI bar.
+        # When ON, every frame runs an extra mesh-pass into a hidden
+        # FBO encoding (mesh_id, primitive_id) per pixel; the pixel
+        # under the cursor is read back and the picked triangle's
+        # vertex data dumped to the console.  The same hover triggers
+        # an overlay highlight on the live scene.  See picker.py.
+        pick_btn = self.ui.add_button(
+            _('Pick Tri'), x, y, 70, h, active=False,
+            action=self._on_pick_tri_clicked)
+        # Tag with the same theme slot as our other diagnostic buttons.
+        pick_btn.accent_color = _theme.c1()
+        pick_btn.theme_slot   = 'c1'
+        # Stash the button so the toggle handler can mutate `active`
+        # for the wheat locked-on border to render.
+        self._pick_tri_btn = pick_btn
+        x       += 70 + self.ui.BUTTON_SPACING
+
         # ---- Extract group (top of the left panel) ----------------
         # Three buttons that operate on the user's res_mods tree:
         #   * Extract           -- copy chosen tank parts (+ optional
@@ -1926,18 +1973,33 @@ class Viewer:
         )
 
         # Hide left-panel widgets when the info-panel is collapsed.
-        # Identifies "left panel" widgets by their x position falling
-        # inside the panel's x range (post-layout).
+        #
+        # Discriminator is `group_id` -- right-panel widgets carry
+        # 'smoke' / 'fire' / 'normals' tags assigned at `add_slider`
+        # / `add_checkbox` time; everything else is treated as
+        # left-panel.  This is ROBUST regardless of where the widget
+        # is currently positioned, which matters because the
+        # right-panel layout body is SKIPPED when the Debug section
+        # is collapsed -- those widgets keep their default x=0
+        # (sliders) or x=SLIDER_CB_X=278 (checkboxes) until the
+        # Debug section is re-expanded.  An x-based check would
+        # then misclassify them as left-panel and force them to
+        # visible=True at (0, 0) -- the "phantom widgets at the top
+        # of the left pane" bug.  See PITFALLS.md P1 for the
+        # original-style coord-based override that this replaces.
+        RIGHT_GROUP_IDS = ('smoke', 'fire', 'normals')
         left_visible = not self.ui.info_collapsed
         for btn in self.ui.buttons:
             if btn.x < self.INFO_PANEL_W:
                 btn.visible = left_visible
         for sl in self.ui.sliders:
-            if sl.track_x < self.INFO_PANEL_W:
-                sl.visible = left_visible
+            if getattr(sl, 'group_id', '') in RIGHT_GROUP_IDS:
+                continue
+            sl.visible = left_visible
         for cb in self.ui.checkboxes:
-            if cb.x < self.INFO_PANEL_W:
-                cb.visible = left_visible
+            if getattr(cb, 'group_id', '') in RIGHT_GROUP_IDS:
+                continue
+            cb.visible = left_visible
 
     # ------------------------------------------------------------------
     # PKG extractor + tree-panel helpers
@@ -4607,6 +4669,71 @@ class Viewer:
         self.log_clear(status='ItemList')
         self._rebuild_itemlist_now()
 
+    # ------------------------------------------------------------------
+    def _on_pick_tri_clicked(self):
+        """Action-button callback for the 'Pick Tri' tool button.
+
+        Toggles the triangle picker.  The button's `active` flag is
+        the source of truth -- the wheat locked-on border renders
+        when active, and `picker.enabled` mirrors it.  Clearing the
+        picker's last hit + the console on toggle-OFF gives a clean
+        end-of-session state instead of a stale highlight hanging
+        around.
+        """
+        btn = getattr(self, '_pick_tri_btn', None)
+        new_state = not (btn and btn.active)
+        if btn is not None:
+            btn.active = bool(new_state)
+        self.picker.enabled = bool(new_state)
+        if new_state:
+            self.log_clear(status='Pick Tri')
+            self.log("Pick Tri: hover the loaded tank to see "
+                     "per-vertex bone data.")
+        else:
+            self.picker.last_hit = None
+            self.log_clear(status='')
+
+    # ------------------------------------------------------------------
+    def _on_picker_hit_change(self, mesh_idx, tri_idx):
+        """Picker hover-change callback.
+
+        Called from `picker.update_pass` when the triangle under the
+        cursor changes between frames.  Clears the console and prints
+        three colour-coded lines (one per vertex) showing that
+        vertex's bone indices and weights.  If `mesh_idx == -1` the
+        cursor moved off any geometry -- we just blank the console
+        header instead of dumping data.
+        """
+        from .picker import format_vertex_line
+        if mesh_idx < 0 or mesh_idx >= len(self.meshes):
+            # Pointer left the geometry.  Reset the status so the
+            # console header reads cleanly; leave the previous lines
+            # in place so the user can still scroll up to read them.
+            self.log_status('Pick Tri  (hover off-mesh)')
+            return
+
+        mesh = self.meshes[mesh_idx]
+        try:
+            base = tri_idx * 3
+            v_ids = (
+                int(mesh.indices[base    ]),
+                int(mesh.indices[base + 1]),
+                int(mesh.indices[base + 2]),
+            )
+        except (IndexError, TypeError):
+            self.log_status(
+                f'Pick Tri  (mesh {mesh_idx} tri {tri_idx} -- '
+                f'index out of range)')
+            return
+
+        # Fresh dump for this triangle.
+        self.log_clear(
+            status=f"Pick Tri  -- '{mesh.name}'  tri {tri_idx}  "
+                   f"verts {v_ids[0]}/{v_ids[1]}/{v_ids[2]}")
+        for i, vid in enumerate(v_ids):
+            text, color = format_vertex_line('#', i, mesh, vid)
+            self.log(text, color=color)
+
     def _ensure_itemlist(self):
         """Auto-rebuild the lookup table if it's missing or empty.
 
@@ -7239,6 +7366,7 @@ class Viewer:
             ]),
             (_('Tools'), [
                 (_('ItemList'),  0, 3),
+                (_('Pick Tri'),  0, 3),
             ]),
         ]
 
@@ -7673,6 +7801,23 @@ class Viewer:
             if event.type == QUIT:
                 self.running = False
 
+            elif event.type == pygame.WINDOWENTER:
+                # Mouse just crossed INTO the TEPY window.  Save
+                # whichever window currently holds the foreground
+                # so we can return focus when the cursor leaves,
+                # then bring TEPY to the foreground.  Eliminates
+                # the "first click only focuses, second click
+                # actually does the action" double-tap that's
+                # standard Windows behaviour for unfocused apps.
+                self._maybe_steal_focus_on_enter()
+
+            elif event.type == pygame.WINDOWLEAVE:
+                # Cursor left the TEPY window -- hand focus back
+                # to whatever was in front before, so we don't
+                # silently rob another app of its input the moment
+                # the user mouses away.
+                self._maybe_restore_focus_on_leave()
+
             elif event.type == VIDEORESIZE:
                 # Carry vsync=1 through every set_mode call -- SDL
                 # treats each set_mode as a fresh window-create on
@@ -7771,16 +7916,47 @@ class Viewer:
         btns      = pygame.mouse.get_pressed()
         mouse_pos = pygame.mouse.get_pos()
 
+        # Crosshair visibility: any time the user is actively
+        # moving the look-at point.  Captured here (outside the
+        # cursor-over-UI gate so it stays correct even when the
+        # pointer briefly grazes a UI panel mid-drag), consumed by
+        # `render`.  Shift held (Y-axis lift) OR middle-mouse
+        # button (the "wheel" button -- XZ pan).  Right-click
+        # orbit doesn't move the look-at, so it doesn't trigger
+        # the cue.
+        shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        self._show_lookat_lines = bool(shift_held or btns[1])
+
         if not self.ui.is_pointer_over_ui(*mouse_pos):
             dx = mouse_pos[0] - self.mouse_last[0]
             dy = mouse_pos[1] - self.mouse_last[1]
 
-            if btns[2]:   # right-click -> orbit
+            # Shift held -> lift / drop the look-at point on the
+            # world Y axis.  Suspends the regular orbit / pan so
+            # the modifier mode is unambiguous: drag up = rise,
+            # drag down = sink.  Speed scales with camera distance
+            # (same convention the pan uses) so the response feels
+            # constant regardless of zoom.
+            if shift_held and (dx or dy):
+                # Half the pan-XZ speed so the Y lift feels deliberate
+                # and lands precisely instead of overshooting.  The
+                # 0.10 factor (vs the pan's 0.20) is the only knob --
+                # adjust here if it ever feels too sluggish or too
+                # twitchy.
+                speed_y = 0.01 * self.camera.distance * 0.10
+                # Sign reversed from the obvious "drag-up = rise"
+                # convention: pygame y grows downward, so adding
+                # `dy * speed` directly means drag-DOWN raises the
+                # look-at and drag-UP drops it -- matches the user's
+                # mental model of "push the world down to lift my
+                # gaze" / "pull the world up to look down".
+                self.camera.center[1] += dy * speed_y
+            elif btns[2]:   # right-click -> orbit
                 self.camera.yaw   += dx * 0.5
                 self.camera.pitch += dy * 0.5
                 self.camera.pitch  = np.clip(self.camera.pitch, -89, 89)
 
-            if btns[1]:   # middle-click -> pan on XZ ground plane
+            if btns[1] and not shift_held:   # middle-click -> pan on XZ ground plane
                 # Pan speed (formerly a UI slider, baked at 0.20)
                 speed = 0.01 * self.camera.distance * 0.20
                 view  = self.camera.get_view_matrix()
@@ -7863,24 +8039,55 @@ class Viewer:
         # 3D pass always starts in GL_FILL.  When the Wireframe toggle
         # is on we run TWO passes in sequence:
         #   1) solid pass with GL_POLYGON_OFFSET_FILL enabled, which
-        #      nudges every filled triangle SLIGHTLY AWAY from the
-        #      camera in depth.  The pixels still cover the same
-        #      screen area; only their depth values move.
-        #   2) line pass at normal Z (no offset), so the line draws
-        #      win the depth test against the offset-back fills.
-        # Standard "wireframe over solid" recipe -- one polygon-offset
-        # call before solid draws, disable + GL_LINE for the overlay.
+        #      nudges every filled triangle AWAY from the camera in
+        #      depth.  The pixels cover the same screen area; only
+        #      their depth values move.
+        #   2) line pass with GL_POLYGON_OFFSET_LINE enabled and a
+        #      NEGATIVE offset, pulling the line fragments TOWARD
+        #      the camera.  The two offsets work together so the
+        #      lines reliably win the depth test against the fills
+        #      at any view distance / camera angle.
+        # Earlier versions used only the FILL offset at (1,1) and
+        # left the line pass at natural Z.  That works on most
+        # drivers but Z-fights at grazing angles on dense meshes
+        # (track segments stacked at near-coplanar distances).  The
+        # double-offset recipe below is robust everywhere.
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         if self.wireframe:
+            # Push fills back 2 units in depth-buffer space.  Bumped
+            # from the previous (1, 1) so we get visible separation
+            # even at far distances where the depth buffer's
+            # precision drops.
             glEnable(GL_POLYGON_OFFSET_FILL)
-            # Positive factor / units pushes filled tris AWAY from
-            # camera in depth-buffer space.  Tuned to a stable
-            # value across Intel/NVIDIA/AMD; bigger numbers can
-            # produce visible gaps where adjacent tris meet.
-            glPolygonOffset(1.0, 1.0)
+            glPolygonOffset(2.0, 2.0)
 
         view = self.camera.get_view_matrix()
         proj = self.camera.get_projection_matrix()
+
+        # ---- Triangle picker (off-screen colour-pick) ----------------
+        # When the Pick Tri tool is on, render the tank into a hidden
+        # FBO with the picking shader and read back the pixel under
+        # the cursor.  Runs BEFORE the main scene pass: the picking
+        # render binds its own FBO + viewport, so we have to re-bind
+        # the back buffer + scene viewport afterward to keep the
+        # rest of the pipeline pointing at the visible target.
+        if (self.picker.enabled and self.meshes
+                and not self.ui.is_pointer_over_ui(*pygame.mouse.get_pos())):
+            self.picker.update_pass(
+                meshes        = self.meshes,
+                view          = view,
+                proj          = proj,
+                mouse_xy      = pygame.mouse.get_pos(),
+                window_h      = self.height,
+                viewport      = (scene_x, console_h, scene_w, scene_h),
+                on_hit_change = self._on_picker_hit_change,
+            )
+            # Restore the back-buffer + scene viewport for the main
+            # render pass below.  picker.update_pass leaves
+            # GL_FRAMEBUFFER == 0 already, but we re-bind explicitly
+            # in case a future driver bug breaks that contract.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            glViewport(scene_x, console_h, scene_w, scene_h)
 
         # Skybox -- rendered first; depth trick (xyww) places it at far plane
         if self.skybox and self.show_skybox:
@@ -7911,6 +8118,27 @@ class Viewer:
             self.grid.render(self.color_shader, view, proj)
         if self.show_axes:
             self.axes.render(self.color_shader, view, proj)
+
+        # Look-at crosshair: pale-pink lines spanning 10 units total
+        # along each world axis (X / Y / Z), centred on
+        # camera.center.  Only drawn while the user is actively
+        # moving the look-at point -- gated by the
+        # `_show_lookat_lines` flag set in `handle_input` (Shift
+        # held OR middle-mouse-button held).  No depth test so the
+        # lines stay visible regardless of where the geometry is.
+        if self._show_lookat_lines:
+            cx, cy_, cz = (float(self.camera.center[0]),
+                           float(self.camera.center[1]),
+                           float(self.camera.center[2]))
+            H = 5.0   # half-length per axis -> 10 units total
+            PINK = (1.0, 0.75, 0.85)
+            self.lookat_lines.update([
+                ((cx - H, cy_, cz), (cx + H, cy_, cz), PINK),  # X
+                ((cx, cy_ - H, cz), (cx, cy_ + H, cz), PINK),  # Y (up in GL)
+                ((cx, cy_, cz - H), (cx, cy_, cz + H), PINK),  # Z
+            ])
+            self.lookat_lines.render(self.color_shader, view, proj)
+
         glEnable(GL_DEPTH_TEST)
 
         if not self.meshes:
@@ -8111,10 +8339,16 @@ class Viewer:
         # so the fragment stage outputs a flat dark colour rather
         # than re-running PBR for the line draws.
         if self.wireframe:
-            # First, disable the FILL offset we enabled at the start
-            # of the solid pass.  Lines render at their natural Z so
-            # they sit IN FRONT of the offset-back surface.
+            # Line pass uses POLYGON_OFFSET_LINE -- the FILL flag we
+            # enabled in the solid pass does NOT apply to GL_LINE
+            # polygon mode, so we need a separate line-mode offset
+            # to pull line fragments TOWARD the camera.  Combined
+            # with the +2 fill offset above, we get ~4 units of
+            # separation in depth-buffer space which beats z-fight
+            # on every driver we've tested.
             glDisable(GL_POLYGON_OFFSET_FILL)
+            glEnable(GL_POLYGON_OFFSET_LINE)
+            glPolygonOffset(-2.0, -2.0)
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             glLineWidth(1.0)
             # Force the wireframe colour path in the fragment shader.
@@ -8128,7 +8362,12 @@ class Viewer:
                     continue
                 active.set_mat4('model', mesh.model_matrix)
                 mesh.render(active)
-            # Restore everything we touched
+            # Restore everything we touched.  Both offsets disabled
+            # AND the offset value reset to (0, 0) so any later code
+            # that re-enables either flag without setting its own
+            # offset doesn't inherit our negative line bias.
+            glDisable(GL_POLYGON_OFFSET_LINE)
+            glPolygonOffset(0.0, 0.0)
             glEnable(GL_CULL_FACE)
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             active.set_int('wireframe_mode', 0)
@@ -8315,6 +8554,16 @@ class Viewer:
             self.fire_outlines.update(segs)
             self.fire_outlines.render(self.color_shader, view, proj)
 
+        # ---- Triangle-picker overlay ---------------------------------
+        # Draw the highlighted triangle + edge lines + vertex point
+        # markers on top of the just-rendered tank.  Lives here
+        # (before the UI 2-D pass switches viewport / disables depth
+        # test) so it composites correctly with the scene depth
+        # buffer.  No-op when the picker is disabled or has no hit.
+        if self.picker.enabled:
+            self.picker.draw_overlay(view, proj,
+                                      _theme.c1(), _theme.c2())
+
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
         glViewport(0, 0, self.width, self.height)
@@ -8357,6 +8606,72 @@ class Viewer:
                 self._gl_query_ids = []
 
         pygame.display.flip()
+
+    # ------------------------------------------------------------------
+    # Mouse-enter / leave focus stealing (Windows polite-grab)
+    # ------------------------------------------------------------------
+
+    def _maybe_steal_focus_on_enter(self):
+        """Bring TEPY to the foreground when the cursor enters our
+        window, saving whatever window held foreground before so
+        we can hand it back on `WINDOWLEAVE`.
+
+        The point: Windows' default click-to-focus rule eats the
+        first click on a backgrounded app (the click only raises
+        the window; the inner control sees nothing).  Stealing
+        focus on cursor-enter means the very first click on a
+        TEPY button does what the user expects.
+
+        Politeness: we save the previous foreground HWND on the
+        way IN and restore it on the way OUT (`WINDOWLEAVE`), so
+        we're not permanently stealing input from whatever was
+        focused before.
+
+        Windows-only.  On Linux / macOS, SDL2 already handles
+        cursor-enter focus the way the user expects, so the
+        platform check short-circuits and we do nothing.
+        """
+        if os.name != 'nt':
+            return
+        # If we already have a saved hwnd, the user re-entered
+        # without leaving in between -- don't double-save.  The
+        # original prev hwnd is still the right one to restore.
+        if self._prev_foreground_hwnd is not None:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            wm_info = pygame.display.get_wm_info()
+            my_hwnd = wm_info.get('window') if wm_info else None
+            cur     = user32.GetForegroundWindow()
+            if not my_hwnd or cur == my_hwnd:
+                return    # already foreground; nothing to steal
+            self._prev_foreground_hwnd = int(cur)
+            user32.SetForegroundWindow(int(my_hwnd))
+        except Exception:
+            # ctypes / WM-info / SetForegroundWindow can all fail
+            # in edge cases (RDP sessions, screen-locked, security
+            # policy).  Reset so the leave handler doesn't try to
+            # restore an invalid hwnd.
+            self._prev_foreground_hwnd = None
+
+    def _maybe_restore_focus_on_leave(self):
+        """Hand focus back to whichever window was foreground
+        before our mouse-enter steal.  Called on `WINDOWLEAVE`.
+
+        No-op when we never actually stole focus (cursor crossed
+        the window boundary while we already had it, or the
+        platform-check short-circuited the steal).
+        """
+        if os.name != 'nt' or self._prev_foreground_hwnd is None:
+            return
+        try:
+            import ctypes
+            ctypes.windll.user32.SetForegroundWindow(
+                int(self._prev_foreground_hwnd))
+        except Exception:
+            pass
+        self._prev_foreground_hwnd = None
 
     # ------------------------------------------------------------------
     # Main loop
@@ -8631,6 +8946,7 @@ class Viewer:
         self.hp_sphere.cleanup()
         self.hp_lines.cleanup()
         self.fire_outlines.cleanup()
+        self.lookat_lines.cleanup()
         if self.smoke_particles is not None:
             self.smoke_particles.cleanup()
         if self.fire_smoke_particles is not None:

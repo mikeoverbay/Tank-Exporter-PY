@@ -148,3 +148,6 @@ msgstr "Lua"
 
 msgid "Smoke"
 msgstr "Khoi"
+
+msgid "Pick Tri"
+msgstr "Chon Tri"

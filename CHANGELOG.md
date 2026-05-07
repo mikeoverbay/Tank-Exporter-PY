@@ -9,6 +9,167 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Camera + viewport polish round (1.78.0)
+
+A pile of usability + correctness fixes accumulated while we
+exercised the new triangle picker against real tank meshes.
+
+**Picker: per-mesh model_matrix in pick + overlay**
+
+The picking shader was projecting every mesh from MODEL space
+while the visible scene rendered each mesh at its WORLD-space
+position via `mesh.model_matrix` (turret rotation, gun pitch,
+hardpoint offsets).  Symptom: hover the (correctly-positioned)
+tank, get hits on empty space underneath where the model-space
+geometry happened to land in screen.
+
+Fix: added `uniform mat4 u_model` to both `picking.vert` and
+`overlay_solid.vert`, uploaded per-mesh in `update_pass`, cached
+on hit so `draw_overlay` re-applies the same transform to the
+highlight.  Picker FBO now matches the visible scene
+pixel-for-pixel.
+
+**Picker: state-stack hygiene**
+
+`draw_overlay` was leaving `GL_CULL_FACE` disabled (from pass 1's
+filled-triangle draw) and `glPolygonOffset(-1, -1)` live in the
+GL state.  The overlay now restores both at exit and documents an
+explicit "state contract" -- the depth, blend, polygon-offset,
+line-width, point-size, and cull-face state on exit equals the
+state on entry.
+
+`update_pass` was already defensive at entry (forcing GL_LESS,
+GL_DEPTH_TEST, GL_DEPTH_MASK, disabling polygon offset and blend)
+but wasn't matching the main render's per-mesh culling
+convention.  Now it does -- `mesh.double_sided` -> disable
+GL_CULL_FACE for that mesh, else enable + GL_BACK.  Same surface
+the user sees, no back-faces sneaking in to "win" depth on
+curved surfaces.
+
+**Picker: Pick Tri button localised**
+
+Added `Pick Tri` to all 21 locale catalogs via the canonical
+sequence (en .po sync, msgid sync to other locales, per-language
+translations in `seed_locale_translations.py`, recompile).
+ASCII-light fallbacks for languages where pygame's Calibri panel-
+label render path drops accented chars.
+
+**Look-at crosshair + Shift-drag Y-lift**
+
+New camera affordance: while Shift is held OR the middle mouse
+button is held, three perpendicular pale-pink lines (10 units
+total per axis: X / Y / Z) draw at `camera.center` so the user
+sees exactly where the orbit pivot sits.  Hidden otherwise.
+
+Shift+drag now LIFTS the look-at point on the world Y axis at
+half the existing pan-XZ speed, with the sign reversed from the
+naive convention -- drag DOWN raises the look-at, drag UP drops
+it (matches "push the world down to lift my gaze").  Suspends
+the regular orbit / pan handlers while held so the modifier
+mode is unambiguous.
+
+**Polite focus-steal on cursor enter (Windows)**
+
+`pygame.WINDOWENTER` now triggers a `SetForegroundWindow(my_hwnd)`
+after saving whichever window held the foreground before.  No
+more "first click is eaten by the OS giving the app focus" --
+the very first click on a TEPY button now does what the user
+expects.
+
+`pygame.WINDOWLEAVE` restores the saved HWND so we're not
+permanently stealing input from whatever was focused before the
+cursor crossed in.  Win32-only path; Linux / macOS short-circuit
+because SDL2 already handles cursor-enter focus correctly there.
+
+**Wireframe Z-fight fix**
+
+Old recipe used `glPolygonOffset(1.0, 1.0)` on the solid pass and
+no offset on the line pass.  Worked on most drivers but z-fought
+at grazing angles on dense / coplanar geometry (track segments).
+
+New recipe stacks both offsets:
+* solid pass: `GL_POLYGON_OFFSET_FILL` + `(2.0, 2.0)` -> push
+  fills back 2 units;
+* line pass: `GL_POLYGON_OFFSET_LINE` + `(-2.0, -2.0)` -> pull
+  lines forward 2 units.
+
+~4 units of total separation -- lines win z-fight on every
+driver tested.  `GL_POLYGON_OFFSET_FILL` does not apply to
+GL_LINE polygon mode (only the dedicated `_LINE` flag does), so
+the previous "disable offset for the line pass" path was
+relying entirely on the fills being far enough back.  Now both
+sides contribute.  Cleanup also resets the offset value to
+`(0, 0)` so the negative line bias doesn't leak into later code.
+
+### Phantom right-panel widgets at top-left fix (1.77.1)
+
+The "left pane wacked" pattern that's been quietly biting us
+across the v1.72 saga had one more culprit.  When the Debug
+section is collapsed at startup (or any time `_on_resize` runs
+with the right-panel body-block skipped), the right-panel
+sliders / checkboxes never got positioned -- they kept their
+default `track_x = 0` (sliders) or `cx = SLIDER_CB_X = 278`
+(checkboxes).  Both are `< INFO_PANEL_W = 280`, so the spine-
+collapse override loop at the end of `_on_resize` classified
+them as left-panel widgets and force-set `visible = True`.
+
+The renderer then drew them at (0, 0) -- "phantom right-panel
+controls floating over the top of the left pane".
+
+Fix: discriminate by `group_id` instead of x-coordinate.  Every
+right-panel slider / checkbox carries `group_id` in
+`{'smoke', 'fire', 'normals'}` (assigned at `add_slider` /
+`add_checkbox` time).  The spine override now skips any widget
+whose `group_id` is in that set, regardless of position.
+Robust against the right-panel-skipped-layout case AND any
+future widget-position changes.
+
+The button loop in the spine override still uses the x-based
+check because all buttons are left-panel and positioned
+in `_build_ui` -- nothing changes there.
+
+### Triangle picker (1.77.0)
+
+New diagnostic in the Tools group: **Pick Tri**.  Toggles an
+off-screen colour-pick pass that, every frame the tool is on,
+renders the loaded tank into a hidden RGBA8 FBO using a picking
+shader that encodes (mesh_id, gl_PrimitiveID) into the pixel
+colour.  A single `glReadPixels` at the mouse position recovers
+the hovered triangle without any CPU-side raycast math.
+
+When the hovered triangle changes, the picker:
+
+* Clears the console and writes three colour-coded lines (one
+  per vertex) with that vertex's bone indices + bone weights --
+  exactly the data we need to start figuring out how WoT's
+  chassis / track skinning is laid out against the skeleton.
+* Renders an overlay on the live scene: the picked triangle
+  filled in `theme.c1` (alpha-blended so the underlying material
+  shows through), the three edges as a closed line loop in
+  `theme.c2`, and three points at the vertices in red/green/blue
+  matching the colour `#` markers in the console.
+
+Encoding: 8 bits mesh ID + 24 bits primitive ID into the RGBA8
+attachment.  Up to 255 sub-meshes per tank, 16 M tris per mesh
+-- comfortable margin over real WoT data.
+
+New files:
+
+* `shaders/picking.{vert,frag}` -- the picking shader (vertex
+  pass-through; frag emits the encoded RGBA).
+* `shaders/overlay_solid.{vert,frag}` -- a tiny uniform-colour
+  shader for the highlight passes.
+* `tankExporterPy/picker.py` -- `TrianglePicker` class owning
+  the FBO, the shader programs, the highlight VAO, and the
+  hover-change dispatch.
+
+Hooked into `Viewer.render` via two calls: `picker.update_pass`
+right after the camera matrices are computed (before the main
+mesh pass), and `picker.draw_overlay` between the main mesh
+pass and the 2-D UI pass.  When the picker is off, both calls
+short-circuit -- no FBO bind, no readback, no overlay -- so the
+feature has zero cost when not in use.
+
 ### Terrain rebuild: image heightmap, sand texture, detail displacement (1.76.0)
 
 Pulled the procedural ground from a "small Perlin patch under the

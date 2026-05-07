@@ -148,3 +148,6 @@ msgstr "Вогонь"
 
 msgid "Smoke"
 msgstr "Дим"
+
+msgid "Pick Tri"
+msgstr "Вибір тр."

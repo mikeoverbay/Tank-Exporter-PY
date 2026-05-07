@@ -148,3 +148,6 @@ msgstr "ไฟ"
 
 msgid "Smoke"
 msgstr "ควัน"
+
+msgid "Pick Tri"
+msgstr "เลือก Tri"

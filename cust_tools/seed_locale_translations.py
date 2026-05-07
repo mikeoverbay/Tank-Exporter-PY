@@ -95,6 +95,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX mis à niveau',
         'FBX import aborted': 'Import FBX annulé',
         'FBX import failed':  'Échec import FBX',
+        'Pick Tri':         'Choix Tri',
     },
     # ------------------- German (de) ----------------------------
     'de': {
@@ -141,6 +142,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX aktualisiert',
         'FBX import aborted': 'FBX-Import abgebrochen',
         'FBX import failed':  'FBX-Import fehlgeschlagen',
+        'Pick Tri':         'Tri wahlen',
     },
     # ------------------- Russian (ru) ---------------------------
     'ru': {
@@ -187,6 +189,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX обновлён',
         'FBX import aborted': 'Импорт FBX отменён',
         'FBX import failed':  'Ошибка импорта FBX',
+        'Pick Tri':         'Выбор тр.',
     },
     # ------------------- Spanish (es) ---------------------------
     'es': {
@@ -233,6 +236,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX actualizado',
         'FBX import aborted': 'Importación FBX cancelada',
         'FBX import failed':  'Falló import FBX',
+        'Pick Tri':         'Elegir Tri',
     },
     # ------------------- Spanish LATAM (es_ar) ------------------
     # Same as es except minor Argentine flavour ("ítem" -> same).
@@ -280,6 +284,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX actualizado',
         'FBX import aborted': 'Importación FBX cancelada',
         'FBX import failed':  'Falló import FBX',
+        'Pick Tri':         'Elegir Tri',
     },
     # ------------------- Portuguese Brazil (pt_br) --------------
     'pt_br': {
@@ -326,6 +331,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX atualizado',
         'FBX import aborted': 'Importação FBX cancelada',
         'FBX import failed':  'Falha ao importar FBX',
+        'Pick Tri':         'Esc. Tri',
     },
     # ------------------- Polish (pl) ----------------------------
     'pl': {
@@ -372,6 +378,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX zaktualizowany',
         'FBX import aborted': 'Import FBX anulowany',
         'FBX import failed':  'Nieudany import FBX',
+        'Pick Tri':         'Wybor Tri',
     },
     # ------------------- Czech (cs) -----------------------------
     'cs': {
@@ -418,6 +425,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX aktualizován',
         'FBX import aborted': 'Import FBX přerušen',
         'FBX import failed':  'Import FBX selhal',
+        'Pick Tri':         'Vyber Tri',
     },
     # ------------------- Italian (it) ---------------------------
     'it': {
@@ -464,6 +472,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX aggiornato',
         'FBX import aborted': 'Import FBX annullato',
         'FBX import failed':  'Import FBX fallito',
+        'Pick Tri':         'Sel. Tri',
     },
     # ------------------- Hungarian (hu) -------------------------
     'hu': {
@@ -510,6 +519,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX frissítve',
         'FBX import aborted': 'FBX import megszakítva',
         'FBX import failed':  'FBX import sikertelen',
+        'Pick Tri':         'Tri valas',
     },
     # ------------------- Bulgarian (bg) -------------------------
     'bg': {
@@ -556,6 +566,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX обновен',
         'FBX import aborted': 'FBX импорт отменен',
         'FBX import failed':  'FBX импорт неуспешен',
+        'Pick Tri':         'Избор тр.',
     },
     # ------------------- Romanian (ro) --------------------------
     'ro': {
@@ -602,6 +613,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX actualizat',
         'FBX import aborted': 'Import FBX anulat',
         'FBX import failed':  'Import FBX eșuat',
+        'Pick Tri':         'Alege Tri',
     },
     # ------------------- Turkish (tr) ---------------------------
     'tr': {
@@ -648,6 +660,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX güncellendi',
         'FBX import aborted': 'FBX içe aktar. iptal',
         'FBX import failed':  'FBX içe aktar. başarısız',
+        'Pick Tri':         'Tri Sec',
     },
     # ------------------- Ukrainian (uk) -------------------------
     'uk': {
@@ -694,6 +707,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX оновлено',
         'FBX import aborted': 'Імпорт FBX скасовано',
         'FBX import failed':  'Помилка імпорту FBX',
+        'Pick Tri':         'Вибір тр.',
     },
     # ------------------- Korean (ko) ----------------------------
     'ko': {
@@ -740,6 +754,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX 업그레이드됨',
         'FBX import aborted': 'FBX 가져오기 취소됨',
         'FBX import failed':  'FBX 가져오기 실패',
+        'Pick Tri':         '삼각선택',
     },
     # ------------------- Japanese (ja) --------------------------
     'ja': {
@@ -786,6 +801,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBXアップグレード',
         'FBX import aborted': 'FBXインポート中止',
         'FBX import failed':  'FBXインポート失敗',
+        'Pick Tri':         '三角選択',
     },
     # ------------------- Chinese Simplified (zh_cn) -------------
     'zh_cn': {
@@ -832,6 +848,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX已升级',
         'FBX import aborted': 'FBX导入已取消',
         'FBX import failed':  'FBX导入失败',
+        'Pick Tri':         '选三角',
     },
     # ------------------- Chinese Traditional (zh_tw) ------------
     'zh_tw': {
@@ -878,6 +895,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX已升級',
         'FBX import aborted': 'FBX匯入已取消',
         'FBX import failed':  'FBX匯入失敗',
+        'Pick Tri':         '選三角',
     },
     # ------------------- Vietnamese (vi) ------------------------
     'vi': {
@@ -924,6 +942,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'FBX đã nâng cấp',
         'FBX import aborted': 'Nhập FBX đã hủy',
         'FBX import failed':  'Nhập FBX thất bại',
+        'Pick Tri':         'Chon Tri',
     },
     # ------------------- Thai (th) ------------------------------
     'th': {
@@ -970,6 +989,7 @@ TRANSLATIONS = {
         'FBX upgraded':      'อัปเกรด FBX แล้ว',
         'FBX import aborted': 'ยกเลิกการนำเข้า FBX',
         'FBX import failed':  'นำเข้า FBX ล้มเหลว',
+        'Pick Tri':         'เลือก Tri',
     },
 }
 

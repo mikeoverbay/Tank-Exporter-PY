@@ -148,3 +148,6 @@ msgstr "Foc"
 
 msgid "Smoke"
 msgstr "Fum"
+
+msgid "Pick Tri"
+msgstr "Alege Tri"

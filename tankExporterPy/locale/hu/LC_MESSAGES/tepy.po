@@ -148,3 +148,6 @@ msgstr "Tuz"
 
 msgid "Smoke"
 msgstr "Fust"
+
+msgid "Pick Tri"
+msgstr "Tri valas"

@@ -148,3 +148,6 @@ msgstr "Ohen"
 
 msgid "Smoke"
 msgstr "Kour"
+
+msgid "Pick Tri"
+msgstr "Vyber Tri"

@@ -148,3 +148,6 @@ msgstr "Ates"
 
 msgid "Smoke"
 msgstr "Duman"
+
+msgid "Pick Tri"
+msgstr "Tri Sec"
