@@ -157,7 +157,24 @@ the game via the path you pick in the **Set Paths** dialog (or
 the `--pkg-dir` / `--res-mods` CLI flags).  Anywhere on any drive
 you can write to is fine.
 
-### 3. Run it -- Windows just double-click
+### 3. Install Python (if you haven't already)
+
+TEPY needs Python 3.10+.  Grab the latest from
+<https://www.python.org/downloads/>.
+
+> :warning: **Tkinter must be checked.**  When the python.org
+> installer opens, click **Customize installation** (NOT
+> "Install Now"), then on the **Optional Features** screen
+> make sure :ballot_box_with_check: **"tcl/tk and IDLE"**
+> is checked.  Without it, every TEPY file picker
+> (Set Paths, Import, Export, Save Prim, Language) silently
+> fails -- this is the #1 install gotcha.  See
+> [Tkinter is required](#tkinter-is-required) for the repair
+> steps if you only realise after the fact.
+
+You can leave the rest of the installer at its defaults.
+
+### 4. Run it -- Windows just double-click
 
 ```
 go.bat
@@ -247,6 +264,11 @@ confirm in the load dialog, and the viewer assembles the full vehicle
 ## Requirements
 
 - **Python 3.10+** (3.13 used in development; 3.10 is the floor).
+  - **Tkinter MUST be installed.**  See the
+    [Tkinter is required](#tkinter-is-required) note below before
+    you install Python -- the python.org installer makes it
+    *optional* and TEPY's Set Paths / Import / Export / Language
+    pickers all break without it.
 - **Windows 10 / 11** for the .bat launchers and the taskbar
   AppUserModelID; the Python code itself runs on macOS / Linux too,
   there's just no first-class launcher.
@@ -264,8 +286,47 @@ numpy >= 1.24
 Pillow >= 10.0
 ```
 
-Tkinter (used for file dialogs and the picker forms) ships with the
-standard Python installer, no separate install needed.
+### Tkinter is required
+
+TEPY uses Python's stdlib `tkinter` for every file / folder picker:
+**Set Paths**, **Import**, **Export**, **Save Prim**'s component
+picker, the **Language** dropdown, the **FBX upgrade** popup, all
+of it.  Without it, those dialogs silently fail to open and a
+tester sees "the buttons don't do anything."
+
+Tkinter is part of the Python standard library, **but the
+python.org Windows installer makes it optional**.  The
+**Customize installation -> Optional Features** screen has a
+checkbox labelled **"tcl/tk and IDLE"** -- if it's unchecked at
+install time, you end up with a Python that lacks tkinter.
+
+**Verify** which Python TEPY runs against and whether tkinter is
+present:
+
+```cmd
+py -3 -c "import sys; print(sys.executable)"
+py -3 -c "import tkinter; print('OK', tkinter.TkVersion)"
+```
+
+The first prints the Python install path; the second prints
+`OK 8.6` (or similar) if tkinter works, or an `ImportError` if
+not.
+
+**If tkinter is missing**, repair the install in place:
+
+1. **Settings -> Apps -> Installed apps**
+2. Find your Python entry -> **... -> Modify**
+3. Click **Modify** in the installer
+4. Under **Optional Features**, check :ballot_box_with_check:
+   **"tcl/tk and IDLE"**
+5. Click **Next -> Install**
+
+That repairs in place; no need to uninstall first.  After it
+finishes, all TEPY file dialogs work.
+
+TEPY also detects the missing-tkinter case at startup and posts a
+clear error in the in-app console pane with the same repair
+steps -- so a tester running the binary doesn't have to ask you.
 
 ---
 

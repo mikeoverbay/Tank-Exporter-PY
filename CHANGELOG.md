@@ -9,6 +9,29 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### README: tkinter-required documentation (1.62.1)
+
+A tester hit the "can not open file picker" failure mode (which
+v1.57.4 added an in-app diagnostic for) -- root cause was the
+python.org installer's *optional* "tcl/tk and IDLE" component.
+README now makes this prominent so future installs avoid the
+trap entirely:
+
+* **Requirements** section gets a top-level Tkinter bullet
+  pointing at the new `Tkinter is required` subsection.
+* New **Step 3: Install Python** between "Where to put it" and
+  "Run it" with a warning callout to check the `tcl/tk and
+  IDLE` box during install.
+* New **Tkinter is required** subsection after the package list
+  with: a one-line probe to verify the install
+  (`py -3 -c "import tkinter; print(tkinter.TkVersion)"`),
+  the Settings -> Apps -> Modify repair walkthrough for
+  installs that already missed it, and a note that TEPY
+  surfaces the failure in-app via the v1.57.4 startup probe so
+  testers don't need cmd-window detective work.
+
+Files: `README.md`.
+
 ### Folder icon on Set Paths + per-button icon support (1.62.0)
 
 `Set Paths` now reads as a file-picker button at a glance --
