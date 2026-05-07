@@ -75,6 +75,15 @@ class UIButton:
         # = burnt orange, Import = olive, etc.).  None = default
         # behaviour.  Tuple is (r, g, b, a) in 0..1.
         self.accent_color = None
+        # Optional icon glyph drawn left of the text (e.g. a folder
+        # icon on Set Paths).  Set via UIManager.set_button_icon
+        # AFTER add_button -- it builds the texture using Segoe UI
+        # Symbol because Calibri (the button-text font) lacks the
+        # extended-Unicode glyphs.  None = no icon, plain text-only
+        # button.
+        self.icon_tex = None
+        self.icon_w   = 0
+        self.icon_h   = 0
 
     def contains(self, mx, my):
         return self.x <= mx <= self.x + self.w and self.y <= my <= self.y + self.h
@@ -2008,6 +2017,62 @@ class UIManager:
         glBindTexture(GL_TEXTURE_2D, 0)
         return tid, w, h
 
+    def _make_icon_tex(self, glyph, color=(235, 240, 250),
+                       font_name='Segoe UI Symbol', size=14):
+        """Render a single icon glyph -> (tid, w, h).
+
+        Different code path from `_make_tex` because Calibri (the
+        button-text font) lacks the extended-Unicode glyphs we want
+        for icons (folders, gears, etc.).  Segoe UI Symbol ships
+        with every Windows install since Windows 7 and carries
+        the full BMP + supplementary plane symbol range -- 📁,
+        ⚙, 🗀, etc. all render at usable sizes.
+
+        Args:
+            glyph     (str): the icon character (typically 1
+                              codepoint, sometimes 2 for surrogate
+                              pairs above U+FFFF).
+            color     (tuple): RGB 0..255 for the rendered pixels.
+            font_name (str): override if a future icon needs Segoe
+                              MDL2 Assets / Fluent Icons / etc.
+            size      (int): pt size; 14 is a good match for the
+                              Calibri 13 button label.
+
+        Returns:
+            (tid, w, h) -- texture id and pixel dimensions.
+        """
+        font = pygame.font.SysFont(font_name, size, bold=False)
+        surf = font.render(glyph, True, color)
+        data = pygame.image.tostring(surf, 'RGBA', False)
+        w, h = surf.get_width(), surf.get_height()
+        tid  = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, data)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        return tid, w, h
+
+    def set_button_icon(self, btn, glyph, color=(235, 240, 250)):
+        """Attach an icon glyph to the left of a button's label.
+
+        Builds the icon texture via `_make_icon_tex` (Segoe UI
+        Symbol so we get folder / gear / etc. glyphs).  Stored on
+        the button; render() draws it at the left edge with the
+        text shifted right.  Replaces any prior icon on the same
+        button (frees the old GL texture first).
+        """
+        if btn.icon_tex:
+            try:
+                glDeleteTextures(1, [btn.icon_tex])
+            except Exception:
+                pass
+        btn.icon_tex, btn.icon_w, btn.icon_h = (
+            self._make_icon_tex(glyph, color=color))
+
     def add_panel_label(self, text, x, y, color=(180, 180, 195)):
         """Drop a small text label into the static panel-decoration list.
 
@@ -2507,10 +2572,30 @@ class UIManager:
             else:
                 col = (0.32, 0.32, 0.36, 1.0) if btn.hovered else (0.22, 0.22, 0.25, 1.0)
             self._solid(*col, btn.x, btn.y, btn.w, btn.h)
-            if btn.text_tex:
+            # Layout: if the button has an icon, draw icon + small
+            # gap + text, the whole pair centered horizontally.
+            # Otherwise just centre the text the way it always was.
+            if btn.icon_tex and btn.text_tex:
+                ICON_GAP = 4
+                pair_w = btn.icon_w + ICON_GAP + btn.text_w
+                ix = btn.x + (btn.w - pair_w) // 2
+                iy = btn.y + (btn.h - btn.icon_h) // 2
+                self._draw_tex(btn.icon_tex, ix, iy,
+                               btn.icon_w, btn.icon_h)
+                tx = ix + btn.icon_w + ICON_GAP
+                ty = btn.y + (btn.h - btn.text_h) // 2
+                self._draw_tex(btn.text_tex, tx, ty,
+                               btn.text_w, btn.text_h)
+            elif btn.text_tex:
                 tx = btn.x + (btn.w - btn.text_w) // 2
                 ty = btn.y + (btn.h - btn.text_h) // 2
                 self._draw_tex(btn.text_tex, tx, ty, btn.text_w, btn.text_h)
+            elif btn.icon_tex:
+                # Icon-only button (rare; handle for completeness).
+                ix = btn.x + (btn.w - btn.icon_w) // 2
+                iy = btn.y + (btn.h - btn.icon_h) // 2
+                self._draw_tex(btn.icon_tex, ix, iy,
+                               btn.icon_w, btn.icon_h)
 
         # ---- Sliders (rows 2 and 3) -----------------------------------
         for sl in self.sliders:
@@ -3257,6 +3342,8 @@ class UIManager:
         for btn in self.buttons:
             if btn.text_tex:
                 glDeleteTextures(1, [btn.text_tex])
+            if btn.icon_tex:
+                glDeleteTextures(1, [btn.icon_tex])
         for sl in self.sliders:
             if sl.label_tex: glDeleteTextures(1, [sl.label_tex])
             if sl.value_tex: glDeleteTextures(1, [sl.value_tex])

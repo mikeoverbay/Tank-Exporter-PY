@@ -9,6 +9,37 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Folder icon on Set Paths + per-button icon support (1.62.0)
+
+`Set Paths` now reads as a file-picker button at a glance --
+folder glyph (📁) left of the label.  Generic per-button icon
+support so future "this opens a thing" buttons can adopt the
+same pattern without each rolling its own.
+
+Plumbing:
+
+* New `UIButton.icon_tex` + `icon_w/h` fields (None default).
+* New `UIManager._make_icon_tex(glyph)` -- builds the texture
+  with **Segoe UI Symbol** (the button's own Calibri Bold lacks
+  the supplementary-plane folder glyphs).  Stays at point size
+  14 to balance Calibri 13's text x-height.
+* `UIManager.set_button_icon(btn, glyph)` -- public attach API,
+  frees any prior icon's GL texture before replacing.
+* Button render path: when both icon AND text are present, the
+  pair is centred as a unit (icon + 4-px gap + text) instead of
+  centring just the text.  Icon-only and text-only buttons keep
+  their existing behaviour.
+* `cleanup()` frees `icon_tex` alongside `text_tex`.
+
+Wiring:
+
+* `Set Paths` calls `set_button_icon(..., '📁')` after
+  construction -- the only button using the new API for now.
+  Adding a gear icon to a future Settings button would be:
+  `self.ui.set_button_icon(btn, '⚙')`.
+
+Files: `tankExporterPy/ui.py`, `tankExporterPy/viewer.py`.
+
 ### Left-spine icon: solid filled triangles (matching console) (1.61.1)
 
 `UIManager._ensure_chevron` rendered the info-panel spine glyph

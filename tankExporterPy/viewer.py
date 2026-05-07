@@ -1372,8 +1372,15 @@ class Viewer:
         # --- Action buttons (one-shot, no toggle attr) -------------------
         x       += self.ui.BUTTON_SPACING   # extra gap from toggle group
 
-        self.ui.add_button(_('Set Paths'), x, y, 84, h, active=False,
-                           action=self._show_paths_dialog)
+        # Set Paths -- folder icon left of the label so the user
+        # immediately reads the button as "folder/file picker".
+        # `📁` (U+1F4C1) lives in Segoe UI Symbol; the icon
+        # texture is built via the helper that uses that font
+        # specifically because Calibri doesn't carry the glyph.
+        set_paths_btn = self.ui.add_button(
+            _('Set Paths'), x, y, 84, h, active=False,
+            action=self._show_paths_dialog)
+        self.ui.set_button_icon(set_paths_btn, '📁')
         x       += 84 + self.ui.BUTTON_SPACING
 
         # Model tools.  Operate on the loaded mesh set rather than
