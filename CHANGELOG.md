@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### FBX export: vertex normals visible in 3ds Max 2018 (1.60.0)
+
+Tester reported "3ds Max isn't finding the vertex normals" on
+exports.  Two causes in the Blender FBX exporter call:
+
+1. **`mesh_smooth_type='EDGE'`** writes per-edge smoothing data,
+   which Blender + Maya ingest but 3ds Max ignores.  Result:
+   Max shows flat-shaded geometry with no usable normals in
+   the editable-mesh modifier.  **Switched to `'FACE'`** --
+   per-face smoothing groups, the form Max expects.
+
+2. **`use_custom_normals` was missing** (default False on
+   Blender 2.8x and some 3.x builds).  Without it, the FBX
+   exporter discards the custom split normals
+   `_build_mesh_object` set via
+   `me.normals_split_custom_set_from_vertices(...)` and
+   recomputes from smoothing groups -- so WoT-authored creases
+   were silently wiped at export time.  **Set `=True`** so the
+   normals the WoT artists painted survive the round trip.
+
+Wrapped in try/except so an ancient Blender that doesn't
+recognise the kwarg still exports -- it retries without
+`use_custom_normals`, just losing custom-normal preservation
+on that run.
+
+Files: `tankExporterPy/exporters/_blender_runner.py`.
+
 ### Reorg Import / Export -- equal width, swapped order, accent colours (1.59.0)
 
 The IO group used to render Import as a 2-cell-wide button next

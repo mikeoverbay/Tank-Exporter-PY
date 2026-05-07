@@ -85,7 +85,31 @@ def main():
     # --- Export ------------------------------------------------------------
     fmt = args.format.lower()
     if fmt == 'fbx':
-        bpy.ops.export_scene.fbx(
+        # 3ds Max compatibility notes (Max 2018 + tested):
+        #
+        # * `mesh_smooth_type='FACE'` writes per-face smoothing
+        #   groups -- the form 3ds Max expects.  We had `'EDGE'`
+        #   here originally; that writes per-edge smoothing which
+        #   Blender + Maya can ingest but Max ignores -- end result
+        #   was Max showing flat-shaded geometry with no vertex
+        #   normals visible in the editable-mesh modifier.
+        #
+        # * `use_custom_normals=True` preserves the per-loop split
+        #   normals that `_build_mesh_object` explicitly sets via
+        #   `me.normals_split_custom_set_from_vertices(...)`.
+        #   Without this flag (default False on Blender 2.8x and
+        #   some 3.x builds), the FBX exporter discards the
+        #   custom data and recomputes normals from smoothing
+        #   groups -- so the WoT-authored creases were getting
+        #   wiped out at export.  Required for the round-trip
+        #   `WoTTangent` / `WoTBinormal` decode to land on the
+        #   geometry the user actually painted.
+        #
+        # Wrapped in try/except so a Blender so old it lacks
+        # `use_custom_normals` still exports (just without the
+        # flag); newer Blender that DOES have it gets the
+        # correct behaviour.
+        _fbx_kwargs = dict(
             filepath=args.output,
             use_selection=False,
             apply_unit_scale=True,
@@ -94,7 +118,8 @@ def main():
             axis_up='Y',
             object_types={'EMPTY', 'MESH'},
             use_mesh_modifiers=True,
-            mesh_smooth_type='EDGE',
+            mesh_smooth_type='FACE',
+            use_custom_normals=True,
             # path_mode='AUTO' writes texture paths into the FBX that
             # point at our existing <base>_textures/ sidecar folder
             # (the one _build_mesh_object already populated).  We used
@@ -107,6 +132,17 @@ def main():
             path_mode='AUTO',
             embed_textures=False,
         )
+        try:
+            bpy.ops.export_scene.fbx(**_fbx_kwargs)
+        except TypeError as exc:
+            # Old Blender that doesn't recognise one of the new
+            # kwargs (most likely `use_custom_normals`).  Drop it
+            # and retry; the export still works, just without the
+            # custom-normal preservation.
+            print(f"[blender_runner] fbx export retry without "
+                  f"use_custom_normals ({exc})")
+            _fbx_kwargs.pop('use_custom_normals', None)
+            bpy.ops.export_scene.fbx(**_fbx_kwargs)
     elif fmt == 'glb':
         # GLB is the binary glTF container -- single self-contained
         # file with geometry buffer + textures + materials all packed
