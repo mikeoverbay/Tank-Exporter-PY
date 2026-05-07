@@ -1417,8 +1417,13 @@ class Viewer:
         # WoT-native .primitives_processed files.  Companion to
         # Export (which writes FBX/GLB/OBJ) -- this one targets the
         # game's own format.
-        self.ui.add_button(_('Save Prim'), x, y, 70, h, active=False,
-                           action=self._on_save_prim_clicked)
+        # Accent: burnt yellow.  Slots between Export's burnt orange
+        # and Import's olive in the warm-palette trio so the three
+        # IO actions read as related but distinct at a glance.
+        save_prim_btn = self.ui.add_button(
+            _('Save Prim'), x, y, 70, h, active=False,
+            action=self._on_save_prim_clicked)
+        save_prim_btn.accent_color = (0.68, 0.52, 0.10, 1.0)  # burnt yellow
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Language' opens a Tk dropdown picker.  Sister to Set Paths

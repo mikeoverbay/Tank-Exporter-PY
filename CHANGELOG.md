@@ -9,6 +9,22 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Save Prim accent: burnt yellow (1.60.3)
+
+Continues the IO-section warm-palette trio.  `Save Prim` (the
+WoT-native `.primitives_processed` writer) gets `accent_color =
+(0.68, 0.52, 0.10)` -- a burnt yellow that slots between
+Export's burnt orange and Import's olive so the three IO
+actions read as a related family at a glance.
+
+| Button | Accent |
+| --- | --- |
+| Export    | burnt orange (0.65, 0.32, 0.10) |
+| Save Prim | burnt yellow (0.68, 0.52, 0.10) |
+| Import    | olive        (0.42, 0.45, 0.18) |
+
+Files: `tankExporterPy/viewer.py`.
+
 ### Export / Import on one row at equal widths (1.60.2)
 
 `v1.59.0` stacked Export and Import on separate full-width rows
