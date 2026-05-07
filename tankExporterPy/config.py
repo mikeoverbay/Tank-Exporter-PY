@@ -54,16 +54,20 @@ _DEFAULTS = {
                               # the 'Language' button in the IO section;
                               # takes effect on next launch.
     'info_panel_collapsed': False,  # remember the left-panel collapse state
-    # UI motif (theme).  String name from
-    # `tankExporterPy.motif.PRESET_NAMES` -- e.g. 'TEPY Default',
+    # UI theme.  String name from
+    # `tankExporterPy.theme.PRESET_NAMES` -- e.g. 'TEPY Default',
     # 'Solarized Dark', 'Dracula', 'Nord'.  Empty / unknown ->
-    # falls back to the default.  See `motif.py` for the full
-    # preset list and per-colour definitions.
-    'motif':       'TEPY Default',
+    # falls back to the default.  See `theme.py` for the full
+    # preset list and per-colour definitions.  Pre-v1.64 the key
+    # was called `motif`; the viewer falls back to that legacy
+    # key on read so an existing tankExporterPy.json from v1.63
+    # still resolves the user's pick.
+    'theme':       'TEPY Default',
     # Free-form background-colour override.  When set (RGBA tuple
     # 0..1), beats the preset's own bg.  None / missing = use
     # the preset's bg.  Set via the in-app colour picker.
-    'motif_bg':    None,
+    # Legacy key `motif_bg` is read as a fallback.
+    'theme_bg':    None,
     'light_value':   0.10,  # Light slider (direct sun brightness)
     'ambient_value': 0.50,  # Ambient slider (flat ambient fill)
     # Per-engine-class smoke / fire settings.  Filled in by the
@@ -76,6 +80,21 @@ _DEFAULTS = {
     # vectors at exhaust nodes).  Toggled by the "Show HP" checkbox in
     # the smoke control panel.  Default off -- markers are diagnostic.
     'show_hardpoints':        False,
+    # Load-dialog: prefer res_mods overrides over pkg originals when
+    # both are present on disk.  Drives the "Load from res_mods"
+    # checkbox at the top of the per-skin Load picker.  Default
+    # checked because most users running TEPY have a populated
+    # res_mods/<version>/vehicles/ tree they want to see.
+    # NOTE: only applies to the WoT load path (xml -> primitives);
+    # FBX import always reads from pkg regardless of this flag.
+    'load_from_res_mods':     True,
+    # Per-section collapse state on the left panel.  Each key maps to
+    # True (collapsed: header visible, button rows hidden) or False
+    # (expanded: full group visible).  Persisted so the user's chosen
+    # layout survives a restart.  Section names match the labels in
+    # `_layout_widgets.button_groups` (UI / Model / IO / Tools /
+    # Extract); keys missing from the dict default to False.
+    'section_collapsed':      {},
 }
 
 

@@ -38,6 +38,18 @@ uniform float shine_scale;         // ambient slider
 
 uniform int   wireframe_mode;
 
+// Flat-color override.  When `use_flat_color == 1` the diffuse
+// texture is ignored entirely and `flat_color` (linear RGB) is
+// substituted as the base albedo for both the direct-light and
+// ambient terms.  Normal-map perturbation, lighting, and
+// gamma-out are unchanged -- so the surface still reads as 3D
+// (Lambert / Phong / bump) but with no other map colour leaking
+// in.  Driven by the Model-group "Shaded" toggle: the WoT load
+// path turns it on so the tank renders in a single accent
+// colour the user can stare at without PBR / GMM / AM noise.
+uniform int   use_flat_color;
+uniform vec3  flat_color;
+
 // =============================================================================
 // Normal-map decode (handles both standard RGB and WoT GA encoding)
 // =============================================================================
@@ -57,9 +69,18 @@ vec3 unpackNormal(vec2 uv)
 
 void main()
 {
-    // Base colour from diffuse texture.  No alpha test, no AO, no
-    // gloss/metal -- just take the RGB at face value.
-    vec3 base = texture(diffuse_map, fs_in.uv0).rgb;
+    // Base colour: flat uniform when the Shaded toggle is on, else
+    // sampled from the diffuse texture as usual.  Skipping the
+    // texture sample entirely (rather than sampling and discarding)
+    // keeps the cost of Shaded mode genuinely cheaper than the PBR
+    // path -- no GMM / AO / detail / IBL / damage-tile fetches and
+    // not even a diffuse fetch.
+    vec3 base;
+    if (use_flat_color == 1) {
+        base = flat_color;
+    } else {
+        base = texture(diffuse_map, fs_in.uv0).rgb;
+    }
 
     // Shading normal: geometry by default, perturbed if a real normal
     // map is bound and the toggle is on.

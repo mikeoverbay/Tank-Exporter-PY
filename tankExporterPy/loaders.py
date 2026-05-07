@@ -922,6 +922,28 @@ class VisualLoader:
 
         element.text holds the property name because BWXML writes self-data
         (type=string) before the sub-element children.
+
+        Damage-layer properties (only present on `/crash/` visuals using
+        `PBS_tank_crash.fx`):
+
+            crashTileMap        Texture path -- single shared tile,
+                                always 'vehicles/russian/Tank_detail/
+                                crash_tile.dds' across every crashed
+                                tank in every nation.  RGB = damage
+                                colour (scorched metal / dirt /
+                                exposed steel); A = blend mask.
+            g_crashUVTiling     Vector4 (uv.x_mul, uv.y_mul, uv.x_off,
+                                uv.y_off) for tiling the damage layer.
+            crash_coefficient   Float, 0..1, "how damaged" -- shader
+                                uses it to scale the blend mask.
+            colorIdMap          Per-material ID lookup (already on
+                                non-crash PBS materials too; we don't
+                                consume it yet).
+
+        Captured into `tex['crash_tile']`, `tex['crash_uv_tiling']`,
+        `tex['crash_coefficient']` so the renderer can pick them up.
+        Missing values fall through; we don't fabricate defaults --
+        the GLSL side treats `crash_tile==0` as "no damage layer".
         """
         tex = {}
 
@@ -929,6 +951,16 @@ class VisualLoader:
         id_el = mat_el.find('identifier')
         if id_el is not None and id_el.text:
             tex['identifier'] = id_el.text.strip()
+
+        # Shader filename ('shaders/std_effects/PBS_tank.fx' /
+        # 'PBS_tank_crash.fx' / etc.).  Lets the renderer route
+        # crash visuals through the damage-blend pass even when the
+        # crash_tile texture path itself is missing -- keeping the
+        # shader-vs-look question as one piece of state rather than
+        # two correlated ones.
+        fx_el = mat_el.find('fx')
+        if fx_el is not None and fx_el.text:
+            tex['fx'] = fx_el.text.strip()
 
         # Every <property> element: text = name, child[0] = typed value
         for prop in mat_el.findall('property'):
@@ -967,6 +999,43 @@ class VisualLoader:
                             float(parts[0]), float(parts[1]))
                     except ValueError:
                         pass
+            elif prop_name == 'crashTileMap' and 'crash_tile' not in tex:
+                # Damage-layer tile (PBS_tank_crash.fx only).  See
+                # docstring above for the texture's contents and
+                # provenance (single shared file under particles.pkg).
+                if val:
+                    tex['crash_tile'] = val
+            elif prop_name == 'g_crashUVTiling':
+                # Vector4: tiling.xy + offset.zw.  Typical value
+                # '2 2 0 0' -- 2x repeat scales the damage-tile
+                # detail to roughly hull-panel-sized chunks.
+                parts = val.split()
+                if len(parts) >= 4:
+                    try:
+                        tex['crash_uv_tiling'] = (
+                            float(parts[0]), float(parts[1]),
+                            float(parts[2]), float(parts[3]))
+                    except ValueError:
+                        pass
+                elif len(parts) >= 2:
+                    # Some materials only carry the xy component.
+                    try:
+                        tex['crash_uv_tiling'] = (
+                            float(parts[0]), float(parts[1]),
+                            0.0, 0.0)
+                    except ValueError:
+                        pass
+            elif prop_name == 'crash_coefficient':
+                # Float in [0, 1], "how damaged" -- the shader
+                # multiplies the tile alpha by this before mixing,
+                # so 0 = no damage visible, 1 = full coverage.
+                # Materials that don't carry this property still
+                # get the damage layer (the shader supplies its
+                # own default, typically 1.0).
+                try:
+                    tex['crash_coefficient'] = float(val)
+                except ValueError:
+                    pass
             elif prop_name == 'alphaReference':
                 try:
                     tex['alpha_reference'] = int(val)
@@ -1291,6 +1360,13 @@ class VisualLoader:
     def resolve_hd_path(rel_path, res_mods_root, pkg_extractor=None):
         """Try HD version first, fall back to SD.  Searches res_mods then res/.
         Falls back to PKG extraction when pkg_extractor is supplied.
+
+        When `res_mods_root` is falsy (None / empty string), the disk
+        walk is skipped entirely and the resolver goes straight to
+        the pkg fallback.  Used by the "Load from res_mods" toggle
+        and FBX import to force pkg-only lookups regardless of what
+        is mounted in the user's res_mods/ folder.
+
         Returns (absolute_path or None, used_hd: bool)."""
         base, dot, ext = rel_path.rpartition('.')
         if not dot:
@@ -1298,13 +1374,18 @@ class VisualLoader:
         hd_rel = base + '_hd' + (('.' + ext) if ext else '')
         sd_rel = rel_path
 
-        search_roots = [res_mods_root]
-        # Walk up to find res/ alongside res_mods/
-        parent = os.path.dirname(os.path.dirname(res_mods_root))
-        if parent and os.path.isdir(parent):
-            res_dir = os.path.join(parent, 'res')
-            if os.path.isdir(res_dir):
-                search_roots.append(res_dir)
+        # Disk walk: only when caller actually gave us a root to look
+        # under.  Blank root = "skip res_mods + res/, go straight to
+        # the pkg fallback below."
+        search_roots = []
+        if res_mods_root:
+            search_roots.append(res_mods_root)
+            # Walk up to find res/ alongside res_mods/
+            parent = os.path.dirname(os.path.dirname(res_mods_root))
+            if parent and os.path.isdir(parent):
+                res_dir = os.path.join(parent, 'res')
+                if os.path.isdir(res_dir):
+                    search_roots.append(res_dir)
 
         for root in search_roots:
             full_hd = os.path.join(root, hd_rel.replace('/', os.sep))
@@ -2083,6 +2164,27 @@ class PkgExtractor:
         for nation, list_path in list_paths.items():
             per_nation[nation] = self._read_tank_table(
                 scripts_pkg, list_path, nation)
+
+        # Filter out tanks whose tag CONTAINS 'StoryMode' -- those
+        # are campaign variants that share assets with the regular
+        # tanks but aren't standalone vehicles for our purposes.
+        # Real-world suffixes seen on a current WoT install include
+        # `_StoryMode`, `_StoryModeStealth`, `_StoryModeHard`,
+        # `_StoryMode_3_4`, etc., so an `endswith('StoryMode')`
+        # match misses three quarters of them.  Substring match is
+        # safe because no production tank tag carries that token
+        # for any other reason.  Done at the single source-of-truth
+        # so every downstream consumer (tier tree, load dialog,
+        # FBX auto-twin, etc.) sees a clean list.
+        n_dropped = 0
+        for nation, tbl in per_nation.items():
+            drop_tags = [t for t in tbl if 'StoryMode' in t]
+            for tag in drop_tags:
+                del tbl[tag]
+                n_dropped += 1
+        if n_dropped:
+            print(f"[PkgExtractor] vehicle xmls: dropped {n_dropped} "
+                  f"StoryMode variant(s)")
 
         if not with_tier:
             result = {

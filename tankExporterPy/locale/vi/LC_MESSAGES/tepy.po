@@ -58,7 +58,7 @@ msgstr "So sánh"
 msgid "Language"
 msgstr "Ngôn ngữ"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "Chủ đề"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "Nhập FBX đã hủy"
 
 msgid "FBX import failed"
 msgstr "Nhập FBX thất bại"
+
+
+msgid "Extract"
+msgstr "Trich xuat"
+
+msgid "Open Extract Loc"
+msgstr "Mo vi tri"
+
+msgid "Remove from res_mods"
+msgstr "Xoa"
+
+msgid "Shaded"
+msgstr "Do bong"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "Lua"
+
+msgid "Smoke"
+msgstr "Khoi"

@@ -7,6 +7,350 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-07
+
+A long session covering the full theme-system rewrite, the new
+res_mods extract workflow, crash-damage shader support, window-
+management polish (maximize-after-splash, F11), and a Debug
+collapsible group on the right panel.  Every new user-facing
+string in this session ships with English msgids in
+`locale/en/LC_MESSAGES/tepy.po` and gets compiled to all 21
+locale `.mo` catalogs (translations for non-English languages
+fall back to English msgids until the seed-translations table
+is updated).
+
+### StoryMode tank filter (1.72.3 → 1.72.4)
+
+`PkgExtractor.list_vehicle_xmls` now drops every tank tag whose
+name contains `StoryMode` (substring match, case-sensitive).
+Real install survey: 21 variants on a current WoT install, in
+suffixes `_StoryMode`, `_StoryModeStealth`, `_StoryModeHard`,
+`_StoryMode_3_4`.  Single chokepoint = every downstream consumer
+(tier tree, load dialog, FBX auto-twin) sees a clean list with
+no extra plumbing.
+
+Maximize-after-splash hardening (1.72.4): `_go_maximized` now
+goes through pygame's SDL2-backed `Window.maximize()` rather
+than Win32 `ShowWindow(SW_MAXIMIZE)` directly, then drains up
+to 8 `pygame.event.pump()` cycles harvesting any `VIDEORESIZE`
+that lands.  The actual size carried by the resize event drives
+an explicit `set_mode` + `_on_resize`, so the first frame after
+maximize lays panels out for the real client area instead of
+the pre-maximize 1280×720.  Earlier revisions read
+`pygame.display.get_surface().get_size()` which lagged a frame
+behind the OS resize and produced stale dimensions.
+
+### Right-panel Debug collapsible group (1.72.0 → 1.72.2)
+
+All right-panel widgets (smoke / fire / normals sliders +
+PerVtx / Debug checkboxes) now live under one collapsible
+section header titled **Debug**.  Same chevron + click-zone
+treatment as the left-panel section headers — `▼ Debug` when
+expanded, `▶ Debug` when collapsed.  Click anywhere along the
+header bar to toggle.  Persisted under
+`section_collapsed['Debug']` in `tankExporterPy.json`.
+
+When collapsed, `RIGHT_CONTROLS_H` shrinks to `HEADER_BAR_H`
+(~26 px); the panel BG follows automatically because
+`right_controls_rect` reads `RIGHT_CONTROLS_H` after
+`_layout_widgets` runs.  GL viewport reclaims the freed space
+so the tank renders into a nearly-full-window viewport with
+the section folded.
+
+`_toggle_section_collapsed` (left + right) now calls full
+`_on_resize(self.width, self.height)` instead of just
+`_layout_widgets()`.  Without this, the tank-list tree height
++ tab anchor + thumbnail position stayed at pre-collapse
+dimensions; clicking the chevron didn't grow the tree to fill
+the freed space.
+
+Files: `tankExporterPy/viewer.py`, `tankExporterPy/loaders.py`.
+
+### Window management: console minimize, maximize after splash, F11 (1.70.0 → 1.71.1)
+
+Three startup-polish items:
+
+1. **Console window minimised at launch.**  New module
+   `tankExporterPy/win_console.py` exposes `minimize_console()`
+   / `hide_console()` / `restore_console()` — all soft-fail on
+   non-Windows / no-console / ctypes failure.  `tankExporterPy.py`
+   calls `minimize_console()` as its first action so the cmd
+   window briefly flashes and then ducks to the taskbar.
+   Stdout still goes to the console; click the taskbar entry
+   to read it.
+
+2. **Maximize after splash, not fullscreen-exclusive.**  Splash
+   renders in a normal decorated 1280×720 client window so it
+   stays geometrically centred in a known viewport; once init
+   completes, `_go_maximized()` (via SDL2 `Window.maximize()`)
+   resizes to fill the screen while keeping title bar +
+   taskbar + ALT-TAB working.  Different from
+   `pygame.FULLSCREEN`: app stays a normal window citizen.
+
+3. **F11 toggles maximized ↔ windowed.**  Standard
+   convention.  Handler in `handle_input` calls
+   `_toggle_fullscreen()` which dispatches to `_go_maximized`
+   / `_go_windowed`.  SDL2 remembers the pre-maximize
+   dimensions so F11 from maximized restores to exactly where
+   the user had the window.
+
+Earlier revision (1.70.0) used Win32 `SetWindowLongW` to strip
+the title bar during splash; that left pygame's GL viewport
+mismatched against the now-larger client area and the splash
+appeared offset.  Reverted in 1.71.0 — splash uses the
+decorated window throughout, maximize comes after.
+
+Files: `tankExporterPy/viewer.py`, `tankExporterPy/win_console.py`,
+`tankExporterPy.py`.
+
+### Wireframe / Shaded button refactor + flat-color Shaded mode (1.69.0 → 1.69.2)
+
+Layout swap:
+
+| Group | Was | Now |
+| --- | --- | --- |
+| UI | Grid · Axes · Light / Orbit · Skybox · **Wireframe** / **Terrain** | Grid · Axes · Light / Orbit · Skybox · **Terrain** |
+| Model | Meshes · Flip · Compare | Meshes · Flip · Compare / **Wireframe** · **Shaded** |
+
+Wireframe and the new **Shaded** toggle moved to the Model
+group (theme `c1`) since they mutate how the model is rendered
+rather than the viewport decoration.  Terrain claims
+Wireframe's old slot in the UI group so the row still lays out
+as a clean 3-cell row.
+
+**Shaded toggle** flips the WoT mesh path to the same simple
+diffuse + bump shader the FBX import path uses — no PBR / IBL
+/ GMM / damage layer / armour tint.  Plus a flat-colour
+override: when on, the diffuse texture is ignored entirely and
+the material is rendered in `theme.c1() × 0.75` (burnt orange
+on TEPY Default, theme-aware on every other preset).  Normal
+map still applies, so surface detail reads through bump
+shading on the flat color.
+
+GLSL: new uniforms `use_flat_color`, `flat_color` in
+`shaders/imported.frag`; per-frame setup in `viewer.py`'s
+global-uniform stage when `shaded_mode` is True.
+
+Files: `shaders/imported.frag`, `tankExporterPy/viewer.py`,
+`tankExporterPy/locale/*/LC_MESSAGES/tepy.{po,mo}`.
+
+### Cross-tab tank deselection on load (1.68.5)
+
+Each tier tab's `UITreeView` carries its own `selected_node`,
+so loading a tank on tier-7 left tier-5's "loaded" highlight
+still glowing.  New helper
+`Viewer._clear_selection_in_other_trees()` walks the cached
+per-tier tree array and nulls `selected_node` on every tree
+except the currently-active one.  Called inside `_on_load`
+right before `_load_tank_with_options` fires — only on
+successful Load click, so cancelled modals leave the previous
+load's highlight untouched.
+
+Files: `tankExporterPy/viewer.py`.
+
+### Fire billboard recentered on HP_Fire (1.68.4)
+
+Earlier revisions used `_CORNER_OFFSETS_BOTTOM` (bottom-center
+anchored) for the fire billboard so flames "rose out of the
+deck", but WoT authors HP_Fire hardpoints at the centroid of
+where the artist wanted the flame.  Bottom-anchoring shifted
+every flame upward by `size × 0.5`.  Switched to centered
+offsets (`_CORNER_OFFSETS`) so the quad's centroid coincides
+with the emitter; yellow debug outline (Show HP) updated to
+match.
+
+Files: `tankExporterPy/particles.py`, `tankExporterPy/viewer.py`.
+
+### Crash damage shader -- PBS_tank_crash.fx support (1.68.0 → 1.68.3)
+
+Damaged tanks render with the PBR-tank path PLUS a damage-
+layer multiply, replicating WoT's `PBS_tank_crash.fx` look.
+
+**Discovery.** WoT ships only compiled `.fxo` (DX11 bytecode);
+no source `.fx`.  Surveyed 52 real `/crash/` visual_processed
+files — every PBS_tank_crash material declares the SAME shared
+detail tile path:
+
+```
+crashTileMap     vehicles/russian/Tank_detail/crash_tile.dds
+g_crashUVTiling  Vector4 (typical 2,2,0,0)
+crash_coefficient float (24/52 set explicitly; 28/52 fall
+                  through to the shader's default ~1.0)
+```
+
+The base AM / ANM / AO / GMM textures on `/crash/` materials
+match the `/normal/` variant exactly — damage is purely a
+shader pass, not a separate texture set.
+
+**Parser.** `VisualLoader._extract_material_xml` captures
+`crashTileMap`, `g_crashUVTiling`, `crash_coefficient`, and
+the `<fx>` filename into the per-material dict.
+
+**Mesh.** New fields `crash_tile_tex_id`, `crash_tile_path`,
+`crash_uv_tiling`, `crash_coefficient`, `fx`.  Crash tile
+texture is uploaded once per session via `_shared_tex_cache`
+(it's literally the same file across every crashed tank).
+
+**GLSL** (`shaders/mesh.frag`).  Three RGB channels of
+`crash_tile.dds` carry three grayscale damage variants.  A
+~0.6 m world-space hash picks one channel per region, and a
+per-load `crash_channel_offset` uniform rotates which channel
+each region picks — so reloading the same damaged tank cycles
+through all three variants.  Blend is multiplicative AM ×
+mask (no colour from the tile, just darkening), capped by
+`crash_coefficient`:
+
+```glsl
+mask = damage_rgb[chan]                        // pick channel
+effective = mix(1.0, mask, crash_coefficient)  // attenuate
+diff_samp.rgb *= effective                     // multiply AM
+metallic *= (1 - dirt) * 0.85;  gloss *= ...   // dirty surfaces lose chrome
+```
+
+Earlier revisions (1.68.0, 1.68.1) used full-RGB multiply and
+alpha-mask blend respectively before settling on the
+single-channel grayscale path.
+
+`crashTileMap` lives in `particles.pkg`; current `TheItemList`
+rebuild excludes that pkg, so resolution falls back to scan-
+fallback on first load (slow once, cached after).  Adding
+`particles.pkg` to the ItemList scan list is on the deferred
+list.
+
+Files: `tankExporterPy/loaders.py`, `tankExporterPy/mesh.py`,
+`tankExporterPy/viewer.py`, `shaders/mesh.frag`.
+
+### res_mods workflow: Extract / Open / Remove + Load-from-res_mods checkbox (1.67.0 → 1.67.3)
+
+New top-of-left-panel `res_mods` section -- three buttons that
+operate on the user's res_mods tree, plus a persistent
+checkbox in the load dialog.
+
+| Button | What it does |
+| --- | --- |
+| **Extract** | Tk dialog with checkboxes for Hull / Chassis / Turret / Gun + an "Extract textures" toggle.  Writes the chosen `.primitives_processed` + `.visual_processed` (+ optional `.model`) into `<res_mods>/vehicles/<nation>/<tank>/<variant>/lod0/`.  Damaged-variant tanks redirect `/normal/` → `/crash/`.  **Textures are never overwritten** — existing files are logged as `[keep tex]` and skipped. |
+| **Open Extract Loc** | Opens Explorer at the variant subfolder Extract just wrote into (`.../normal/` or `.../crash/`).  Falls back to the whole-tank dir if only the OTHER variant is present.  When nothing's been extracted, asks via Tk yes/no whether to run Extract now. |
+| **Remove from res_mods** | Deletes the tank's whole-tank res_mods folder (both variants).  Strong confirmation -- a Tk dialog requires the user to *type* the tank's xml basename to enable the Delete button.  Counts files first, prunes empty parent dirs (`vehicles/<nation>/`) after. |
+
+`Viewer._stash_extract_paths` runs at the end of every
+`load_vehicle` and stamps the active MeshSet with:
+
+```
+extract_tank_root    <res_mods>/vehicles/<nation>/<tank>/
+extract_variant_dir  <tank_root>/<crash|normal>/
+extract_damaged      bool
+```
+
+Path is derived from the FIRST loaded mesh's `primitives_zip`
+(literal pkg path the loader actually consumed) so Open
+Extract Loc lands exactly where Extract wrote, without
+re-deriving from xml basename + nation parsing.
+
+`_open_in_explorer` uses `os.startfile()` on Windows — the
+canonical "open this directory in Explorer" path.  Replaces
+the earlier `subprocess.Popen(['explorer', path])` which had a
+known quirk of falling back to Documents on any path-parsing
+hiccup.
+
+**Section-header collapse chevrons** (left + right panels).
+`UIManager.add_panel_label` extended with `section_key` +
+`click_w` parameters; section headers render as `▼ <name>`
+(expanded) / `▶ <name>` (collapsed) and become wide click
+zones spanning the full panel width.  Click handler in
+`handle_input` calls `_toggle_section_collapsed(key)`,
+persisted under `section_collapsed` in config.  Section keys
+are stable English strings (`res_mods` / `UI` / `Model` / `IO`
+/ `Tools` / `Debug`) so a runtime language switch doesn't
+desync the persisted state from the displayed labels.
+
+**Persistent "Load from res_mods" checkbox** added to
+`UILoadTankDialog` between the title and the first skin
+block.  Defaults to checked.  When unchecked, the loader
+passes `prefer_res_mods=False` to `load_vehicle`, which blanks
+the `res_mods_root` so `VisualLoader.resolve_hd_path` skips
+its disk-walk and reads textures + visuals straight from pkg.
+
+**FBX-import → PKG twin auto-load** is hard-wired to
+`prefer_res_mods=False` per project policy: imported FBX
+tanks are always paired with pkg textures, never res_mods.
+
+**`start.bat` → `launch_skip_deps.bat` (1.67.3).**  Renamed
+because the obvious-sounding name was steering new users away
+from `go.bat`'s install-check path.  Companion bats list in
+README updated; tankExporterPy.py docstring history line
+updated.
+
+Files: `tankExporterPy/viewer.py`, `tankExporterPy/ui.py`,
+`tankExporterPy/loaders.py`, `tankExporterPy/config.py`,
+`tankExporterPy/locale/*/LC_MESSAGES/tepy.{po,mo}` (all 21),
+`launch_skip_deps.bat` (renamed), `tankExporterPy.py`,
+`README.md`.
+
+### Theme system: live preview + barb-arrow chevrons (1.63.0 → 1.66.0)
+
+The Phase 1 motif system from yesterday gets renamed to
+**theme** (user pick), gains a **fourth** named accent slot,
+swaps to a swatch-preview picker with live update (no
+restart), and gets new collapse-affordance chevrons.
+
+**Module renamed.**  `tankExporterPy/motif.py` →
+`tankExporterPy/theme.py` (via `git mv` -- history preserved).
+`Theme` dataclass replaces the old `Motif`; the public API is
+`set_active(name)` / `get_active()` / `get_active_name()` /
+`set_bg(rgba)` plus per-colour shortcuts `c1()` / `c2()` /
+`c3()` / `c4()` / `bg()`.  Backward-compat: `Viewer.__init__`
+reads `theme` from config, falls back to legacy `motif` key,
+falls back to `DEFAULT_NAME`.  Same fallback chain on
+`theme_bg` ← `motif_bg`.
+
+**Fourth accent slot c4 (burnt yellow).**  Save Prim wired to
+`_theme.c4()` -- restores the original burnt-yellow Save Prim
+accent that was lost when the Phase 1 work folded everything
+into c1/c2.  Every preset now ships its own c4: Solarized
+orange, Dracula purple, Nord aurora purple, etc.
+
+**Swatch-preview picker** (`Viewer._on_theme_clicked`).  Tk
+Toplevel with a scrollable list of preset rows; each row
+shows five coloured squares (c1 / c2 / c3 / c4 / bg) followed
+by the preset name.  Click a row → highlights it.
+**Set** commits and applies live; **Cancel** closes.
+Mouse-wheel scrolls.  `(current)` tag on the active preset's
+row at open.
+
+**Live re-tint, no restart.**  New
+`Viewer._apply_theme_live(name)` flips the active theme +
+updates `glClearColor` + walks every button reassigning
+`accent_color` from its tagged `theme_slot` (`c1` / `c2` /
+`c3` / `c4`).  Works because the renderer reads
+`btn.accent_color` and `glClearColor` afresh every frame.
+Each accent button is tagged once at `_build_ui` so this is a
+constant-time lookup.
+
+**Collapse-bar chevron upgrade (1.66.0).**  The console
+collapse and info-spine collapse glyphs swap from BLACK
+TRIANGLE / Wingdings to wide-headed barb arrows from the
+Supplemental Arrows-C block:
+
+| Affordance | Codepoint | Font |
+| --- | --- | --- |
+| console expand   | `🡩` U+1F869 | Segoe UI Symbol 14 |
+| console collapse | `🡫` U+1F86B | Segoe UI Symbol 14 |
+| spine expand     | `🡨` U+1F868 | Segoe UI Symbol 16 |
+| spine collapse   | `🡪` U+1F86A | Segoe UI Symbol 16 |
+
+Segoe UI proper doesn't carry U+1F8xx; Segoe UI **Symbol**
+does and ships with every Windows 8.1+ install.  Wide-headed
+barbs read heavier than the BLACK-TRIANGLE glyphs they
+replaced (▲ / ▼ / ◀ / ▶) and match the section-header
+chevrons used by the new collapse system.
+
+Files: `tankExporterPy/theme.py` (renamed from `motif.py`),
+`tankExporterPy/viewer.py`, `tankExporterPy/ui.py`,
+`tankExporterPy/config.py`,
+`tankExporterPy/locale/*/LC_MESSAGES/tepy.{po,mo}` (all 21).
+
+---
+
 ## 2026-05-06
 
 ### Phase 1: motif system + curated presets + 110% font scale (1.63.0)

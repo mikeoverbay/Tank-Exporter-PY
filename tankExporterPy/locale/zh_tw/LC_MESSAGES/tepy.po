@@ -58,7 +58,7 @@ msgstr "比較"
 msgid "Language"
 msgstr "語言"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "主題"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "FBX匯入已取消"
 
 msgid "FBX import failed"
 msgstr "FBX匯入失敗"
+
+
+msgid "Extract"
+msgstr "提取"
+
+msgid "Open Extract Loc"
+msgstr "開啟位置"
+
+msgid "Remove from res_mods"
+msgstr "移除"
+
+msgid "Shaded"
+msgstr "著色"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "火"
+
+msgid "Smoke"
+msgstr "煙霧"

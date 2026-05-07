@@ -21,6 +21,18 @@ msgstr "IO"
 msgid "Tools"
 msgstr "Tools"
 
+msgid "res_mods"
+msgstr "res_mods"
+
+msgid "Extract"
+msgstr "Extract"
+
+msgid "Open Extract Loc"
+msgstr "Open Extract Loc"
+
+msgid "Remove from res_mods"
+msgstr "Remove from res_mods"
+
 msgid "Model"
 msgstr "Model"
 
@@ -43,6 +55,9 @@ msgstr "Skybox"
 msgid "Wireframe"
 msgstr "Wireframe"
 
+msgid "Shaded"
+msgstr "Shaded"
+
 msgid "Terrain"
 msgstr "Terrain"
 
@@ -58,8 +73,8 @@ msgstr "Compare"
 msgid "Language"
 msgstr "Language"
 
-msgid "Motif"
-msgstr "Motif"
+msgid "Theme"
+msgstr "Theme"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
@@ -99,6 +114,12 @@ msgstr "Sm FadeE"
 
 msgid "Fire Size"
 msgstr "Fire Size"
+
+msgid "Smoke"
+msgstr "Smoke"
+
+msgid "Fire"
+msgstr "Fire"
 
 msgid "Normals"
 msgstr "Normals"

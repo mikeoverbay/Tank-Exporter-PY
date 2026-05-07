@@ -106,6 +106,44 @@ class Mesh:
         self.detail_tex_id  = None
         self.detail_tiling  = (1.0, 1.0)   # from g_detailUVTiling.xy
 
+        # Damage layer (PBS_tank_crash.fx).  Only populated when the
+        # source visual_processed lives under /crash/ AND its <fx>
+        # node points at the crash shader -- some /crash/ visuals
+        # (tracks, gun barrels) reuse the standard PBS_tank.fx and
+        # have no damage layer.
+        #
+        # crash_tile_tex_id : GLuint | None -- single shared damage
+        #                     tile (`vehicles/russian/Tank_detail/
+        #                     crash_tile.dds`) holding scorched
+        #                     metal / dirt / exposed steel in RGB
+        #                     and the blend mask in A.  Renderer
+        #                     samples this at uv * crash_uv_tiling.xy
+        #                     + crash_uv_tiling.zw.
+        # crash_tile_path   : str | None -- local disk path the GL
+        #                     texture was uploaded from.  Lets the
+        #                     FBX exporter reference the file
+        #                     without re-resolving via PkgExtractor.
+        # crash_uv_tiling   : (xMul, yMul, xOff, yOff)  from
+        #                     g_crashUVTiling.  Default (1,1,0,0)
+        #                     so an absent property still tiles 1:1.
+        # crash_coefficient : float in [0, 1] -- "how damaged" mask
+        #                     scaler.  Default 1.0 (full coverage)
+        #                     when the property is missing.  The
+        #                     renderer multiplies the tile alpha by
+        #                     this before mixing into the base.
+        self.crash_tile_tex_id = None
+        self.crash_tile_path   = None
+        self.crash_uv_tiling   = (1.0, 1.0, 0.0, 0.0)
+        self.crash_coefficient = 1.0
+        # Source shader filename ('shaders/std_effects/PBS_tank_crash.fx'
+        # for damage-layer materials; 'PBS_tank.fx' / 'PBS_tank_skinned*.fx'
+        # for everything else).  Empty for FBX imports / standalone
+        # primitive loads.  The renderer uses this to drive the
+        # damage-layer pass; we don't try to emulate the dozen+
+        # other shader variants WoT ships, just the PBS_tank vs
+        # PBS_tank_crash split.
+        self.fx                = ''
+
         # Per-material flags from visual_processed
         self.alpha_reference     = 0
         self.alpha_test_enable   = False
@@ -251,6 +289,25 @@ class Mesh:
         else:
             glUniform1i(shader.get_uniform('has_detail_map'), 0)
 
+        # Crash tile (PBS_tank_crash.fx damage layer).  Unit 8.
+        # Bound only when the source visual_processed wired up
+        # crashTileMap -- otherwise has_crash_tile=0 short-circuits
+        # the damage blend in the fragment shader.
+        if self.crash_tile_tex_id:
+            glActiveTexture(GL_TEXTURE8)
+            glBindTexture(GL_TEXTURE_2D, self.crash_tile_tex_id)
+            glUniform1i(shader.get_uniform('crash_tile_map'),  8)
+            glUniform1i(shader.get_uniform('has_crash_tile'),  1)
+            glUniform4f(shader.get_uniform('crash_uv_tiling'),
+                        self.crash_uv_tiling[0],
+                        self.crash_uv_tiling[1],
+                        self.crash_uv_tiling[2],
+                        self.crash_uv_tiling[3])
+            glUniform1f(shader.get_uniform('crash_coefficient'),
+                        float(self.crash_coefficient))
+        else:
+            glUniform1i(shader.get_uniform('has_crash_tile'), 0)
+
         glBindVertexArray(self.vao)
         glDrawElements(GL_TRIANGLES, self.index_count, GL_UNSIGNED_INT, None)
         glBindVertexArray(0)
@@ -276,15 +333,17 @@ class Mesh:
             glDeleteVertexArrays(1, [self.vao])
             self.vao = None
 
-        # NOTE: detail_tex_id is intentionally NOT freed here -- it is
-        # shared across every sub-mesh of the vehicle (and across vehicles
-        # within a session) via Viewer._shared_tex_cache.  Freeing it from
-        # one mesh would leave dangling handles on the others.  The viewer
-        # owns the lifetime and frees it in its own cleanup().
+        # NOTE: detail_tex_id and crash_tile_tex_id are intentionally
+        # NOT freed here -- both are shared across every sub-mesh of
+        # the vehicle (and across vehicles within a session) via
+        # Viewer._shared_tex_cache.  Freeing them per-mesh would leave
+        # dangling handles on the other meshes.  The viewer owns the
+        # lifetime and frees them in its own cleanup().
         for attr in ('diffuse_tex_id', 'normal_tex_id',
                      'ao_tex_id',      'gmm_tex_id'):
             tex = getattr(self, attr, None)
             if tex:
                 glDeleteTextures(1, [tex])
                 setattr(self, attr, None)
-        self.detail_tex_id = None   # drop the reference, don't delete
+        self.detail_tex_id     = None   # drop the reference, don't delete
+        self.crash_tile_tex_id = None   # ditto -- viewer owns the GL id

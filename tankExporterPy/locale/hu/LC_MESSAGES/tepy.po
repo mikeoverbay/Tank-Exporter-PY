@@ -58,8 +58,8 @@ msgstr "Össz."
 msgid "Language"
 msgstr "Nyelv"
 
-msgid "Motif"
-msgstr "Motívum"
+msgid "Theme"
+msgstr "Téma"
 
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
@@ -125,3 +125,26 @@ msgstr "FBX import megszakítva"
 
 msgid "FBX import failed"
 msgstr "FBX import sikertelen"
+
+
+msgid "Extract"
+msgstr "Kibont"
+
+msgid "Open Extract Loc"
+msgstr "Hely megny."
+
+msgid "Remove from res_mods"
+msgstr "Torles"
+
+msgid "Shaded"
+msgstr "Arnyekolt"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "Tuz"
+
+msgid "Smoke"
+msgstr "Fust"

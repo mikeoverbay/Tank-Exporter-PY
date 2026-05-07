@@ -671,10 +671,17 @@ class AnimatedBillboard:
         for i, em in enumerate(self.emitters):
             age = em['phase'] * L
             verts[i, :, 0:3] = em['pos']
-            # Bottom-anchored offsets: emitter pos = bottom-center of
-            # the flame quad rather than its centroid.  See
-            # _CORNER_OFFSETS_BOTTOM for why.
-            verts[i, :, 3:5] = _CORNER_OFFSETS_BOTTOM
+            # Centered offsets: emitter pos sits at the centroid of
+            # the flame quad.  Earlier revisions used
+            # `_CORNER_OFFSETS_BOTTOM` (bottom-center anchoring) so
+            # the flame would visibly rise out of the hull -- but
+            # WoT's HP_Fire hardpoints are authored at the centroid
+            # of where the artist wanted the flame to appear, so
+            # bottom-anchoring shifted every flame upward by
+            # `size * 0.5`.  Recenter to land squarely on the
+            # hardpoint and let the artist's HP_Fire placement be
+            # the source of truth for vertical position.
+            verts[i, :, 3:5] = _CORNER_OFFSETS
             verts[i, :, 5:7] = (_CORNER_UVS_MIRROR_X
                                 if em.get('flip_x') else _CORNER_UVS)
             verts[i, :, 7]   = age

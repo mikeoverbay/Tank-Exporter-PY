@@ -29,8 +29,8 @@ All application logic lives in the tankExporterPy/ package.
 History: this file was previously named `tank_viewer.py`; renamed to
 `tankExporterPy.py` so the entry-point matches the GitHub repo name
 (`Tank-Exporter-PY`) and user-facing brand (TEPY).  Both go.bat and
-start.bat invoke the new name; older docs referencing
-`tank_viewer.py` are stale.
+launch_skip_deps.bat (formerly start.bat -- v1.67.3) invoke the new
+name; older docs referencing `tank_viewer.py` are stale.
 """
 
 import argparse
@@ -39,6 +39,18 @@ import sys
 
 
 def main():
+    # Minimise the cmd window we were launched from before pygame
+    # creates the GL window -- otherwise the user briefly sees both
+    # stacked, which reads as "did something go wrong".  Stdout
+    # still goes to the console; click its taskbar entry to bring
+    # it back if you want to read the startup log.  No-op on
+    # non-Windows / pythonw.exe / IDE runs (no attached console).
+    try:
+        from tankExporterPy.win_console import minimize_console
+        minimize_console()
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(
         description='WoT Tank Mesh Viewer',
         formatter_class=argparse.RawDescriptionHelpFormatter,

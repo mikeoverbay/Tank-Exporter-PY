@@ -58,7 +58,7 @@ msgstr "Karşılaş."
 msgid "Language"
 msgstr "Dil"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "Tema"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "FBX içe aktar. iptal"
 
 msgid "FBX import failed"
 msgstr "FBX içe aktar. başarısız"
+
+
+msgid "Extract"
+msgstr "Cikar"
+
+msgid "Open Extract Loc"
+msgstr "Konumu ac"
+
+msgid "Remove from res_mods"
+msgstr "Kaldir"
+
+msgid "Shaded"
+msgstr "Golgeli"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "Ates"
+
+msgid "Smoke"
+msgstr "Duman"

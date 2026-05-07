@@ -60,6 +60,25 @@ uniform sampler2D   detail_map;       // unit 7  scratch noise (metallicDetailMa
 uniform int         has_detail_map;
 uniform vec2        detail_tiling;    // g_detailUVTiling.xy (typical 7,7)
 
+// ---- Damage layer  (PBS_tank_crash.fx materials only) ---------------------
+// Mirrors WoT's crash-shader path.  When a /crash/ visual references the
+// PBS_tank_crash.fx shader, the engine binds a single shared damage tile
+// (`vehicles/russian/Tank_detail/crash_tile.dds`) and blends it over the
+// base diffuse using the tiling + coefficient below.  We don't have the
+// source .fx -- the math here is best-effort based on what the
+// declared uniforms imply (visible damage scales with mask*coefficient,
+// damage suppresses metallic/gloss because scuffed/dusty surfaces lose
+// the chrome look).  Tunable from python via the standard mesh attrs.
+uniform sampler2D   crash_tile_map;   // unit 8  shared crash tile
+uniform int         has_crash_tile;   // 1 = mesh is /crash/ + PBS_tank_crash
+uniform vec4        crash_uv_tiling;  // g_crashUVTiling: xy=mul, zw=offset
+uniform float       crash_coefficient;// 0..1, "how damaged"; default 1.0
+uniform int         crash_channel_offset;  // 0/1/2, rotates which channel
+                                           // each region picks.  Per-load
+                                           // bump in Viewer cycles all three
+                                           // tile variants over three
+                                           // damaged loads of the same tank.
+
 // ---- Lighting ---------------------------------------------------------------
 // Three point lights placed 120° apart at radius 10, height 10.  By default
 // they are stationary (orbit toggled via the "Orbit" UI button).  All three
@@ -247,6 +266,73 @@ void main()
     // top of the existing sRGB->linear math.  Alpha is left untouched.
     diff_samp.rgb *= diff_samp.rgb;
 
+    // ---- Damage layer  (PBS_tank_crash.fx) ------------------------------------
+    // crash_tile.dds packs THREE GRAYSCALE damage variants into the
+    // R, G, B channels of a single texture.  The R/G/B means are
+    // 171/175/181 respectively (close, but not identical) -- each
+    // channel is a distinct mottled-grunge pattern.  The shader
+    // picks ONE channel per region of the tank and uses it as a
+    // multiplicative mask between AM and black:
+    //
+    //     mask=1  ->  AM unchanged  (clean spot)
+    //     mask=0  ->  AM goes black (full damage / scorch)
+    //
+    // No colour from the tile reaches the diffuse -- everything
+    // stays in the original tank-paint hue, just darkened in the
+    // damaged regions.  That matches "same tank, scorched" rather
+    // than "tank tinted blue-grey by the tile".
+    //
+    // Channel selection is by coarse world-space hash so neighbouring
+    // surfaces share the same pattern (no per-pixel chatter) but
+    // hull / turret / chassis end up using different channels
+    // naturally, breaking the obvious tile repeat the user would
+    // otherwise spot.  The 0.6 m grid size matches roughly one
+    // armour-panel chunk -- big enough to read as "this whole
+    // section" but small enough that one tank shows all three
+    // variants somewhere on its surface.
+    //
+    // crash_coefficient (per-material, 0..1) attenuates: the
+    // effective_mask lerps from 1.0 ("no damage") toward the picked
+    // channel value, so coefficient=0 leaves AM alone and
+    // coefficient=1 applies the full authored mask.
+    //
+    // Apply AFTER the AM-darken so the multiply lands on the
+    // already-contrast-boosted base; BEFORE AO so cavity shadowing
+    // still reaches the damage spots.  damage_mask = (1 -
+    // effective_mask) feeds the GMM stage below to drop chrome on
+    // dirty surfaces.
+    float damage_mask = 0.0;
+    if (has_crash_tile == 1) {
+        vec2 tiled_uv = fs_in.uv0 * crash_uv_tiling.xy
+                        + crash_uv_tiling.zw;
+        vec3 damage_rgb = texture(crash_tile_map, tiled_uv).rgb;
+
+        // Coarse world-space hash -- 0.6 m chunks pick one channel
+        // each.  Three magic factors (12.9898, 78.233, 37.719) are
+        // the standard Quake-style sin-hash constants; they give
+        // good distribution across small integer inputs.  The
+        // crash_channel_offset uniform shifts every region's pick
+        // by 0/1/2 so the same panel that came up "channel R" on
+        // one damaged load comes up G the next, B the next, and
+        // back to R on the fourth -- rotating through all three
+        // authored variants over three loads of the same tank.
+        vec3  hash_pos = floor(fs_in.position * (1.0 / 0.6));
+        float h        = fract(sin(dot(hash_pos,
+                              vec3(12.9898, 78.233, 37.719)))
+                          * 43758.5453);
+        int   region_pick = int(h * 3.0);   // 0/1/2 from the hash
+        int   chan        = (region_pick + crash_channel_offset) % 3;
+        float mask;
+        if      (chan == 0) mask = damage_rgb.r;
+        else if (chan == 1) mask = damage_rgb.g;
+        else                mask = damage_rgb.b;
+
+        float effective_mask = mix(1.0, mask,
+                                   clamp(crash_coefficient, 0.0, 1.0));
+        diff_samp.rgb *= effective_mask;
+        damage_mask = clamp(1.0 - effective_mask, 0.0, 1.0);
+    }
+
     // ---- AO  (WoT: applied to raw sRGB color BEFORE linearisation) ------------
     // ao_in_diffuse_alpha: skinned/track meshes store AO in diffuse alpha
     // has_ao_map: standalone AO texture, sample .g channel (WoT aoMap.g)
@@ -287,6 +373,17 @@ void main()
         gloss_raw           = gmm.r;
         perceptualRoughness = clamp(pow(gmm.r / 0.8, 7.0), c_MinRoughness, 1.0);
         metallic            = clamp(pow(gmm.g / 0.5, 5.0) * 1.5, 0.0, 1.0);
+    }
+    // Damage suppresses chrome/shine -- scuffed dirty surfaces lose
+    // metallic and gloss in proportion to the damage coverage.  Without
+    // this the crash tile reads as "shiny dirt" rather than dirt.  We
+    // attenuate gloss harder than metallic because rust + scratch
+    // tends to roughen surfaces faster than it strips them of their
+    // metallic character.
+    if (damage_mask > 0.0) {
+        metallic            *= (1.0 - damage_mask * 0.85);
+        gloss_raw           *= (1.0 - damage_mask * 0.95);
+        perceptualRoughness *= (1.0 - damage_mask * 0.95);
     }
     // alphaRoughness = (1 - gloss)^2  (actual material roughness squared)
     float roughness      = 1.0 - perceptualRoughness;

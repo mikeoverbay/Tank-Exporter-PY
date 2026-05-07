@@ -630,6 +630,14 @@ class UILoadTankDialog:
     CANCEL_W         = 80
     PAD              = 14
     COL_GAP          = 8
+    # res_mods toggle row sits between the title and the first
+    # skin block.  CB_SIZE is the box edge (matches RADIO_SIZE for
+    # visual consistency); ROW_H is the reserved vertical space
+    # including the label.  GAP is the breathing room between the
+    # row and the first block below.
+    RESMOD_CB_SIZE   = 14
+    RESMOD_CB_ROW_H  = 22
+    RESMOD_CB_GAP    = 6
 
     def __init__(self):
         self.active     = False
@@ -648,10 +656,21 @@ class UILoadTankDialog:
         # }
         self.blocks = []
 
+        # res_mods preference checkbox (top of dialog).  When True
+        # (default), the load path consults res_mods overrides
+        # before pkg originals; when False, pkg-only.  Persisted
+        # across sessions via Viewer's config (`load_from_res_mods`
+        # key); show() seeds the initial value from the caller.
+        self.prefer_res_mods       = True
+        self._resmod_cb_label_tex  = None     # cached label tex
+        self._resmod_cb_label_w    = 0
+        self._resmod_cb_label_h    = 0
+
         # Hover state
         self.hover_cancel    = False
         self.hover_load_idx  = -1     # index of block whose Load is hovered
         self.hover_dmg_idx   = -1     # index of block whose Load-Damaged is hovered
+        self.hover_resmod_cb = False  # cursor over the res_mods toggle row
 
         # Cached label textures (built lazily)
         self._title_tex = None
@@ -680,7 +699,8 @@ class UILoadTankDialog:
         self._box_x = self._box_y = self._box_h = 0
 
     # ---- show / hide -------------------------------------------------
-    def show(self, title, options, on_load, make_tex):
+    def show(self, title, options, on_load, make_tex,
+             prefer_res_mods=True):
         """Open the dialog.
 
         Args:
@@ -689,10 +709,14 @@ class UILoadTankDialog:
             on_load  (callable): (skin_or_None, chassis_tag, turret_tag,
                                   gun_tag, damaged) -> None
             make_tex (callable): UIManager._make_tex (for label rendering)
+            prefer_res_mods (bool): initial state for the "Load from
+                                  res_mods" toggle at the top of the
+                                  dialog.  Persisted by Viewer.
         """
         self.active  = True
         self.title   = title
         self.on_load = on_load
+        self.prefer_res_mods = bool(prefer_res_mods)
 
         # Free any per-show cached label textures
         self._free_per_show_tex()
@@ -790,7 +814,8 @@ class UILoadTankDialog:
     def _layout(self, window_w, window_h):
         body_h = sum(self._block_h(b) for b in self.blocks) \
                  + (len(self.blocks) - 1) * self.BLOCK_GAP \
-                 + self.TITLE_H + self.PAD * 2 + self.BTN_H + 12
+                 + self.TITLE_H + self.PAD * 2 + self.BTN_H + 12 \
+                 + self.RESMOD_CB_ROW_H + self.RESMOD_CB_GAP
         # Cap height to window; user can't scroll yet -- if too many skins
         # appear in some future tank we'll just clip the bottom blocks.
         self._box_h = max(180, min(body_h, window_h - 40))
@@ -800,11 +825,25 @@ class UILoadTankDialog:
     def _box_rect(self):
         return (self._box_x, self._box_y, self.BOX_W, self._box_h)
 
+    def _resmod_cb_rect(self):
+        """Hit rect for the res_mods toggle row (full row width).
+
+        The visible widget is the small box + label; the click
+        rect spans the full inner-dialog width so the user can
+        hit the row anywhere.
+        """
+        x = self._box_x + self.PAD
+        w = self.BOX_W - self.PAD * 2
+        y = self._box_y + self.TITLE_H + self.PAD
+        return (x, y, w, self.RESMOD_CB_ROW_H)
+
     def _block_rect(self, idx):
         """Outer rect of block idx within the dialog body."""
         x = self._box_x + self.PAD
         w = self.BOX_W - self.PAD * 2
-        y = self._box_y + self.TITLE_H + self.PAD
+        # Top of the first block sits below the res_mods toggle row.
+        y = (self._box_y + self.TITLE_H + self.PAD
+             + self.RESMOD_CB_ROW_H + self.RESMOD_CB_GAP)
         for i in range(idx):
             y += self._block_h(self.blocks[i]) + self.BLOCK_GAP
         return (x, y, w, self._block_h(self.blocks[idx]))
@@ -849,6 +888,11 @@ class UILoadTankDialog:
     def handle_click(self, mx, my):
         if not self.active:
             return False
+
+        # res_mods toggle (full-row click target)
+        if self._hit(self._resmod_cb_rect(), mx, my):
+            self.prefer_res_mods = not self.prefer_res_mods
+            return True
 
         # Cancel
         if self._hit(self._cancel_rect(), mx, my):
@@ -912,9 +956,10 @@ class UILoadTankDialog:
     def update_hover(self, mx, my):
         if not self.active:
             return
-        self.hover_cancel   = self._hit(self._cancel_rect(), mx, my)
-        self.hover_load_idx = -1
-        self.hover_dmg_idx  = -1
+        self.hover_cancel    = self._hit(self._cancel_rect(), mx, my)
+        self.hover_resmod_cb = self._hit(self._resmod_cb_rect(), mx, my)
+        self.hover_load_idx  = -1
+        self.hover_dmg_idx   = -1
         for idx in range(len(self.blocks)):
             if self._hit(self._load_btn_rect(idx), mx, my):
                 self.hover_load_idx = idx
@@ -923,10 +968,12 @@ class UILoadTankDialog:
 
     def cleanup(self):
         self._free_per_show_tex()
-        for tex in (self._cancel_tex, self._load_tex, self._dmg_tex):
+        for tex in (self._cancel_tex, self._load_tex, self._dmg_tex,
+                     self._resmod_cb_label_tex):
             if tex:
                 glDeleteTextures(1, [tex])
         self._cancel_tex = self._load_tex = self._dmg_tex = None
+        self._resmod_cb_label_tex = None
         for tex, _, _ in self._col_label_tex.values():
             if tex:
                 glDeleteTextures(1, [tex])
@@ -1548,16 +1595,16 @@ class UIConsole:
         """
         if text is None:
             return
-        # Default text colour comes from the active motif's c3
+        # Default text colour comes from the active theme's c3
         # (the "text-on-dark" accent -- wheat in the TEPY default
-        # palette, themed differently per preset).  motif.c3()
+        # palette, themed differently per preset).  theme.c3()
         # returns 0..1 floats; the line buffer historically stores
         # 0..255 ints, so we scale on the way through.
         if color is not None:
             col = color
         else:
-            from . import motif as _m
-            r, g, b, _a = _m.c3()
+            from . import theme as _th
+            r, g, b, _a = _th.c3()
             col = (int(r * 255), int(g * 255), int(b * 255))
         for piece in str(text).split('\n'):
             self._lines.append((piece, col, bg_color))
@@ -1772,19 +1819,29 @@ class UIConsole:
             self._copy_tex, self._copy_w, self._copy_h = (
                 ui_manager._make_tex('Copy', (235, 240, 250)))
 
-        # Up / down chevron matching the left-panel info spine's
-        # visual treatment (Segoe UI 16 bold, white-ish).  Direction
-        # follows where the click sends the panel:
+        # Up / down chevron.  Direction follows where the click
+        # sends the panel:
         #   * collapsed -> arrow up   (click expands UPWARD into view)
         #   * expanded  -> arrow down (click collapses DOWNWARD out of view)
-        # Triangle glyphs render bigger / heavier than ASCII v / ^,
-        # matching the spine's `<` / `>` weight.
-        chev = '▲' if self.collapsed else '▼'
+        # Glyphs:
+        #   U+1F869 WIDE-HEADED UPWARDS   BARB ARROW   (collapsed)
+        #   U+1F86B WIDE-HEADED DOWNWARDS BARB ARROW   (expanded)
+        # Both live in Supplemental Arrows-C; rendered via
+        # **Segoe UI Symbol** (Segoe UI proper doesn't carry the
+        # U+1F8xx range and falls back to tofu).  Wide-headed
+        # barbs read heavier than the BLACK-TRIANGLE glyphs they
+        # replaced (▲ / ▼) and match the info-spine's barb-arrow
+        # treatment for visual consistency across both collapse
+        # affordances.
+        chev = '\U0001F869' if self.collapsed else '\U0001F86B'
         if chev != self._chev_text_cached:
             if self._chev_tex:
                 try: glDeleteTextures(1, [self._chev_tex])
                 except Exception: pass
-            big_font = _scaled_font('Segoe UI', 16, bold=True)
+            # 14-pt Segoe UI Symbol -- pygame renders the glyph at
+            # ~14x20 after FONT_SCALE, fits inside the 22x22 button
+            # cell with ~1px breathing room on every side.
+            big_font = _scaled_font('Segoe UI Symbol', 14, bold=False)
             surf = big_font.render(chev, True, (220, 220, 230))
             data = pygame.image.tostring(surf, 'RGBA', False)
             w, h = surf.get_width(), surf.get_height()
@@ -2103,32 +2160,67 @@ class UIManager:
         btn.icon_tex, btn.icon_w, btn.icon_h = (
             self._make_icon_tex(glyph, color=color))
 
-    def add_panel_label(self, text, x, y, color=(180, 180, 195)):
+    def add_panel_label(self, text, x, y, color=(180, 180, 195),
+                         section_key=None, click_w=None):
         """Drop a small text label into the static panel-decoration list.
 
         Used for "UI" / "IO" / "Tools" section headers above grouped
-        button rows.  Returns the (tex, x, y, w, h) tuple that was
-        appended so callers that care about the rendered width (e.g.
-        for centring) can read it.
+        button rows.  Returns the (tex, x, y, w, h, section_key,
+        click_w) tuple that was appended so callers that care about
+        the rendered width (e.g. for centring) can read it.
 
         Args:
-            text  (str)              : label text
-            x, y  (int)              : top-left corner in panel coords
-            color (tuple[int, int, int]) : RGB 0-255 colour (alpha is 1.0)
+            text         (str)          : label text
+            x, y         (int)          : top-left corner in panel coords
+            color        (tuple)        : RGB 0-255 colour (alpha is 1.0)
+            section_key  (str | None)   : when set, the label is a
+                                          clickable section header that
+                                          toggles the group's collapse
+                                          state.  None = static decoration.
+            click_w      (int | None)   : explicit click hit-rect width
+                                          (when wider than the rendered
+                                          text -- e.g. full panel width
+                                          for easy section-header clicks).
+                                          None = use the text width.
 
         Returns:
-            (gl_texture_id, x, y, w, h) -- the entry as stored.
+            (gl_texture_id, x, y, w, h, section_key, click_w)
         """
         tex, w, h = self._make_tex(text, color=color)
-        entry = (tex, x, y, w, h)
+        entry = (tex, x, y, w, h, section_key, click_w)
         self.panel_labels.append(entry)
         return entry
+
+    def section_header_at(self, mx, my):
+        """Hit-test the panel-label list for a clickable section header.
+
+        Returns the section_key string under the cursor, or None when
+        the cursor isn't on a clickable section header.  The click
+        rect spans the wider of the rendered text width and the
+        explicit `click_w` recorded at add_panel_label time -- so
+        callers can register a wide hit zone (full panel width) for
+        easy section-header clicks even when the rendered glyphs
+        only fill 30 px.
+
+        Used by the viewer's input handler to flip section-collapse
+        state before regular button hit-testing runs.
+        """
+        for entry in self.panel_labels:
+            tex, lx, ly, lw, lh, section_key, click_w = entry
+            if not section_key:
+                continue
+            hit_w = click_w if click_w else lw
+            if (lx <= mx < lx + hit_w
+                    and ly <= my < ly + lh):
+                return section_key
+        return None
 
     def clear_panel_labels(self):
         """Free every panel-label texture and empty the list.  Called
         before a fresh layout pass so window-resize / re-grouping
         doesn't leak GL textures."""
-        for tex, _x, _y, _w, _h in self.panel_labels:
+        for entry in self.panel_labels:
+            tex = entry[0]
             try:
                 glDeleteTextures([tex])
             except Exception:
@@ -2474,31 +2566,31 @@ class UIManager:
     def _ensure_chevron(self):
         """Build (or rebuild) the chevron texture for the current state.
 
-        On some Windows installs Segoe UI's BLACK LEFT/RIGHT-
-        POINTING TRIANGLE glyphs (U+25C0 / U+25B6) render as
-        tofu rectangles -- the font version doesn't carry the
-        supplementary-symbol range.  Switched to **Wingdings**
-        which is a Microsoft "symbol font" whose ASCII codepoints
-        each map to a fixed glyph; ships with every Windows
-        install since Win 3.1 so it's always present.
+        Glyphs (Supplemental Arrows-C, font: **Segoe UI Symbol**):
+            U+1F86A WIDE-HEADED RIGHTWARDS BARB ARROW  (collapsed)
+            U+1F868 WIDE-HEADED LEFTWARDS  BARB ARROW  (expanded)
 
-        Glyphs (chosen visually -- swap the letters below to pick
-        different symbols if these look wrong):
-            't'  -- expanded state ("panel open, click to close")
-            'u'  -- collapsed state ("panel closed, click to open")
+        Direction follows the side the click moves the panel:
+            * expanded  -> left  barb (click slides panel closed left)
+            * collapsed -> right barb (click slides panel open right)
 
-        Both render at ~13-18px wide in Wingdings 18-pt.  Use
-        the standard Wingdings table to pick alternatives:
-        https://en.wikipedia.org/wiki/Wingdings
+        Earlier revisions used Wingdings letters (`t` / `u`) which
+        gave correct visuals but were cryptic in code; before that,
+        Segoe UI BLACK LEFT/RIGHT-POINTING TRIANGLE (U+25C0 / U+25B6)
+        rendered as tofu on some Windows installs because Segoe UI
+        proper doesn't carry that range.  Segoe UI **Symbol** is the
+        sibling font that does carry the U+1F8xx Supplemental
+        Arrows-C block and ships with every Windows 8.1+ install.
         """
-        glyph = 'u' if self.info_collapsed else 't'
+        glyph = ('\U0001F86A' if self.info_collapsed
+                 else '\U0001F868')
         if glyph == self._chevron_glyph and self._chevron_tex is not None:
             return
         if self._chevron_tex is not None:
             glDeleteTextures(1, [self._chevron_tex])
-        # Wingdings at 18pt -- the symbol font expects a slightly
-        # larger size than the prose-text Segoe UI it replaced.
-        big = _scaled_font('Wingdings', 18, bold=False)
+        # 16-pt Segoe UI Symbol -- pygame renders at ~15x22 after
+        # FONT_SCALE; comfortably fits the 18-px-wide spine.
+        big = _scaled_font('Segoe UI Symbol', 16, bold=False)
         surf = big.render(glyph, True, (220, 220, 230))
         data = pygame.image.tostring(surf, 'RGBA', False)
         w, h = surf.get_width(), surf.get_height()
@@ -2582,11 +2674,15 @@ class UIManager:
                 # consistent styling looks better).
                 self._solid(0.45, 0.45, 0.55, 1.0, rx, ry + rh - 2,  rw, 2)
 
-        # ---- Panel section labels ("UI", "IO", "Tools") ----------------
+        # ---- Panel section labels ("res_mods", "UI", "IO", ...) -------
         # Drawn between the panel backgrounds and the buttons so the
         # button rows visually anchor underneath each label.  Pure text
-        # blits -- no boxes, no separators; subtle grouping cue.
-        for tex, lx, ly, lw, lh in self.panel_labels:
+        # blits -- no boxes, no separators; subtle grouping cue.  The
+        # 6-7th tuple fields (section_key, click_w) are used by the
+        # input handler in Viewer to detect clicks on collapsible
+        # section headers; the renderer ignores them.
+        for entry in self.panel_labels:
+            tex, lx, ly, lw, lh = entry[:5]
             self._draw_tex(tex, lx, ly, lw, lh)
 
         # ---- Toggle buttons (row 1, y=4) ------------------------------
@@ -3256,6 +3352,40 @@ class UIManager:
                            bx + 12,
                            by + (dlg.TITLE_H - dlg._title_h) // 2,
                            dlg._title_w, dlg._title_h)
+
+        # ---- res_mods toggle row (between title and first block) -----
+        # Row bg picks up a subtle highlight when hovered so the user
+        # gets a "yes I'm clickable" cue.  Box is a small filled
+        # square; checked state shows an inner highlight.
+        rx, ry, rw, rh = dlg._resmod_cb_rect()
+        if dlg.hover_resmod_cb:
+            self._solid(0.22, 0.24, 0.30, 1.0, rx, ry, rw, rh)
+        cb_size = dlg.RESMOD_CB_SIZE
+        cb_x = rx + 2
+        cb_y = ry + (rh - cb_size) // 2
+        # Border
+        self._solid(0.50, 0.55, 0.65, 1.0,
+                    cb_x - 1, cb_y - 1, cb_size + 2, cb_size + 2)
+        if dlg.prefer_res_mods:
+            # Filled (checked)
+            self._solid(0.30, 0.55, 0.85, 1.0, cb_x, cb_y, cb_size, cb_size)
+            pad = 3
+            self._solid(0.85, 0.95, 1.0, 1.0,
+                        cb_x + pad, cb_y + pad,
+                        cb_size - pad * 2, cb_size - pad * 2)
+        else:
+            self._solid(0.18, 0.18, 0.22, 1.0, cb_x, cb_y, cb_size, cb_size)
+        # Label (built once, kept across renders)
+        if dlg._resmod_cb_label_tex is None:
+            dlg._resmod_cb_label_tex, dlg._resmod_cb_label_w, \
+                dlg._resmod_cb_label_h = self._make_tex(
+                    'Load from res_mods (mod overrides)',
+                    (220, 225, 235))
+        self._draw_tex(
+            dlg._resmod_cb_label_tex,
+            cb_x + cb_size + 6,
+            ry + (rh - dlg._resmod_cb_label_h) // 2,
+            dlg._resmod_cb_label_w, dlg._resmod_cb_label_h)
 
         # ---- Per-skin blocks ------------------------------------------
         for idx, block in enumerate(dlg.blocks):

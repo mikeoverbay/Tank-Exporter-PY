@@ -26,14 +26,14 @@ from collections import deque
 
 import numpy as np
 import pygame
-from pygame.locals import (DOUBLEBUF, KEYDOWN, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
+from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w)
 from OpenGL.GL import *
 
 from .loaders  import MeshParser, VisualLoader, TextureLoader, VehicleXMLLoader, PkgExtractor
 from .         import config as _config
-from .         import motif   as _motif
+from .         import theme   as _theme
 from .mesh     import Mesh
 from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
@@ -176,6 +176,13 @@ class MeshSet:
         'armor_color',
         'scene_bbox',
         'tank_info',
+        # res_mods Extract destination, computed once per load.  Both
+        # are absolute disk paths; None = "no extract location yet"
+        # (fresh viewer / cleared scene / FBX import without canonical
+        # paths).  See Viewer._stash_extract_paths.
+        'extract_tank_root',
+        'extract_variant_dir',
+        'extract_damaged',
     )
 
     def __init__(self):
@@ -192,6 +199,17 @@ class MeshSet:
         # tree without a full XML re-parse.  None for FBX imports and
         # standalone .primitives_processed loads.
         self.tank_info        = None
+        # res_mods Extract destination, computed by load_vehicle once
+        # nation + xml basename + damaged flag are all known.
+        # tank_root  : <res_mods>/vehicles/<full_nation>/<xml_base>/
+        # variant_dir: <tank_root>/<crash|normal>/
+        # damaged    : True/False, mirrors how variant_dir was named
+        # so external callers can read the variant without parsing
+        # the path back out.  None when no canonical pkg path could
+        # be derived (FBX import without source_tank_name, etc.).
+        self.extract_tank_root   = None
+        self.extract_variant_dir = None
+        self.extract_damaged     = False
 
     def cleanup(self):
         """Free GPU resources for every mesh and reset to empty state.
@@ -209,6 +227,9 @@ class MeshSet:
         self.armor_color      = None
         self.scene_bbox       = None
         self.tank_info        = None
+        self.extract_tank_root   = None
+        self.extract_variant_dir = None
+        self.extract_damaged     = False
 
     def is_loaded(self):
         return bool(self.meshes)
@@ -410,6 +431,15 @@ class Viewer:
         # _on_export_clicked to tag the default save name and by
         # Save Prim to route writes to crash/ instead of normal/.
         self._loaded_damaged = False
+        # Crash-tile channel offset (0/1/2) added to the per-fragment
+        # world-space hash inside mesh.frag.  Increments every
+        # successful load_vehicle so reloading the same damaged tank
+        # rotates which of the three R/G/B grunge variants land where
+        # -- one panel that came up "channel R" last time becomes G
+        # this time and B the time after.  Three loads in a row
+        # cycle through every layout the tile can produce.  Only
+        # affects the crash shader path; ignored for normal loads.
+        self._crash_channel_offset = 0
         # Merge supplied config with defaults so callers can omit it
         self._cfg = _config.load()
         if cfg:
@@ -497,18 +527,34 @@ class Viewer:
         )
         pygame.display.set_caption(f"TEPY  v{_APP_VERSION}")
 
+        # Fullscreen state machine.  Splash renders in the windowed
+        # client area we just opened (so it centres correctly inside
+        # a known viewport); once init is done, run() promotes to
+        # fullscreen via _go_fullscreen.  F11 toggles back to a
+        # windowed state at the dimensions we remembered here.
+        self._is_fullscreen = False
+        self._windowed_w    = self.width
+        self._windowed_h    = self.height
+
         glEnable(GL_DEPTH_TEST)
-        # Activate persisted motif before we touch any colour.  All
+        # Activate persisted theme before we touch any colour.  All
         # subsequent button accents / clear-colour / console-text
-        # tints read from motif.c1() / c2() / c3() / bg(), so a
-        # `set_active(...)` here flips the entire palette before
-        # any widget gets built.
-        _motif.set_active(self._cfg.get('motif') or _motif.DEFAULT_NAME)
+        # tints read from theme.c1() / c2() / c3() / c4() / bg(),
+        # so a `set_active(...)` here flips the entire palette
+        # before any widget gets built.
+        # Theme name lives under `theme` in config; `motif` is the
+        # legacy v1.63.0 key kept as a fallback so an existing
+        # tankExporterPy.json from that version still resolves.
+        theme_name = (self._cfg.get('theme')
+                      or self._cfg.get('motif')   # legacy key
+                      or _theme.DEFAULT_NAME)
+        _theme.set_active(theme_name)
         # Optional persisted bg override (free-form colour picker).
-        bg_override = self._cfg.get('motif_bg')
+        bg_override = (self._cfg.get('theme_bg')
+                       or self._cfg.get('motif_bg'))   # legacy
         if bg_override:
-            _motif.set_bg(tuple(bg_override))
-        glClearColor(*_motif.bg())
+            _theme.set_bg(tuple(bg_override))
+        glClearColor(*_theme.bg())
 
         # ---- Splash screen ------------------------------------------------
         # Painted as soon as the GL context exists so the user sees
@@ -761,6 +807,15 @@ class Viewer:
         self.show_light   = True
         self.show_terrain = bool(self._cfg.get('show_terrain', False))
         self.wireframe    = False
+        # Cheap-Phong fallback toggle.  When True, the WoT mesh path
+        # uses the same simple diffuse + bump shader the FBX import
+        # path uses (no PBR / IBL / GMM / damage layer / armour
+        # tint).  Useful for diagnostic A/B comparison or when the
+        # PBR pipeline misbehaves on a particular tank's materials.
+        # Wired to the 'Shaded' button in the Model group; runtime
+        # state only -- not persisted because it's a "look at this
+        # for a moment" toggle, not a session preference.
+        self.shaded_mode  = False
         self.use_normal_map = True
         # Re-entrancy guard.  True from the moment the user picks a
         # tank to the moment that load returns (success OR error);
@@ -1364,23 +1419,40 @@ class Viewer:
         # buttons (Meshes / Flip / Compare) which get a burnt-
         # orange accent -- see the `Model` group in
         # `_layout_widgets`.
-        # UI display toggles -- secondary accent (motif.c2).
-        # Default motif's c2 is the original olive; other motifs
+        # UI display toggles -- secondary accent (theme.c2).
+        # Default theme's c2 is the original olive; other themes
         # supply their own complementary colour.
-        _UI_OLIVE = _motif.c2()
-        for label, attr in [
-            (_('Grid'),      'show_grid'),
-            (_('Axes'),      'show_axes'),
-            (_('Light'),     'show_light'),
-            (_('Orbit'),     'orbit_lights'),
-            (_('Skybox'),    'show_skybox'),
-            (_('Wireframe'), 'wireframe'),
-            (_('Terrain'),   'show_terrain'),
+        #
+        # Toggle entries are (label, attr, theme_slot).  The slot
+        # tag determines which theme accent the IDLE state pulls
+        # from -- 'c2' for the viewport-display group (Grid / Axes
+        # / etc.) and 'c1' for the Model-group toggles (Wireframe /
+        # Shaded) so they read as the same category as Meshes /
+        # Flip / Compare on the laid-out panel.  Layout placement
+        # is owned by `_layout_widgets`; here we just register the
+        # buttons + their accent slot so the renderer can tint them
+        # correctly even before the first layout pass.
+        _UI_OLIVE = _theme.c2()
+        _MODEL_C1 = _theme.c1()
+        for label, attr, slot in [
+            (_('Grid'),      'show_grid',     'c2'),
+            (_('Axes'),      'show_axes',     'c2'),
+            (_('Light'),     'show_light',    'c2'),
+            (_('Orbit'),     'orbit_lights',  'c2'),
+            (_('Skybox'),    'show_skybox',   'c2'),
+            (_('Terrain'),   'show_terrain',  'c2'),
+            # Model-group toggles -- live in the Model group in
+            # _layout_widgets but registered here so the standard
+            # toggle pipeline (set/sync attr, persist, etc.) covers
+            # them like every other on/off state.
+            (_('Wireframe'), 'wireframe',     'c1'),
+            (_('Shaded'),    'shaded_mode',   'c1'),
         ]:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
             btn.attr = attr
-            btn.accent_color = _UI_OLIVE
+            btn.accent_color = _MODEL_C1 if slot == 'c1' else _UI_OLIVE
+            btn.theme_slot   = slot
             x       += btn.w + self.ui.BUTTON_SPACING
 
         # --- Action buttons (one-shot, no toggle attr) -------------------
@@ -1401,17 +1473,18 @@ class Viewer:
         # the viewport.  Burnt-orange accent so they read as a
         # different category from the olive UI toggles.  Same
         # palette family, distinct role.
-        # Model tools -- primary accent (motif.c1).
-        # Default motif's c1 is the original burnt orange; swapping
-        # motif rotates this through whatever the new preset
+        # Model tools -- primary accent (theme.c1).
+        # Default theme's c1 is the original burnt orange; swapping
+        # theme rotates this through whatever the new preset
         # supplies (Dracula orange, Solarized yellow, ...).
-        _MODEL_BURNT_ORANGE = _motif.c1()
+        _MODEL_BURNT_ORANGE = _theme.c1()
 
         # 'Meshes' opens / closes the mesh-visibility window.  Always
         # available; population happens at load time.
         meshes_btn = self.ui.add_button(_('Meshes'), x, y, 70, h, active=False,
                                           action=self._toggle_mesh_window)
         meshes_btn.accent_color = _MODEL_BURNT_ORANGE
+        meshes_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Export' opens a Save dialog and spawns Blender (--background)
@@ -1423,7 +1496,8 @@ class Viewer:
         export_btn = self.ui.add_button(
             _('Export'), x, y, 70, h, active=False,
             action=self._on_export_clicked)
-        export_btn.accent_color = _motif.c1()
+        export_btn.accent_color = _theme.c1()
+        export_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Import' opens a file picker and spawns Blender to read an
@@ -1435,7 +1509,8 @@ class Viewer:
         import_btn = self.ui.add_button(
             _('Import'), x, y, 70, h, active=False,
             action=self._on_import_clicked)
-        import_btn.accent_color = _motif.c2()
+        import_btn.accent_color = _theme.c2()
+        import_btn.theme_slot   = 'c2'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Flip' toggles the active mesh set between FBX (imported) and
@@ -1445,6 +1520,7 @@ class Viewer:
         flip_btn = self.ui.add_button(_('Flip'), x, y, 70, h, active=False,
                                         action=self._flip_active_set)
         flip_btn.accent_color = _MODEL_BURNT_ORANGE
+        flip_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Compare' opens the side-by-side per-part stats window
@@ -1455,6 +1531,7 @@ class Viewer:
                                            active=False,
                                            action=self._on_compare_clicked)
         compare_btn.accent_color = _MODEL_BURNT_ORANGE
+        compare_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Save Prim' opens a component picker (Hull / Chassis /
@@ -1468,13 +1545,13 @@ class Viewer:
         save_prim_btn = self.ui.add_button(
             _('Save Prim'), x, y, 70, h, active=False,
             action=self._on_save_prim_clicked)
-        # Save Prim joins the warm-accent family (motif.c1).  Its
-        # previous standalone burnt-yellow is gone -- the user's
-        # two-colour-per-button rule means every IO button has
-        # to pick c1 or c2, and Save Prim outputs data (warm) like
-        # Export.  If a future motif wants a third button colour
-        # we'll revisit.
-        save_prim_btn.accent_color = _motif.c1()
+        # Save Prim takes its own slot, theme.c4 -- a "warm but
+        # distinct from Export" accent.  Default theme's c4 is
+        # burnt yellow (the original Save Prim colour); other
+        # themes supply their own (Solarized orange, Dracula
+        # purple, Nord aurora purple, ...).
+        save_prim_btn.accent_color = _theme.c4()
+        save_prim_btn.theme_slot   = 'c4'
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Language' opens a Tk dropdown picker.  Sister to Set Paths
@@ -1484,13 +1561,13 @@ class Viewer:
                            action=self._on_language_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
-        # 'Motif' opens a Tk picker listing every preset palette.
+        # 'Theme' opens a Tk picker listing every preset palette.
         # Phase 1: dropdown with restart-to-apply (paired with the
         # button-accent live updates we already do at startup).
         # Phase 2 will replace this with an in-app scrolling
         # color-pair preview window with live preview on hover.
-        self.ui.add_button(_('Motif'), x, y, 70, h, active=False,
-                           action=self._on_motif_clicked)
+        self.ui.add_button(_('Theme'), x, y, 70, h, active=False,
+                           action=self._on_theme_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'ItemList' rebuilds TheItemList.xml from scratch by walking
@@ -1504,6 +1581,26 @@ class Viewer:
         # registration.
         self.ui.add_button(_('ItemList'), x, y, 70, h, active=False,
                            action=self._on_rebuild_itemlist_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+
+        # ---- Extract group (top of the left panel) ----------------
+        # Three buttons that operate on the user's res_mods tree:
+        #   * Extract           -- copy chosen tank parts (+ optional
+        #                          textures) from pkg into res_mods
+        #   * Open Extract Loc  -- open Explorer at res_mods tank root
+        #   * Remove            -- delete res_mods tank tree (with
+        #                          typed-confirmation safeguard)
+        # Layout placement (and the section header) is owned by
+        # `_layout_widgets`; here we just register the buttons.
+        self.ui.add_button(_('Extract'), x, y, 70, h, active=False,
+                           action=self._on_extract_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+        self.ui.add_button(_('Open Extract Loc'), x, y, 70, h, active=False,
+                           action=self._on_open_extract_loc_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+        self.ui.add_button(_('Remove from res_mods'), x, y, 70, h,
+                           active=False,
+                           action=self._on_remove_from_resmods_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
         # --- Sliders + Invert checkboxes --------------------------------
@@ -2310,89 +2407,330 @@ class Viewer:
             f"Restart TEPY for the change to take effect.")
 
     # ------------------------------------------------------------------
-    def _on_motif_clicked(self):
-        """Action-button callback: show a Tk dropdown for motif/theme.
+    def _toggle_debug_collapsed(self):
+        """Flip the right-panel Debug section's collapse state.
 
-        Phase 1 implementation -- a quick-and-dirty Combobox
-        listing every preset in `motif.PRESETS`.  Save persists
-        the choice to `tankExporterPy.json` under `motif`; restart
-        applies it (button accent geometry colours pick the new
-        motif at next `_build_ui`; existing baked text textures
-        keep their old tint until then).
+        Dedicated handler -- distinct from `_toggle_section_collapsed`
+        which the left panel uses.  Targeted updates only:
 
-        Phase 2 will replace this with an in-app draggable
-        scrolling preview that shows the c1 / c2 / c3 / bg
-        swatches per preset and a free-form colour picker for
-        the bg override.
+            1. Flip section_collapsed['Debug'] in config.
+            2. Re-run `_layout_widgets()` so the right-panel block
+               sees the new state and computes the right
+               RIGHT_CONTROLS_H + visibility for the right widgets.
+               Left-panel layout is idempotent on this call --
+               buttons / sliders / checkboxes stay where they were.
+            3. Update the two right-side things that depend on
+               RIGHT_CONTROLS_H: tank-list tree height (per cached
+               tier tree) and right_controls_rect (panel-BG render
+               + hit-test bounds).
+            4. Persist.
+
+        Critically does NOT call `_on_resize` -- avoids the spine-
+        collapse override loop at the end of _on_resize, which
+        would unconditionally clobber left-panel widget visibility.
+        """
+        d = self._cfg.get('section_collapsed') or {}
+        if not isinstance(d, dict):
+            d = {}
+        d['Debug'] = not bool(d.get('Debug', False))
+        self._cfg['section_collapsed'] = d
+
+        # Re-run panel-internal layout (positions + visibility +
+        # the new RIGHT_CONTROLS_H value).
+        self._layout_widgets()
+
+        # Right-side consumers of RIGHT_CONTROLS_H -- update them
+        # by hand.  Tab-bar y is anchored to 0 (top), unaffected.
+        # Camera viewport doesn't depend on RIGHT_CONTROLS_H either,
+        # so we don't touch self.camera.{width,height}.
+        tab_h = self.ui.tab_bar.HEIGHT if self.ui.tab_bar else 0
+        tree_h = max(1, self.height - tab_h - self.RIGHT_CONTROLS_H)
+        for cached in getattr(self, '_tier_tree_cache', ()):
+            if cached is None:
+                continue
+            cached.h = tree_h
+        if self.ui.tree is not None:
+            self.ui.tree.h = tree_h
+
+        self.ui.right_controls_rect = (
+            self.width - self.TREE_PANEL_W,
+            self.height - self.RIGHT_CONTROLS_H,
+            self.TREE_PANEL_W,
+            self.RIGHT_CONTROLS_H,
+        )
+
+        try:
+            _config.save(self._cfg)
+        except Exception as exc:
+            print(f"[debug-collapse] save failed: {exc}")
+
+    def _toggle_section_collapsed(self, section_key):
+        """Flip the collapse state of one left-panel section.
+
+        Section keys are the stable English names from
+        `_layout_widgets.section_keys` ('res_mods' / 'UI' / 'Model'
+        / 'IO' / 'Tools') -- chosen so a runtime language switch
+        doesn't desync the persisted state from the displayed
+        labels.  Re-runs `_layout_widgets` so the new visibility +
+        chevron glyph (▼ / ▶) takes effect on the next frame, and
+        persists the dict to disk so the layout survives a restart.
+        """
+        # Defensive: cfg dict mutation should never silently drop
+        # other keys we don't know about.
+        d = self._cfg.get('section_collapsed') or {}
+        if not isinstance(d, dict):
+            d = {}
+        d[section_key] = not bool(d.get(section_key, False))
+        self._cfg['section_collapsed'] = d
+        self._layout_widgets()
+        try:
+            _config.save(self._cfg)
+        except Exception as exc:
+            # Don't fight the user over a config write -- a missing
+            # save just means the new collapse state won't persist
+            # past the session.
+            print(f"[section-collapse] save failed: {exc}")
+
+    # ------------------------------------------------------------------
+    def _apply_theme_live(self, name):
+        """Switch active theme and re-tint every live UI accent
+        without rebuilding widgets / restarting TEPY.
+
+        Cheap because the renderer reads `btn.accent_color` and
+        `glClearColor` afresh each frame -- so updating those plus
+        flipping `theme.set_active(...)` is enough.  Buttons are
+        tagged with `theme_slot` ('c1' / 'c2' / 'c3' / 'c4') at
+        `_build_ui` time so we know which slot to pull from for
+        each button on a re-theme.
+
+        Returns True on success, False if `name` isn't a known
+        preset.
+
+        What does NOT live-update:
+          * Console lines already in the scrollback (their bitmap
+            had c3 baked in at write time).  New lines pick up the
+            new c3 automatically.
+          * Pre-rendered button labels are alpha-only blits drawn
+            over the accent fill, so they look correct against the
+            new accent without rebuild.
+        """
+        if not _theme.set_active(name):
+            return False
+        glClearColor(*_theme.bg())
+        slot_lookup = {
+            'c1': _theme.c1, 'c2': _theme.c2,
+            'c3': _theme.c3, 'c4': _theme.c4,
+        }
+        for btn in self.ui.buttons:
+            slot = getattr(btn, 'theme_slot', None)
+            fn   = slot_lookup.get(slot)
+            if fn is not None:
+                btn.accent_color = fn()
+        return True
+
+    # ------------------------------------------------------------------
+    def _on_theme_clicked(self):
+        """Action-button callback: show the swatch-preview theme picker.
+
+        Tk Toplevel with a scrollable list of preset rows.  Each row
+        renders the preset's c1 / c2 / c3 / c4 / bg as five small
+        coloured squares followed by the preset name.  Clicking a row
+        selects it (visual highlight in the list); pressing Set commits
+        the choice -- saves to `tankExporterPy.json` under `theme` and
+        applies live via `_apply_theme_live` so the running session
+        re-tints without a restart.  Cancel closes the dialog without
+        changes.
+
+        The bg-override colour picker is a separate future widget --
+        this dialog only switches between the curated presets.
         """
         try:
             import tkinter as tk
             from tkinter import ttk
         except ImportError:
-            self.log_error("Motif picker: tkinter not available.")
+            self.log_error("Theme picker: tkinter not available.")
             return
 
-        cur_name = _motif.get_active_name()
+        cur_name = _theme.get_active_name()
 
         root = tk.Tk()
-        root.title("TEPY -- Motif")
+        root.title("TEPY -- Theme")
         try:
             root.attributes('-topmost', True)
         except Exception:
             pass
-        root.geometry("+400+250")
+        root.geometry("+400+200")
         root.resizable(False, False)
 
-        frame = ttk.Frame(root, padding=12)
-        frame.pack(fill='both', expand=True)
+        outer = ttk.Frame(root, padding=10)
+        outer.pack(fill='both', expand=True)
 
-        ttk.Label(frame, text="Choose UI motif:",
-                  font=('Segoe UI', 10, 'bold')).pack(anchor='w')
-        ttk.Label(frame, text=f"Current: {cur_name}",
-                  foreground='gray').pack(anchor='w', pady=(0, 8))
+        ttk.Label(outer, text="Click a theme to select.  Set to apply.",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w',
+                                                       pady=(0, 6))
 
-        choice_var = tk.StringVar(value=cur_name)
-        combo = ttk.Combobox(frame, values=list(_motif.PRESET_NAMES),
-                             state='readonly', textvariable=choice_var,
-                             width=28)
-        combo.pack(fill='x', pady=(0, 8))
+        # ---- Scrollable list of preset rows ----------------------
+        # Tk Listbox can't render coloured swatches per row, so we
+        # build a Canvas (scrollable) and pack one Frame per preset
+        # inside it.  The window-on-canvas trick gives us scroll
+        # bars without abandoning normal layout for the rows.
+        list_h = min(360, 36 * len(_theme.PRESET_NAMES) + 6)
+        list_w = 360
 
-        ttk.Label(frame, text="Takes effect on next launch.",
-                  foreground='gray').pack(anchor='w')
+        canvas = tk.Canvas(outer, width=list_w, height=list_h,
+                           highlightthickness=1,
+                           highlightbackground='#777',
+                           bg='#202020')
+        vbar   = ttk.Scrollbar(outer, orient='vertical',
+                               command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
 
-        result = {'name': None}
+        canvas.pack(side='left', fill='both', expand=True)
+        vbar.pack(side='right', fill='y')
 
-        def _ok():
-            result['name'] = choice_var.get()
+        rows_frame = tk.Frame(canvas, bg='#202020')
+        rows_window = canvas.create_window((0, 0),
+                                            window=rows_frame,
+                                            anchor='nw')
+
+        def _on_rows_resize(_evt):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            # Stretch the inner frame to canvas width so row clicks
+            # land anywhere across the full list, not just on the
+            # text run.
+            canvas.itemconfigure(rows_window, width=canvas.winfo_width())
+
+        rows_frame.bind('<Configure>', _on_rows_resize)
+
+        # Mouse-wheel scroll inside the list (Windows convention:
+        # delta is +/- 120 per notch, divide by 120 for unit scroll
+        # and negate so wheel-up scrolls list-up).
+        def _on_mousewheel(evt):
+            canvas.yview_scroll(int(-evt.delta / 120), 'units')
+        canvas.bind('<MouseWheel>', _on_mousewheel)
+        rows_frame.bind('<MouseWheel>', _on_mousewheel)
+
+        # ---- Row builder -----------------------------------------
+        # Each preset gets one Frame.  Inside: a Canvas with five
+        # filled rectangles (c1 / c2 / c3 / c4 / bg) followed by a
+        # Label with the preset name.  The whole row binds Button-1
+        # to set the current selection.
+        SWATCH = 22       # square edge in px
+        SW_GAP = 3        # gap between swatches
+        ROW_PAD_Y = 4
+
+        def _rgba_to_hex(rgba):
+            r, g, b = rgba[:3]
+            return '#{:02x}{:02x}{:02x}'.format(
+                int(r * 255), int(g * 255), int(b * 255))
+
+        selected = {'name': cur_name}
+        row_widgets = {}   # name -> (frame, label) for highlight updates
+
+        UNSEL_BG  = '#202020'   # row bg when not selected
+        SEL_BG    = '#3a3a4a'   # row bg when selected
+        UNSEL_FG  = '#ddd'      # row text when not selected
+        SEL_FG    = '#ffffff'   # row text when selected
+
+        def _highlight(name):
+            """Repaint row backgrounds so only `name` shows the
+            selection tint."""
+            for n, (frm, lbl, swc) in row_widgets.items():
+                bg = SEL_BG if n == name else UNSEL_BG
+                fg = SEL_FG if n == name else UNSEL_FG
+                frm.configure(bg=bg)
+                lbl.configure(bg=bg, fg=fg)
+                swc.configure(bg=bg)
+
+        def _select(name):
+            selected['name'] = name
+            _highlight(name)
+
+        def _build_row(name):
+            preset = _theme.PRESETS[name]
+            row = tk.Frame(rows_frame, bg=UNSEL_BG, padx=6,
+                           pady=ROW_PAD_Y, cursor='hand2')
+            row.pack(fill='x', expand=True)
+
+            # Five swatches drawn in one canvas so we can lay them
+            # out tightly without per-swatch frame overhead.
+            sw_w = SWATCH * 5 + SW_GAP * 4
+            sw   = tk.Canvas(row, width=sw_w, height=SWATCH,
+                             bg=UNSEL_BG, highlightthickness=0)
+            sw.pack(side='left')
+            colours = [preset.c1, preset.c2, preset.c3,
+                       preset.c4, preset.bg]
+            for i, rgba in enumerate(colours):
+                x0 = i * (SWATCH + SW_GAP)
+                sw.create_rectangle(x0, 0, x0 + SWATCH, SWATCH,
+                                    fill=_rgba_to_hex(rgba),
+                                    outline='#444')
+
+            label_text = name + ('   (current)' if name == cur_name else '')
+            lbl = tk.Label(row, text=label_text, bg=UNSEL_BG,
+                           fg=UNSEL_FG, font=('Segoe UI', 10),
+                           padx=10, anchor='w')
+            lbl.pack(side='left', fill='x', expand=True)
+
+            row_widgets[name] = (row, lbl, sw)
+
+            for w in (row, lbl, sw):
+                w.bind('<Button-1>', lambda _e, n=name: _select(n))
+                w.bind('<MouseWheel>', _on_mousewheel)
+
+        for name in _theme.PRESET_NAMES:
+            _build_row(name)
+        _highlight(cur_name)
+
+        # ---- Bottom button row ------------------------------------
+        result = {'apply': False}
+
+        def _set():
+            result['apply'] = True
             root.destroy()
 
         def _cancel():
+            result['apply'] = False
             root.destroy()
 
-        button_row = ttk.Frame(frame)
-        button_row.pack(fill='x', pady=(8, 0))
-        ttk.Button(button_row, text='Save',   command=_ok).pack(side='right')
-        ttk.Button(button_row, text='Cancel', command=_cancel).pack(side='right',
-                                                                    padx=(0, 6))
+        # The bottom button row needs to live OUTSIDE `outer` (which
+        # holds the canvas + vscroll) so it doesn't get pushed off
+        # the bottom by the scrollable list.
+        btn_row = ttk.Frame(root, padding=(10, 4, 10, 10))
+        btn_row.pack(fill='x', side='bottom')
+        ttk.Button(btn_row, text='Set',    command=_set
+                   ).pack(side='right')
+        ttk.Button(btn_row, text='Cancel', command=_cancel
+                   ).pack(side='right', padx=(0, 6))
 
         root.protocol("WM_DELETE_WINDOW", _cancel)
         root.mainloop()
 
-        chosen = result['name']
-        if chosen is None or chosen == cur_name:
+        if not result['apply']:
+            return
+        chosen = selected['name']
+        if chosen == cur_name:
             return
 
-        self._cfg['motif'] = chosen
+        # Apply live first so the user gets visual confirmation
+        # the moment the dialog closes; persist after.  If save
+        # fails we still keep the live theme so the rest of this
+        # session shows the chosen palette -- they can pick again
+        # next launch.
+        if not self._apply_theme_live(chosen):
+            self.log_error(f"Theme: unknown preset {chosen!r}")
+            return
+        self._cfg['theme'] = chosen
+        # Drop the legacy `motif` key from the on-disk config so
+        # we don't keep two competing values around once the user
+        # has actively picked a theme through the new picker.
+        self._cfg.pop('motif', None)
         try:
             _config.save(self._cfg)
         except Exception as exc:
-            self.log_error(f"Motif: config save failed: {exc}")
+            self.log_error(f"Theme: config save failed: {exc}")
             return
-        self.log(f"Motif set to {chosen!r} -- restart TEPY to apply.")
-        self._show_info_popup(
-            "Motif saved",
-            f"UI motif set to '{chosen}'.\n\n"
-            f"Restart TEPY for the change to take effect.")
+        self.log(f"Theme set to {chosen!r} (live).")
 
     # ------------------------------------------------------------------
     def _show_info_popup(self, title, message):
@@ -3105,6 +3443,734 @@ class Viewer:
                 continue
             print(f"  [{origin}] {tex_zip}")
         print(f"[save-prim] {label}: textures copied={copied} skipped={skipped}")
+
+    # ==================================================================
+    # Extract / Open / Remove -- res_mods I/O
+    # ==================================================================
+
+    def _stash_extract_paths(self):
+        """Compute the res_mods Extract paths for the loaded tank and
+        store them on the active MeshSet.
+
+        Path derivation is "res_mods + the canonical pkg path the
+        tank loaded from" -- read straight off the first mesh's
+        `primitives_zip`.  No synthesis from xml basename / nation
+        parsing: whatever pkg path the loader actually consumed is
+        what Open Extract Loc opens.  That guarantees the open
+        target matches where Extract just wrote, including the
+        damaged-vs-normal variant (if the loader pulled from
+        /crash/lod0/, we land in the crash dir).
+
+        Canonical pkg layout: `vehicles/<nation>/<tank>/<variant>/lod<n>/<file>`
+        Example primitives_zip:
+            vehicles/american/A14_T30/normal/lod0/Hull.primitives_processed
+
+        Stashed paths (all absolute disk):
+            extract_tank_root   = <res_mods>/vehicles/<nation>/<tank>/
+                                  Whole tank, both variants under it.
+                                  Used by Remove from res_mods.
+            extract_variant_dir = <res_mods>/vehicles/<nation>/<tank>/<variant>/
+                                  THE ROOT WHERE TEXTURES ARE EXPORTED TO --
+                                  one level above lod0.  Used by Open
+                                  Extract Loc.
+            extract_damaged     = (variant == 'crash')
+
+        Stores None on each path attr when prerequisites aren't met:
+            * res_mods not configured
+            * no canonical pkg path on any mesh (FBX-only imports,
+              hand-loaded standalone .primitives_processed)
+            * pkg path doesn't follow the vehicles/<nation>/<tank>/
+              <variant>/lod<n>/<file> shape
+        """
+        s = self._active_set
+        s.extract_tank_root   = None
+        s.extract_variant_dir = None
+        s.extract_damaged     = bool(getattr(self, '_loaded_damaged', False))
+
+        res_mods = (self._cfg.get('res_mods') or '').strip()
+        if not res_mods or not os.path.isdir(res_mods):
+            print("[stash-extract] res_mods not configured -- "
+                  "no extract path stashed")
+            return
+
+        # Pull the literal pkg path off the first mesh that has one.
+        # Components share a single primitives_zip (one .primitives_processed
+        # source per Hull / Chassis / Turret / Gun) so any mesh in any
+        # component will give us the variant + nation + tank dirs.
+        pkg_path = ''
+        for m in self.meshes or []:
+            p = (getattr(m, 'primitives_zip', '') or '').strip()
+            if p:
+                pkg_path = p
+                break
+        if not pkg_path:
+            print("[stash-extract] no primitives_zip on any mesh -- "
+                  "can't stash extract path")
+            return
+
+        pkg_norm = pkg_path.replace(os.sep, '/').lstrip('/')
+        parts    = pkg_norm.split('/')
+        # Need at minimum: vehicles / nation / tank / variant / lod / file
+        if (len(parts) < 6 or parts[0].lower() != 'vehicles'
+                or not parts[1] or not parts[2] or not parts[3]):
+            print(f"[stash-extract] unexpected pkg path layout "
+                  f"{pkg_path!r} -- can't stash")
+            return
+
+        # parts[:3] = ['vehicles', '<nation>', '<tank>']
+        # parts[:4] = ['vehicles', '<nation>', '<tank>', '<variant>']
+        tank_root_rel   = os.sep.join(parts[:3])
+        variant_dir_rel = os.sep.join(parts[:4])
+        s.extract_tank_root   = os.path.normpath(
+            os.path.join(res_mods, tank_root_rel))
+        s.extract_variant_dir = os.path.normpath(
+            os.path.join(res_mods, variant_dir_rel))
+        # Trust the variant in the actual loaded path over the
+        # caller's `damaged` flag -- if the loader fell back to
+        # /normal/ when /crash/ was missing, our open-loc target
+        # should reflect what's actually there.
+        s.extract_damaged = (parts[3].lower() == 'crash')
+
+        # Rotate the crash-shader channel offset on every successful
+        # damaged load.  See Viewer.__init__ for the rationale -- in
+        # short: three loads in a row cycle through every layout the
+        # 3-channel tile can produce, so the user can A/B-compare
+        # variants by hitting Load Damaged repeatedly.  We bump it
+        # only on damaged loads so a normal->damaged->normal sequence
+        # doesn't waste the rotation.
+        if s.extract_damaged:
+            self._crash_channel_offset = (
+                self._crash_channel_offset + 1) % 3
+            print(f"[crash] channel offset = "
+                  f"{self._crash_channel_offset}")
+
+    # ------------------------------------------------------------------
+    def _resmods_tank_root(self):
+        """Return the active set's stashed extract_tank_root, or None.
+
+        Set by `_stash_extract_paths` at the end of `load_vehicle`.
+        Falls back to None when no tank has been loaded with a
+        canonical pkg path in this session.  Used by Remove from
+        res_mods (operates on the whole-tank folder, both variants).
+        """
+        return getattr(self._active_set, 'extract_tank_root', None)
+
+    def _resmods_variant_dir(self):
+        """Return the active set's variant-specific extract subfolder
+        (`<tank_root>/normal/` or `.../crash/`), or None when none
+        has been stashed.
+
+        Used by Open Extract Loc so the user lands on the exact
+        folder that matches the variant they're currently looking
+        at.  Different from `_resmods_tank_root` -- callers that
+        want the WHOLE-TANK directory (e.g. Remove) should use that
+        method instead.
+        """
+        return getattr(self._active_set, 'extract_variant_dir', None)
+
+    # ------------------------------------------------------------------
+    def _show_extract_picker(self):
+        """Modal Tk dialog for the Extract flow.
+
+        Layout:
+            [ Components ]
+              [x] Hull       (N meshes)
+              [x] Chassis    (N meshes)
+              [x] Turret     (N meshes)
+              [x] Gun        (N meshes)
+            ----
+            [x] Extract textures  (.dds / .png references)
+            ----
+                 [ Cancel ]   [ Extract ]
+
+        Returns:
+            dict {'components': [keys...], 'textures': bool} on
+            confirm.  Empty list on cancel.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            self.log_error("Extract: tkinter not available.")
+            return {'components': []}
+
+        groups = self._classify_meshes_by_component()
+
+        win = tk.Tk()
+        win.title('Extract -- pick components + textures')
+        try:
+            win.attributes('-topmost', True)
+        except Exception:
+            pass
+        win.resizable(False, False)
+        win.geometry('360x300')
+
+        tk.Label(win,
+                 text='Tick the components to copy from pkg into\n'
+                      'res_mods.  Existing textures will be left\n'
+                      'in place -- never overwritten.',
+                 justify='left', padx=12, pady=8).pack(fill='x')
+        ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
+
+        # ---- component checkboxes (default ON for any present) -------
+        rows_frame = tk.Frame(win, padx=12, pady=8)
+        rows_frame.pack(fill='x')
+        vars_by_key = {}
+        for key, label in self._COMPONENT_ORDER:
+            n = len(groups.get(key, []))
+            present = n > 0
+            v = tk.BooleanVar(value=present)
+            vars_by_key[key] = v
+            text = (f"{label}    ({n} mesh{'es' if n != 1 else ''})"
+                    if present else
+                    f"{label}    (none loaded)")
+            cb = tk.Checkbutton(
+                rows_frame, text=text, variable=v,
+                anchor='w', justify='left',
+                state=('normal' if present else 'disabled'))
+            cb.pack(fill='x', anchor='w')
+
+        # ---- texture toggle -------------------------------------------
+        ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
+        tex_frame = tk.Frame(win, padx=12, pady=8)
+        tex_frame.pack(fill='x')
+        tex_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            tex_frame,
+            text='Extract textures (only when missing in res_mods)',
+            variable=tex_var,
+            anchor='w', justify='left').pack(fill='x', anchor='w')
+
+        # ---- bottom buttons -------------------------------------------
+        result = {'components': [], 'textures': False}
+
+        def _do_extract():
+            chosen = [k for k, v in vars_by_key.items() if v.get()]
+            result['components'] = chosen
+            result['textures']   = bool(tex_var.get())
+            win.destroy()
+
+        def _cancel():
+            win.destroy()
+
+        btn_row = tk.Frame(win, padx=12, pady=10)
+        btn_row.pack(side='bottom', fill='x')
+        ttk.Button(btn_row, text='Extract', command=_do_extract
+                   ).pack(side='right')
+        ttk.Button(btn_row, text='Cancel', command=_cancel
+                   ).pack(side='right', padx=(0, 6))
+
+        win.protocol('WM_DELETE_WINDOW', _cancel)
+        win.mainloop()
+        return result
+
+    # ------------------------------------------------------------------
+    def _on_extract_clicked(self):
+        """Copy chosen tank components (+ optional textures) from pkg
+        into the configured res_mods folder.
+
+        Workflow mirrors the Save Prim path-composition logic but
+        sources bytes straight from PkgExtractor instead of the
+        in-memory primitives writer.  Per-file rules:
+
+            * .primitives_processed : overwrite (Extract is the user
+              explicitly requesting fresh source)
+            * .visual_processed     : overwrite (descriptor coupled
+              to primitives -- they have to match)
+            * Textures (.dds etc.)  : NEVER overwrite -- if a file
+              already lives at the dest, the extract is skipped and
+              logged as 'kept existing'.  Protects user edits.
+
+        Damaged-variant handling: when the active set was loaded
+        as crashed, the canonical `/normal/` segment of every pkg
+        path is rewritten to `/crash/` before composing the dest --
+        same swap Save Prim does, same reason.
+        """
+        self.log_clear(status='Extract')
+
+        if not self.meshes:
+            self.log_error("Extract: no tank loaded -- pick one first.")
+            return
+
+        res_mods = (self._cfg.get('res_mods') or '').strip()
+        if not res_mods or not os.path.isdir(res_mods):
+            self.log_error(
+                "Extract: res_mods not configured.  Open Set Paths "
+                "and point at res_mods/<current version>/ first.")
+            return
+        if self._pkg_extractor is None:
+            self.log_error("Extract: PkgExtractor not available.")
+            return
+
+        picked = self._show_extract_picker()
+        chosen = picked.get('components', [])
+        do_textures = bool(picked.get('textures', False))
+        if not chosen:
+            self.log("Extract: cancelled.")
+            return
+
+        self.log(f"res_mods: {os.path.basename(res_mods)}")
+        self.log(f"components: {', '.join(chosen)}  "
+                 f"textures={'yes' if do_textures else 'no'}")
+
+        # Damaged-variant path swap: canonical /normal/ -> /crash/.
+        # Same logic Save Prim uses (see _on_save_prim_clicked).
+        loaded_damaged = bool(getattr(self, '_loaded_damaged', False))
+
+        groups = self._classify_meshes_by_component()
+        total_parts_copied   = 0
+        total_parts_skipped  = 0
+        total_tex_copied     = 0
+        total_tex_kept       = 0
+        total_tex_missing    = 0
+
+        for key in chosen:
+            label = dict(self._COMPONENT_ORDER)[key]
+            meshes_for_comp = groups.get(key, [])
+            if not meshes_for_comp:
+                self.log(f"{label}: no meshes -- skipped")
+                continue
+
+            # Collect every distinct pkg path on this component's
+            # meshes (one mesh = one .primitives_processed source,
+            # but multi-mesh hulls land on the same file).
+            seen_zip = set()
+            for m in meshes_for_comp:
+                p = (getattr(m, 'primitives_zip', '') or '').strip()
+                if not p or p in seen_zip:
+                    continue
+                seen_zip.add(p)
+                if loaded_damaged and '/normal/' in p:
+                    p_canonical = p.replace('/normal/', '/crash/')
+                else:
+                    p_canonical = p
+
+                # Two related files we always want with the geometry:
+                #   * .primitives_processed (binary mesh data)
+                #   * .visual_processed     (texture / material refs)
+                # Both are required for the in-game asset to load.
+                # `.model` is legacy / sometimes absent, copy when
+                # present.
+                related = [p_canonical,
+                           p_canonical.replace(
+                               '.primitives_processed',
+                               '.visual_processed'),
+                           p_canonical.replace(
+                               '.primitives_processed',
+                               '.model')]
+
+                for zp in related:
+                    n_ok, n_skip = self._extract_one_file(
+                        zp, res_mods, allow_overwrite=True)
+                    total_parts_copied  += n_ok
+                    total_parts_skipped += n_skip
+
+            # ----- textures (gated by the dialog checkbox) -----
+            if not do_textures:
+                continue
+            for m in meshes_for_comp:
+                p = (getattr(m, 'primitives_zip', '') or '').strip()
+                if not p:
+                    continue
+                if loaded_damaged and '/normal/' in p:
+                    p = p.replace('/normal/', '/crash/')
+                visual_zip = p.replace('.primitives_processed',
+                                        '.visual_processed')
+                ok, kept, missing = self._extract_textures_for_visual(
+                    label, visual_zip, res_mods)
+                total_tex_copied  += ok
+                total_tex_kept    += kept
+                total_tex_missing += missing
+                # Each component visits its visual once -- break out
+                # after the first mesh contributed it.
+                break
+
+        self.log(
+            f"Extract: parts copied={total_parts_copied} "
+            f"skipped={total_parts_skipped}; "
+            f"textures copied={total_tex_copied} "
+            f"kept_existing={total_tex_kept} "
+            f"missing={total_tex_missing}")
+
+    # ------------------------------------------------------------------
+    def _extract_one_file(self, zip_path, res_mods, allow_overwrite):
+        """Pull one pkg-internal file into res_mods at its canonical
+        relative path.  Returns (copied:int, skipped:int) -- always 1+0
+        or 0+1, scaled so the caller can sum across many files.
+
+        When `allow_overwrite=False`, an existing dest file causes
+        the copy to be skipped (logged as 'kept existing').  When
+        True, the dest is replaced.  Files genuinely missing from
+        every pkg are logged + skipped without raising.
+        """
+        import shutil
+        dest_rel = zip_path.replace('/', os.sep).lstrip(os.sep)
+        dest = os.path.join(res_mods, dest_rel)
+
+        if not allow_overwrite and os.path.isfile(dest):
+            print(f"  [keep] {zip_path}  (already in res_mods)")
+            return 0, 1
+
+        local = self._pkg_extractor.extract(zip_path)
+        if not local or not os.path.isfile(local):
+            # Don't shout for known-optional files like .model
+            print(f"  [miss] {zip_path}  (not in any pkg)")
+            return 0, 1
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(local, dest)
+            print(f"  [ok]   {zip_path}")
+            return 1, 0
+        except Exception as exc:
+            print(f"  [fail] {zip_path}  ({exc})")
+            return 0, 1
+
+    # ------------------------------------------------------------------
+    def _extract_textures_for_visual(self, label, visual_zip, res_mods):
+        """Copy every <Texture> referenced by `visual_zip` into res_mods,
+        but ONLY when the destination file doesn't already exist.
+
+        Returns (copied:int, kept_existing:int, missing:int).
+        Mirrors `_save_component_textures` for the texture lookup but
+        flips the overwrite policy.
+        """
+        if self._pkg_extractor is None:
+            return 0, 0, 0
+
+        local_visual = self._pkg_extractor.extract(visual_zip)
+        if not local_visual or not os.path.isfile(local_visual):
+            print(f"[extract] {label}: visual not found ({visual_zip})")
+            return 0, 0, 0
+
+        try:
+            with open(local_visual, 'rb') as fh:
+                blob = fh.read()
+            from .common import decode_bwxml, is_bwxml
+            xml = (decode_bwxml(blob) if is_bwxml(blob)
+                   else blob.decode('utf-8', errors='replace'))
+        except Exception as exc:
+            print(f"[extract] {label}: visual decode failed: {exc}")
+            return 0, 0, 0
+
+        import re, shutil
+        textures = sorted(set(
+            m.group(1).strip()
+            for m in re.finditer(r'<Texture>([^<]+)</Texture>', xml)))
+        if not textures:
+            return 0, 0, 0
+
+        copied = kept = missing = 0
+        for tex_zip in textures:
+            dest_rel = tex_zip.replace('/', os.sep).lstrip(os.sep)
+            dest = os.path.join(res_mods, dest_rel)
+
+            if os.path.isfile(dest):
+                print(f"  [keep tex] {tex_zip}  (already in res_mods)")
+                kept += 1
+                continue
+
+            # Use VisualLoader.resolve_hd_path so we get the same _hd
+            # over SD preference WoT itself follows when both ship.
+            from .loaders import VisualLoader
+            resolved, _used_hd = VisualLoader.resolve_hd_path(
+                tex_zip, res_mods, self._pkg_extractor)
+            if not resolved or not os.path.isfile(resolved):
+                print(f"  [miss tex] {tex_zip}")
+                missing += 1
+                continue
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(resolved, dest)
+                print(f"  [ok tex] {tex_zip}")
+                copied += 1
+            except Exception as exc:
+                print(f"  [fail tex] {tex_zip}  ({exc})")
+                missing += 1
+        return copied, kept, missing
+
+    # ------------------------------------------------------------------
+    def _on_open_extract_loc_clicked(self):
+        """Open Explorer at the extracted tank's variant subfolder.
+
+        Path used (in priority order):
+            1. <tank_root>/<crash|normal>/  -- the variant the user
+               loaded.  Stashed at load time by _stash_extract_paths
+               so a tank loaded as damaged opens the crash folder
+               and a normal load opens the normal folder.
+            2. <tank_root>                  -- whole-tank dir, used
+               when the variant subfolder doesn't exist on disk yet
+               but the user has previously extracted the OTHER
+               variant.
+            3. (offer to extract)            -- prompt the user when
+               nothing's been extracted at all.
+
+        Greyed-out semantics aren't enforced at the button level --
+        we just log a line when the prerequisites aren't met (no
+        tank loaded, no res_mods configured, etc.).
+        """
+        self.log_clear(status='Open Extract Loc')
+
+        # Need at minimum: res_mods configured + a tank loaded.
+        if not (self._cfg.get('res_mods') or '').strip():
+            self.log_error(
+                "Open Extract Loc: res_mods not configured.  "
+                "Open Set Paths first.")
+            return
+        if not (getattr(self, 'source_tank_name', '') or '').strip():
+            self.log_error(
+                "Open Extract Loc: no tank loaded.  Pick a tank "
+                "from the tree first.")
+            return
+
+        tank_root   = self._resmods_tank_root()
+        variant_dir = self._resmods_variant_dir()
+        if tank_root is None:
+            self.log_error(
+                "Open Extract Loc: can't determine tank folder "
+                "(no canonical pkg path on any loaded mesh).")
+            return
+
+        # Pick the most specific dir that actually exists on disk.
+        # Variant subfolder is the natural target; whole-tank root
+        # is a useful fallback when the user previously extracted
+        # the OTHER variant; prompt otherwise.
+        if variant_dir and os.path.isdir(variant_dir):
+            target = variant_dir
+        elif os.path.isdir(tank_root):
+            target = tank_root
+        else:
+            target = None
+
+        if target is not None:
+            self._open_in_explorer(target)
+            variant_word = (
+                'damaged' if self._active_set.extract_damaged else 'normal')
+            self.log(f"Opened ({variant_word}): {target}")
+            return
+
+        # Nothing on disk yet -- offer to extract now.
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+        except ImportError:
+            self.log_error(
+                f"Open Extract Loc: {tank_root} doesn't exist and "
+                f"tkinter isn't available.  Run Extract first.")
+            return
+
+        win = tk.Tk()
+        win.withdraw()
+        try:
+            win.attributes('-topmost', True)
+        except Exception:
+            pass
+        # Show the variant-specific path the user will be opening
+        # AFTER extract -- not just the tank root -- so the prompt
+        # matches what the user expects to see in Explorer.
+        prompt_path = variant_dir or tank_root
+        ans = messagebox.askyesno(
+            'No extract yet',
+            f"No extract folder for this tank under res_mods:\n\n"
+            f"{prompt_path}\n\n"
+            f"Run Extract now?",
+            parent=win)
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        if ans:
+            self._on_extract_clicked()
+        else:
+            self.log("Open Extract Loc: cancelled (no extract).")
+
+    # ------------------------------------------------------------------
+    def _open_in_explorer(self, path):
+        """Cross-platform 'reveal in file manager' helper.
+
+        Windows: `os.startfile()` -- the canonical way to ask the
+                 shell to open a directory.  Equivalent to a
+                 double-click in Explorer.  More reliable than
+                 `Popen(['explorer', path])` which silently falls
+                 back to the user's home/Documents folder when the
+                 path argument can't be parsed (forward slashes,
+                 missing chars, etc.).
+        macOS  : `open` command.
+        Linux  : `xdg-open` -- relies on the desktop env's default
+                 file manager being registered for inode/directory.
+
+        Normalises the path through abspath + normpath first so
+        Windows gets backslashes and any '..' segments are
+        flattened.  Also logs the absolute target so when the
+        wrong window appears, the user can copy / paste the path
+        we tried into Explorer manually.
+        """
+        import subprocess, sys as _sys
+        norm = os.path.normpath(os.path.abspath(path))
+        print(f"[open] {norm}  (exists: {os.path.isdir(norm)})")
+        try:
+            if os.name == 'nt':
+                os.startfile(norm)
+            elif _sys.platform == 'darwin':
+                subprocess.Popen(['open', norm])
+            else:
+                subprocess.Popen(['xdg-open', norm])
+        except Exception as exc:
+            self.log_error(f"Open: {exc}")
+
+    # ------------------------------------------------------------------
+    def _on_remove_from_resmods_clicked(self):
+        """Delete the loaded tank's folder under res_mods.
+
+        Strong confirmation: a Tk dialog asks the user to *type* the
+        tank's xml basename to enable the Delete button.  Aborting
+        or typing the wrong text leaves the folder untouched.
+
+        Mirror image of Extract -- whatever Extract wrote, this can
+        remove.  Doesn't touch anything outside the canonical
+        `<res_mods>/vehicles/<nation>/<tank>/` subtree.
+        """
+        self.log_clear(status='Remove from res_mods')
+
+        root = self._resmods_tank_root()
+        if root is None:
+            if not (self._cfg.get('res_mods') or '').strip():
+                self.log_error(
+                    "Remove: res_mods not configured.")
+            elif not (getattr(self, 'source_tank_name', '') or '').strip():
+                self.log_error("Remove: no tank loaded.")
+            else:
+                self.log_error("Remove: can't determine tank folder.")
+            return
+
+        if not os.path.isdir(root):
+            self.log_error(
+                f"Remove: nothing to remove -- {root} doesn't exist.")
+            return
+
+        # Count what's about to die so the user sees the impact.
+        n_files = 0
+        for _root, _dirs, files in os.walk(root):
+            n_files += len(files)
+
+        tank_name = (self.source_tank_name or '').strip()
+        if not self._typed_confirm(
+                title='Remove tank from res_mods',
+                message=(
+                    f"You are about to permanently delete:\n\n"
+                    f"   {root}\n\n"
+                    f"This will remove {n_files} file"
+                    f"{'s' if n_files != 1 else ''} (geometry, "
+                    f"visuals, textures).  This action cannot "
+                    f"be undone.\n\n"
+                    f"Type the tank name exactly to confirm:"),
+                expected=tank_name):
+            self.log("Remove: cancelled.")
+            return
+
+        # Do the deletion.
+        import shutil
+        try:
+            shutil.rmtree(root)
+            self.log(f"Removed: {root}  ({n_files} files)")
+        except Exception as exc:
+            self.log_error(f"Remove failed: {exc}")
+            return
+
+        # Walk parent chain and prune any now-empty folders so we
+        # don't leave behind `vehicles/<nation>/` skeletons after
+        # deleting the only tank in that nation.  Stops as soon as
+        # a parent contains anything else, or once we hit res_mods
+        # itself.
+        res_mods = self._cfg.get('res_mods', '')
+        parent = os.path.dirname(root)
+        while parent and os.path.normpath(parent) != os.path.normpath(res_mods):
+            if not os.path.isdir(parent):
+                break
+            try:
+                # `os.rmdir` only removes empty dirs -- safe.
+                os.rmdir(parent)
+            except OSError:
+                # Not empty; stop walking up.
+                break
+            parent = os.path.dirname(parent)
+
+    # ------------------------------------------------------------------
+    def _typed_confirm(self, title, message, expected):
+        """Modal Tk dialog requiring the user to type `expected` to
+        enable the OK button.  Returns True iff the user typed an
+        exact match and clicked OK.
+
+        Used for destructive operations (Remove from res_mods) where
+        a single Yes/No isn't safety enough -- typing the tank name
+        prevents misclicks.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            self.log_error("Confirmation dialog: tkinter not available.")
+            return False
+
+        win = tk.Tk()
+        win.title(title)
+        try:
+            win.attributes('-topmost', True)
+        except Exception:
+            pass
+        win.geometry('+400+250')
+        win.resizable(False, False)
+
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text=message,
+                  justify='left', wraplength=380).pack(anchor='w')
+        ttk.Label(frame, text=f"  -> '{expected}'",
+                  font=('Consolas', 10, 'bold'),
+                  foreground='#a04040').pack(anchor='w', pady=(4, 6))
+
+        entry_var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=entry_var, width=40)
+        entry.pack(fill='x', pady=(0, 8))
+        entry.focus_set()
+
+        result = {'ok': False}
+
+        def _on_ok():
+            if entry_var.get() == expected:
+                result['ok'] = True
+                win.destroy()
+
+        def _on_cancel():
+            win.destroy()
+
+        # Bottom row first so we can parent the OK button straight
+        # into it -- avoids a re-pack dance later.  Live-enable the
+        # OK button only on exact match so the user gets visible
+        # feedback when they've typed it correctly.
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill='x', pady=(4, 0))
+        ok_btn = ttk.Button(
+            button_row, text='Delete', command=_on_ok, state='disabled')
+        ok_btn.pack(side='right')
+        ttk.Button(button_row, text='Cancel', command=_on_cancel
+                   ).pack(side='right', padx=(0, 6))
+
+        def _on_keyup(_evt):
+            if entry_var.get() == expected:
+                ok_btn.configure(state='normal')
+            else:
+                ok_btn.configure(state='disabled')
+
+        entry.bind('<KeyRelease>', _on_keyup)
+        # Enter key fires OK (only effective when match -- because
+        # _on_ok itself re-checks); ESC cancels anywhere in the dialog.
+        entry.bind('<Return>', lambda _e: _on_ok())
+        win.bind('<Escape>', lambda _e: _on_cancel())
+
+        win.protocol('WM_DELETE_WINDOW', _on_cancel)
+        win.mainloop()
+        return bool(result['ok'])
 
     # ------------------------------------------------------------------
     def _on_import_clicked(self):
@@ -4312,6 +5378,31 @@ class Viewer:
     # Tree-view callbacks
     # ------------------------------------------------------------------
 
+    def _clear_selection_in_other_trees(self):
+        """Null `selected_node` on every cached per-tier tree EXCEPT
+        the currently-active one.
+
+        The tree panel highlights its `selected_node` in burnt
+        orange so the user can spot the loaded tank's row at a
+        glance.  Each tier tab owns its own UITreeView though, so
+        without this helper a stale highlight lingered on every
+        other tab -- last week's tier-5 pick still glowing while a
+        tier-7 tank sat in the viewport.  Now the highlight is
+        guaranteed to be on the same tab as the tank that's
+        actually loaded.
+
+        Called once per successful load (from `_on_tree_tank_selected`'s
+        `_on_load` closure) so a cancelled modal leaves the previous
+        load's highlight untouched -- the loaded tank IS still the
+        previous one, the indicator should match.
+        """
+        active = self.ui.tree
+        cache  = getattr(self, '_tier_tree_cache', None) or ()
+        for tree in cache:
+            if tree is None or tree is active:
+                continue
+            tree.selected_node = None
+
     def _on_tree_tank_selected(self, node):
         """User clicked a leaf (tank) row -- pull options + show the
         per-skin Load picker dialog."""
@@ -4364,10 +5455,29 @@ class Viewer:
                 except Exception:
                     pass
 
+            # Pull the res_mods preference off the dialog at the
+            # moment the user clicks Load (might differ from when
+            # the dialog opened).  Persist it so the next dialog
+            # opens with the same toggle state.
+            prefer_rm = bool(self.ui.load_dialog.prefer_res_mods)
+            if bool(self._cfg.get('load_from_res_mods', True)) != prefer_rm:
+                self._cfg['load_from_res_mods'] = prefer_rm
+                try:
+                    _config.save(self._cfg)
+                except Exception as exc:
+                    print(f"[viewer] config save failed: {exc}")
+
             # Fresh console for this load action.  Header tag tells the
             # user which tank we're crunching on right now.
             self.log_clear(status=f'Load Tank: {tank_label}')
             _status(f"Loading {tank_label}...")
+            # Strip the burnt-orange row highlight from every OTHER
+            # tier tab's tree so the loaded-tank indicator only ever
+            # appears on the tab that actually owns the loaded tank.
+            # Doing it BEFORE the (synchronous) load means the visual
+            # update lands during the load's first frame redraw
+            # rather than after the full load has finished.
+            self._clear_selection_in_other_trees()
             self._load_tank_with_options(
                 local_path,
                 skin=skin,
@@ -4376,6 +5486,7 @@ class Viewer:
                 gun_tag=gun_tag,
                 damaged=damaged,
                 status_callback=_status,
+                prefer_res_mods=prefer_rm,
             )
 
         self.ui.load_dialog.show(
@@ -4383,12 +5494,14 @@ class Viewer:
             options=options,
             on_load=_on_load,
             make_tex=self.ui._make_tex,
+            prefer_res_mods=bool(self._cfg.get('load_from_res_mods', True)),
         )
 
     def _load_tank_with_options(self, xml_path, skin=None,
                                  chassis_tag=None, turret_tag=None,
                                  gun_tag=None, damaged=False,
-                                 status_callback=None):
+                                 status_callback=None,
+                                 prefer_res_mods=True):
         """Trigger load_vehicle with explicit skin / part overrides chosen
         from the load dialog.  status_callback is forwarded to the load
         so progress messages reach the dialog's bottom status line.
@@ -4399,6 +5512,13 @@ class Viewer:
         so an exception still re-enables the tree -- the user
         recovers by retrying instead of being permanently locked
         out.
+
+        prefer_res_mods (bool): forwarded to load_vehicle.  When
+            False, res_mods overrides are bypassed and the loader
+            reads textures + visuals straight from pkg.  Default
+            True (match the load-dialog checkbox default).  This
+            argument is FBX-import-blind; FBX import calls
+            load_vehicle elsewhere with its own policy (always pkg).
         """
         self._tank_loading = True
         try:
@@ -4410,6 +5530,7 @@ class Viewer:
                 turret_tag=turret_tag,
                 gun_tag=gun_tag,
                 status_callback=status_callback,
+                prefer_res_mods=prefer_res_mods,
             )
         finally:
             self._tank_loading = False
@@ -4926,6 +6047,34 @@ class Viewer:
                             mesh.detail_tex_id = cached
                     mesh.detail_tiling = tex.get('detail_tiling', (1.0, 1.0))
 
+                    # -- Damage layer (PBS_tank_crash.fx materials).
+                    # See load_vehicle() for the full discussion of
+                    # crashTileMap.  Standalone .primitives_processed
+                    # loads can land on a crash visual too, so we
+                    # honour the property here as well.
+                    mesh.fx = tex.get('fx', '')
+                    if 'crash_tile' in tex:
+                        resolved, _ = VisualLoader.resolve_hd_path(
+                            tex['crash_tile'], res_mods_root, pkg)
+                        if resolved:
+                            key = os.path.abspath(resolved)
+                            cached = self._shared_tex_cache.get(key)
+                            if cached is None:
+                                cached = TextureLoader.load_texture(resolved)
+                                self._shared_tex_cache[key] = cached
+                            mesh.crash_tile_tex_id = cached
+                            mesh.crash_tile_path   = resolved
+                            print(f"{label_prefix} crash:   "
+                                  f"{os.path.basename(resolved)}  "
+                                  f"(id={cached})")
+                        else:
+                            print(f"{label_prefix} crash:   [missing] "
+                                  f"{tex['crash_tile']}")
+                    mesh.crash_uv_tiling = tex.get(
+                        'crash_uv_tiling', (1.0, 1.0, 0.0, 0.0))
+                    mesh.crash_coefficient = float(
+                        tex.get('crash_coefficient', 1.0))
+
                     # -- Material flags
                     mesh.alpha_reference   = tex.get('alpha_reference',   0)
                     mesh.alpha_test_enable = tex.get('alpha_test_enable', False)
@@ -5192,8 +6341,13 @@ class Viewer:
                         # load_vehicle flips active->'pkg' internally and
                         # populates self._pkg_set.  We then flip back to
                         # 'fbx' so the user keeps seeing the import they
-                        # just opened.
-                        self.load_vehicle(xml_local)
+                        # just opened.  Project policy: when an FBX is
+                        # imported, the paired PKG twin is loaded with
+                        # prefer_res_mods=False so the comparison shows
+                        # the vanilla game asset, never the user's
+                        # res_mods overrides.  Otherwise a half-built
+                        # mod could mislead the round-trip diff.
+                        self.load_vehicle(xml_local, prefer_res_mods=False)
                     except Exception as exc:
                         print(f"[viewer] auto-load PKG twin failed: {exc}")
                     finally:
@@ -5241,7 +6395,8 @@ class Viewer:
     def load_vehicle(self, xml_path, damaged=False,
                      skin=None, chassis_tag=None,
                      turret_tag=None, gun_tag=None,
-                     status_callback=None):
+                     status_callback=None,
+                     prefer_res_mods=True):
         """Load a complete tank from a WoT vehicle XML definition file.
 
         Picks the best (highest-price) turret and the top gun (last listed)
@@ -5265,6 +6420,17 @@ class Viewer:
                           "Loading Hull...", etc.).  Wired to the load
                           dialog's bottom status line so the user sees
                           something while the (synchronous) load runs.
+            prefer_res_mods (bool): when True (default), the loader walks
+                          res_mods/ + res/ before falling back to pkg --
+                          so any user mod overrides win.  When False,
+                          texture / visual lookups skip the disk roots
+                          and go straight to pkg, giving vanilla bytes
+                          regardless of what's mounted in res_mods.
+                          Driven by the "Load from res_mods" checkbox at
+                          the top of the load dialog.  FBX import calls
+                          this method elsewhere with prefer_res_mods=False
+                          unconditionally (project policy: imported FBX
+                          tanks are always paired with pkg textures).
         """
         # Local helper -- safe even when status_callback is None
         def _status(msg):
@@ -5330,19 +6496,30 @@ class Viewer:
 
         try:
             # --- res_mods root: config override -> auto-detect from XML path ----
-            cfg_res_mods = self._cfg.get('res_mods', '').strip()
-            if cfg_res_mods and os.path.isdir(cfg_res_mods):
-                res_mods_root = cfg_res_mods
-                print(f"  res_mods (config) : {res_mods_root}")
+            # When `prefer_res_mods=False` (load-dialog checkbox off,
+            # or any FBX-import call), we deliberately blank the root
+            # so VisualLoader.resolve_hd_path skips its disk-walk and
+            # goes straight to PkgExtractor.  That gives the user
+            # vanilla pkg bytes regardless of what's mounted in
+            # res_mods/ -- useful when they want to confirm the game
+            # original or are about to overwrite a half-built mod.
+            if not prefer_res_mods:
+                res_mods_root = ''
+                print(f"  res_mods         : (skipped -- pkg-only load)")
             else:
-                parts        = xml_path.split(os.sep)
-                res_mods_idx = next((i for i, p in enumerate(parts)
-                                     if 'res_mods' in p.lower()), -1)
-                if res_mods_idx >= 0:
-                    res_mods_root = os.sep.join(parts[:res_mods_idx + 2])
+                cfg_res_mods = self._cfg.get('res_mods', '').strip()
+                if cfg_res_mods and os.path.isdir(cfg_res_mods):
+                    res_mods_root = cfg_res_mods
+                    print(f"  res_mods (config) : {res_mods_root}")
                 else:
-                    res_mods_root = os.path.dirname(xml_path)
-                print(f"  res_mods (auto)   : {res_mods_root}")
+                    parts        = xml_path.split(os.sep)
+                    res_mods_idx = next((i for i, p in enumerate(parts)
+                                         if 'res_mods' in p.lower()), -1)
+                    if res_mods_idx >= 0:
+                        res_mods_root = os.sep.join(parts[:res_mods_idx + 2])
+                    else:
+                        res_mods_root = os.path.dirname(xml_path)
+                    print(f"  res_mods (auto)   : {res_mods_root}")
 
             # --- PKG extractor: config overrides -> auto-detect from wot_root ---
             if self._pkg_extractor is None:
@@ -5570,6 +6747,46 @@ class Viewer:
                                 mesh.detail_tex_id = cached
                         mesh.detail_tiling = tex.get('detail_tiling', (1.0, 1.0))
 
+                        # Damage layer (PBS_tank_crash.fx materials).
+                        # Single shared crashTileMap holds scorch /
+                        # dirt / exposed-metal in RGB + blend mask
+                        # in A; the renderer mixes it over the base
+                        # diffuse using crash_uv_tiling and
+                        # crash_coefficient.  We share the GL
+                        # texture across every mesh that references
+                        # it via _shared_tex_cache (it's literally
+                        # the same file -- 52 of 52 sampled crash
+                        # materials use the same path) so a tank
+                        # with 30 crash materials only uploads one
+                        # 4MB texture.
+                        mesh.fx = tex.get('fx', '')
+                        if 'crash_tile' in tex:
+                            resolved, _ = VisualLoader.resolve_hd_path(
+                                tex['crash_tile'], res_mods_root, pkg)
+                            if resolved:
+                                key = os.path.abspath(resolved)
+                                cached = self._shared_tex_cache.get(key)
+                                if cached is None:
+                                    cached = TextureLoader.load_texture(resolved)
+                                    self._shared_tex_cache[key] = cached
+                                mesh.crash_tile_tex_id = cached
+                                mesh.crash_tile_path   = resolved
+                            else:
+                                # crash_tile.dds lives in particles.pkg --
+                                # if TheItemList hasn't been rebuilt
+                                # since damage support landed, the
+                                # lookup will miss and the resolver
+                                # falls back to scan-fallback.  Log
+                                # so the user can spot it.
+                                print(f"  [damage] crash_tile.dds not "
+                                      f"found ({tex['crash_tile']}) -- "
+                                      f"rebuild ItemList?  No damage "
+                                      f"layer for this material.")
+                        mesh.crash_uv_tiling = tex.get(
+                            'crash_uv_tiling', (1.0, 1.0, 0.0, 0.0))
+                        mesh.crash_coefficient = float(
+                            tex.get('crash_coefficient', 1.0))
+
                         # Material flags
                         mesh.alpha_reference   = tex.get('alpha_reference',   0)
                         mesh.alpha_test_enable = tex.get('alpha_test_enable', False)
@@ -5623,6 +6840,20 @@ class Viewer:
             if not self.meshes:
                 print("No meshes loaded.")
                 return
+
+            # Stash res_mods Extract paths now that nation, xml
+            # basename, and damaged are all settled.  Captures the
+            # variant subdir (`/normal/` vs `/crash/`) in one shot
+            # so subsequent Open Extract Loc / Remove clicks don't
+            # re-derive it -- and so a tank loaded as `damaged`
+            # opens to the crash subfolder rather than the normal
+            # one (paths matter).
+            self._stash_extract_paths()
+            er = self._active_set.extract_variant_dir
+            if er:
+                variant_word = ('damaged' if self._active_set.extract_damaged
+                                else 'normal')
+                print(f"  extract dir ({variant_word})  : {er}")
 
             all_pos  = np.concatenate(all_positions, axis=0)
             bbox_min = np.min(all_pos, axis=0)
@@ -5829,25 +7060,45 @@ class Viewer:
         # doesn't change mid-session, `_()` is deterministic so the
         # `btn_by_label` lookup below finds every button.
         button_groups = [
+            # res_mods I/O.  Lives at the top so it's the first
+            # thing the user reaches when they want to mod a tank.
+            # Section header reads `res_mods` (the destination, not
+            # the verb) so the bar makes it obvious at a glance
+            # which folder these three buttons act on.  Hidable:
+            # section-header chevron toggles the group's collapse
+            # state (persisted in config under `section_collapsed`).
+            (_('res_mods'), [
+                (_('Extract'),              0, 3),
+                (_('Open Extract Loc'),     0, 3),
+                (_('Remove from res_mods'), 0, 3),
+            ]),
             # UI toggles -- viewport rendering flags.  Olive
-            # accent applied per-button in `_build_ui`.  Seven
-            # toggles fill 3-3-1 across three rows.
+            # accent applied per-button in `_build_ui`.  Six
+            # toggles fill 3-3 across two rows; Wireframe and
+            # Shaded moved to the Model group below since they
+            # mutate how the model is rendered, not the viewport
+            # decoration.  Terrain claims Wireframe's old slot so
+            # the row still lays out as a clean 3-cell row.
             (_('UI'), [
                 (_('Grid'),      0, 1),
                 (_('Axes'),      1, 1),
                 (_('Light'),     2, 1),
                 (_('Orbit'),     0, 1),
                 (_('Skybox'),    1, 1),
-                (_('Wireframe'), 2, 1),
-                (_('Terrain'),   0, 1),
+                (_('Terrain'),   2, 1),
             ]),
             # Model tools -- act on the loaded tank rather than
-            # the viewport.  Burnt-orange accent.  Three buttons
-            # fit in a single row.
+            # the viewport.  Burnt-orange accent so they match
+            # Meshes / Flip / Compare.  Wireframe and Shaded are
+            # toggle-style; Meshes / Flip / Compare are action-
+            # style.  Both flavours land here because they all
+            # operate on the loaded tank.
             (_('Model'), [
                 (_('Meshes'),    0, 1),
                 (_('Flip'),      1, 1),
                 (_('Compare'),   2, 1),
+                (_('Wireframe'), 0, 1),
+                (_('Shaded'),    1, 1),
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
@@ -5862,7 +7113,7 @@ class Viewer:
                 [_('Export'), _('Import')],
                 (_('Save Prim'), 0, 3),
                 (_('Language'),  0, 3),
-                (_('Motif'),     0, 3),
+                (_('Theme'),     0, 3),
             ]),
             (_('Tools'), [
                 (_('ItemList'),  0, 3),
@@ -5873,25 +7124,78 @@ class Viewer:
         # text above each group's first row, with a thin gap below.
         SECTION_LABEL_H   = 16    # vertical reserve for the header text
         SECTION_GAP_AFTER = 2     # tight tuck under the label
+        FULL_ROW_W        = BTN_W * 3 + BTN_GAP_X * 2
 
         # Re-create the section labels each layout pass -- text textures
         # are owned by UIManager.panel_labels and freed in clear_panel_labels.
         self.ui.clear_panel_labels()
 
+        # Persisted per-section collapse state.  Defaults to {} so an
+        # older config (pre-section-collapse) reads as "everything
+        # expanded".  Section names are matched by their UNTRANSLATED
+        # English key so a language switch doesn't desync the state.
+        section_collapsed = self._cfg.get('section_collapsed') or {}
+
+        # English keys for each group, in `button_groups` order.
+        # Index-aligned with `button_groups`.  Used for the
+        # `section_collapsed` dict so a language switch doesn't
+        # invalidate the user's collapse picks (the displayed label
+        # changes via `_()`, but the storage key stays stable).
+        section_keys = ['res_mods', 'UI', 'Model', 'IO', 'Tools']
+
         btn_by_label = {b.label: b for b in self.ui.buttons}
+        # Default every button to visible; the collapse loop below
+        # toggles it off for any section whose body should hide.
+        for b in self.ui.buttons:
+            b.visible = True
         # Walk groups from top to bottom, packing rows into the column grid
         # within each group.  Tracks an explicit "next_y" so we can
         # interleave headers + button rows without computing a global
         # row index.
         next_y = BTN_PAD_Y
-        for section_name, rows in button_groups:
-            # Header label: small, slightly indented to align with the
-            # first column.  Drawn at the current cursor; cursor then
-            # advances past it before the first row.
-            self.ui.add_panel_label(section_name,
-                                    x=BTN_PAD_X, y=next_y,
-                                    color=(150, 165, 200))
+        for grp_idx, (section_name, rows) in enumerate(button_groups):
+            section_key = (section_keys[grp_idx]
+                           if grp_idx < len(section_keys)
+                           else section_name)
+            collapsed   = bool(section_collapsed.get(section_key, False))
+
+            # Header label: chevron + section name.  The chevron is a
+            # wide-headed barb (Supplemental Arrows-C, U+1F86A/B);
+            # they need Segoe UI Symbol to render -- but our default
+            # _make_tex font is Calibri which doesn't carry the
+            # block.  Workaround: use ▶ / ▼ (BLACK RIGHT/DOWN-POINTING
+            # TRIANGLE, U+25B6 / U+25BC) which Calibri DOES carry.
+            # Visually similar -- chunky filled triangle -- and a
+            # one-codepoint sub doesn't pull a second font into the
+            # panel-label render path.
+            chevron = '▶' if collapsed else '▼'  # ▶ / ▼
+            header_text = f"{chevron}  {section_name}"
+            self.ui.add_panel_label(
+                header_text,
+                x=BTN_PAD_X, y=next_y,
+                color=(150, 165, 200),
+                section_key=section_key,
+                # Wide click target: full row width so the user can
+                # hit the bar anywhere across the panel, not just on
+                # the few-pixel-wide chevron+text.
+                click_w=FULL_ROW_W,
+            )
             next_y += SECTION_LABEL_H + SECTION_GAP_AFTER
+
+            if collapsed:
+                # Hide every button that belongs to this section.
+                # Geometry stays whatever it was; `visible=False`
+                # short-circuits both the renderer and click hits.
+                for item in rows:
+                    labels = (item if isinstance(item, list)
+                              else [item[0]])
+                    for lbl in labels:
+                        b = btn_by_label.get(lbl)
+                        if b is not None:
+                            b.visible = False
+                # No body height -- next group renders right under
+                # the (just-rendered) header.
+                continue
 
             # Pack rows: each entry is one of:
             #   (label, col, span)    -- a single button at a 3-col
@@ -5912,7 +7216,7 @@ class Viewer:
             # column wraps.
             row_y    = next_y
             cur_col  = 0
-            full_w   = BTN_W * 3 + BTN_GAP_X * 2     # full row width
+            full_w   = FULL_ROW_W
             for item in rows:
                 if isinstance(item, list):
                     # Even-split row.  Always lands on its own line;
@@ -6018,77 +7322,168 @@ class Viewer:
                                     cb_bottom + BOTTOM_MARGIN)
 
         # ---- RIGHT PANEL -------------------------------------------------
-        # Build the slider list FIRST -- we need its length to compute
-        # the panel's required height, which then drives `right_top`.
-        # Same auto-compute pattern as the left panel: the class-level
-        # RIGHT_CONTROLS_H is just a floor; the instance value scales
-        # with however many sliders end up registered.
-        right_sliders = [
-            self._smoke_start_slider,
-            self._smoke_end_slider,
-            self._smoke_speed_slider,
-            self._smoke_fade_slider,
-            self._smoke_fade_end_slider,
-            self._fire_size_slider,
-            self._normals_slider,
+        # Sliders + checkboxes laid out in three labelled groups:
+        #
+        #     Smoke   (5 sliders -- Sm Start / Sm End / Sm Speed /
+        #              Sm FadeS / Sm FadeE)
+        #     Fire    (1 slider  -- Fire Size)
+        #     Normals (1 slider  -- Normals; PerVtx + Debug
+        #              checkboxes share the row below)
+        #
+        # Each group gets a small grey sub-header above its sliders
+        # so the user can tell at a glance which knob affects what.
+        # Tighter row spacing (22 px vs the old 25) + wider tracks
+        # (165 vs 135) trades a little vertical for a lot of
+        # horizontal -- no more 70 px of dead space on the right
+        # edge.
+        SMOKE_SLIDERS = [
+            (self._smoke_start_slider,    'Sm Start'),
+            (self._smoke_end_slider,      'Sm End'),
+            (self._smoke_speed_slider,    'Sm Speed'),
+            (self._smoke_fade_slider,     'Sm FadeS'),
+            (self._smoke_fade_end_slider, 'Sm FadeE'),
+        ]
+        FIRE_SLIDERS    = [(self._fire_size_slider, 'Fire Size')]
+        NORMALS_SLIDERS = [(self._normals_slider,   'Normals')]
+        slider_groups = [
+            (_('Smoke'),   SMOKE_SLIDERS),
+            (_('Fire'),    FIRE_SLIDERS),
+            (_('Normals'), NORMALS_SLIDERS),
         ]
 
-        TOP_PAD       = 14
-        CB_ROW_H      = 16     # checkbox cell + tiny gap
-        BOTTOM_MARGIN_R = 10
-        n_sliders     = sum(1 for sl in right_sliders if sl)
-        # One checkbox row: PerVtx + Debug share it (Debug replaces
-        # the old Show HP / Show Fire pair as a single master toggle).
-        required_h    = (TOP_PAD + n_sliders * ROW_H
-                         + CB_ROW_H + BOTTOM_MARGIN_R)
-        self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
-                                     required_h)
+        # Geometry constants -- tightened from the v1.71.x baseline
+        # so the panel claims less vertical for the same widgets.
+        R_TOP_PAD            = 8
+        R_SUB_HEADER_H       = 14
+        R_SUB_HEADER_GAP     = 2
+        R_GROUP_GAP_AFTER    = 4         # extra breathing between groups
+        R_ROW_H              = 22        # was 25
+        R_CB_ROW_H           = 18
+        R_BOTTOM_MARGIN      = 8
+        # Debug section header sits above the Smoke / Fire /
+        # Normals sub-headers and acts as the master collapse
+        # toggle for everything below it.  Same row height as the
+        # sub-headers so the header strip math stays simple.
+        R_DEBUG_HEADER_H     = 14
+        R_DEBUG_HEADER_GAP   = 4
+
+        # Section state -- 'Debug' key in section_collapsed.
+        section_collapsed = self._cfg.get('section_collapsed') or {}
+        debug_collapsed   = bool(section_collapsed.get('Debug', False))
+
+        n_sliders = sum(1 for g, lst in slider_groups
+                          for sl, _lbl in lst if sl)
+        n_groups  = len(slider_groups)
+
+        # Required panel height -- depends on collapse state.
+        # Collapsed: just the header strip + paddings.
+        # Expanded: header + groups + sliders + checkbox row + bottom.
+        if debug_collapsed:
+            self.RIGHT_CONTROLS_H = (R_TOP_PAD + R_DEBUG_HEADER_H
+                                      + R_BOTTOM_MARGIN)
+        else:
+            required_h = (R_TOP_PAD
+                          + R_DEBUG_HEADER_H + R_DEBUG_HEADER_GAP
+                          + n_groups * (R_SUB_HEADER_H + R_SUB_HEADER_GAP
+                                        + R_GROUP_GAP_AFTER)
+                          + n_sliders * R_ROW_H
+                          + R_CB_ROW_H + R_BOTTOM_MARGIN)
+            self.RIGHT_CONTROLS_H = max(self.__class__.RIGHT_CONTROLS_H,
+                                         required_h)
 
         right_x   = self.width - self.TREE_PANEL_W
         right_top = self.height - self.RIGHT_CONTROLS_H
-        # Right panel slider geometry.  Label sits at `right_x + 6`;
-        # we need ~60+ px for the longest labels ('Sm FadeE',
-        # 'Fire Speed', 'Normals') at 13pt Calibri Bold.  Track starts
-        # at +72 so the label has room to breathe without overlapping
-        # the track.  Track width unchanged; value text follows.
+
+        # Slider geometry -- track width matches the v1.71.x
+        # baseline (135 px); user-confirmed as the right size.
+        # The wasted right margin past the value column is
+        # acceptable -- room to grow if a future longer value
+        # string needs the space.
         R_TRACK_X = right_x + 72
         R_TRACK_W = 135
         R_VAL_X   = R_TRACK_X + R_TRACK_W + 6
-        smoke_y0  = right_top + TOP_PAD
+        R_LABEL_X = right_x + 6
 
-        for i, sl in enumerate(right_sliders):
-            if not sl:
-                continue
-            sl.track_x  = R_TRACK_X
-            sl.track_cy = smoke_y0 + i * ROW_H
-            sl.track_w  = R_TRACK_W
-            sl.label_x  = right_x + 6
-            sl.value_x  = R_VAL_X
-            sl.visible  = True
+        # ---- Debug section header (always rendered, clickable) ----
+        # Chevron + label.  The full panel width (minus the spine
+        # margin) is the click target so the user can hit the bar
+        # anywhere along its length.
+        debug_chev = '▶' if debug_collapsed else '▼'
+        self.ui.add_panel_label(
+            f"{debug_chev}  {_('Debug')}",
+            x=R_LABEL_X,
+            y=right_top + R_TOP_PAD,
+            color=(150, 165, 200),
+            section_key='Debug',
+            click_w=self.TREE_PANEL_W - 8,
+        )
 
-        # PerVtx (normals shader mode) + Debug (master debug-overlay
-        # toggle) share one row BELOW the slider stack.  PerVtx is
-        # NOT a debug toggle -- it picks the normals shader's
-        # by-face vs by-vertex visualisation -- so it stays alongside
-        # Debug rather than getting folded into it.
-        cb_row_y = (smoke_y0 + len(right_sliders) * ROW_H
-                    - 14 // 2)    # 14 = checkbox size
-        if self._normals_mode_cb:
-            self._normals_mode_cb.x = right_x + 8
-            self._normals_mode_cb.y = cb_row_y
-            self._normals_mode_cb.visible = True
-        if self._debug_cb:
-            # Right side of the row -- past the slider value column so
-            # the labels don't crowd each other.
-            self._debug_cb.x = right_x + 150
-            self._debug_cb.y = cb_row_y
-            self._debug_cb.visible = True
+        # When collapsed, skip the body entirely -- widgets keep
+        # their last-known positions (we set visible=False at the
+        # END of _layout_widgets, after the final unconditional
+        # True-loop, so collapsed widgets stay hidden until the
+        # next un-collapse).
+        if not debug_collapsed:
+            cur_y = (right_top + R_TOP_PAD
+                     + R_DEBUG_HEADER_H + R_DEBUG_HEADER_GAP)
+            # Walk the groups, painting sub-headers via
+            # add_panel_label and positioning each slider in turn.
+            for grp_label, sliders in slider_groups:
+                self.ui.add_panel_label(
+                    grp_label,
+                    x=R_LABEL_X,
+                    y=cur_y,
+                    color=(150, 165, 200),
+                )
+                cur_y += R_SUB_HEADER_H + R_SUB_HEADER_GAP
+                for sl, _lbl in sliders:
+                    if not sl:
+                        continue
+                    sl.track_x  = R_TRACK_X
+                    sl.track_cy = cur_y + R_ROW_H // 2
+                    sl.track_w  = R_TRACK_W
+                    sl.label_x  = R_LABEL_X
+                    sl.value_x  = R_VAL_X
+                    sl.visible  = True
+                    cur_y += R_ROW_H
+                cur_y += R_GROUP_GAP_AFTER
+
+            # PerVtx + Debug checkboxes sit on a shared row at the
+            # bottom of the Normals group.  Checkboxes don't have
+            # track_x; we use the centroid of their box so y aligns
+            # with the slider tracks above visually.
+            cb_row_cy = cur_y + R_CB_ROW_H // 2
+            if self._normals_mode_cb:
+                self._normals_mode_cb.x = right_x + 8
+                self._normals_mode_cb.y = cb_row_cy - self._normals_mode_cb.size // 2
+                self._normals_mode_cb.visible = True
+            if self._debug_cb:
+                self._debug_cb.x = right_x + 150
+                self._debug_cb.y = cb_row_cy - self._debug_cb.size // 2
+                self._debug_cb.visible = True
 
         # All other widgets stay visible
         for w in self.ui.sliders + self.ui.checkboxes:
             if not hasattr(w, 'visible'):
                 continue
             w.visible = True
+
+        # When the Debug section is collapsed, override the final
+        # True-loop above and force every right-panel widget back
+        # to visible=False.  Done as a tail-block so the
+        # left-panel-targeted True-loop stays untouched -- we just
+        # undo what it did to the right-panel widgets when
+        # collapse demands it.  Keeps the change scoped to the
+        # right side; left panel never knows this exists.
+        if debug_collapsed:
+            for sl, _lbl in (SMOKE_SLIDERS + FIRE_SLIDERS
+                              + NORMALS_SLIDERS):
+                if sl:
+                    sl.visible = False
+            if self._normals_mode_cb:
+                self._normals_mode_cb.visible = False
+            if self._debug_cb:
+                self._debug_cb.visible = False
 
     # ------------------------------------------------------------------
     # Logging helpers (mirror to stdout AND the in-app console)
@@ -6164,6 +7559,14 @@ class Viewer:
             elif event.type == KEYDOWN:
                 if event.key == K_ESCAPE:
                     self.running = False
+                elif event.key == K_F11:
+                    # Fullscreen toggle.  After splash teardown
+                    # the window is already fullscreen; F11 brings
+                    # it back to the windowed dimensions we
+                    # remembered at startup, F11 again returns to
+                    # fullscreen.  Standard convention across
+                    # most desktop GL apps.
+                    self._toggle_fullscreen()
                 elif event.key == K_w:
                     self.wireframe = not self.wireframe
                     # Don't call glPolygonMode here -- the next render
@@ -6197,9 +7600,24 @@ class Viewer:
             elif event.type == MOUSEBUTTONDOWN:
                 mx, my = event.pos
                 if event.button == 1 and self.ui.is_pointer_over_ui(mx, my):
-                    widget = self.ui.handle_mouse_down(mx, my)
-                    if widget is not None:          # UIButton returned
-                        self._apply_button_action(widget)
+                    # Section-header clicks come first -- they're
+                    # wider hit zones than buttons (full row width)
+                    # and folding the section out from under a click
+                    # would otherwise consume the same coords twice.
+                    # 'Debug' is the right-panel section and uses a
+                    # dedicated handler that avoids touching
+                    # left-panel state; every other section_key
+                    # (left panel) routes through the generic
+                    # handler.
+                    section_key = self.ui.section_header_at(mx, my)
+                    if section_key == 'Debug':
+                        self._toggle_debug_collapsed()
+                    elif section_key is not None:
+                        self._toggle_section_collapsed(section_key)
+                    else:
+                        widget = self.ui.handle_mouse_down(mx, my)
+                        if widget is not None:    # UIButton returned
+                            self._apply_button_action(widget)
 
             elif event.type == MOUSEBUTTONUP:
                 if event.button == 1:
@@ -6396,8 +7814,17 @@ class Viewer:
         # existing per-mesh code mostly works for both.  Uniform-misses
         # on PBR-only names against the imported shader are silent
         # no-ops (glUniform at location -1).
+        # Shaded toggle (Model-group button) flips the WoT mesh
+        # path onto the same simple Phong shader the FBX import
+        # path uses.  Useful for diagnostic A/B compare and as a
+        # cheap fallback when the PBR pipeline misbehaves on a
+        # specific tank's materials.  FBX scenes always use the
+        # imported shader regardless of toggle state since they
+        # have no GMM / AO / damage layer to feed the PBR path.
+        use_simple_shader = (self.source_type == 'fbx'
+                             or bool(getattr(self, 'shaded_mode', False)))
         self._active_shader = (self.imported_shader
-                               if self.source_type == 'fbx'
+                               if use_simple_shader
                                else self.shader)
         active = self._active_shader
 
@@ -6422,6 +7849,38 @@ class Viewer:
         # is a separate overlay pass after this one, with polygon-offset
         # so the lines don't z-fight against the surface they ride on.
         active.set_int('wireframe_mode', 0)
+
+        # Flat-colour Shaded mode: when the toggle is on, the
+        # imported shader skips the diffuse-texture fetch and uses
+        # the active theme's c1 (burnt orange on TEPY Default,
+        # whatever the user picked otherwise) at 75% brightness.
+        # Tying it to the theme means a Dracula user gets
+        # Dracula-orange Shaded; the GLSL contract is just "RGB
+        # triple, linear-ish".  The 0.75 darkening keeps the lit
+        # side from blowing out past white once the Lambert / Phong
+        # / ambient terms add up at the per-frame Light slider
+        # default (~10x scale inside imported.frag).  Uniform
+        # missing on the PBR shader -> silent no-op so the call is
+        # safe to make every frame regardless of which shader is
+        # active.
+        if bool(getattr(self, 'shaded_mode', False)):
+            r, g, b, _a = _theme.c1()
+            SHADED_DIM = 0.75   # 25 % darker than raw theme c1
+            active.set_int('use_flat_color', 1)
+            active.set_vec3('flat_color',
+                            float(r) * SHADED_DIM,
+                            float(g) * SHADED_DIM,
+                            float(b) * SHADED_DIM)
+        else:
+            active.set_int('use_flat_color', 0)
+
+        # Crash-tile channel rotation.  Per-load offset added to the
+        # shader's world-space-hash channel pick, so reloading the
+        # same damaged tank cycles which of the three R/G/B grunge
+        # variants land where.  Set once per frame here; the shader
+        # ignores it on materials without `has_crash_tile=1`.
+        active.set_int('crash_channel_offset',
+                        int(self._crash_channel_offset) % 3)
 
         active.set_float('metal_scale',
             self._metal_slider.value if self._metal_slider else 1.0)
@@ -6698,24 +8157,26 @@ class Viewer:
                 and self.fire_billboards.emitters):
             # Mirror the bottom-anchored offsets the textured pass uses
             # (see particles.py / _CORNER_OFFSETS_BOTTOM): bottom edge
-            # straddles the HP_Fire point horizontally, top edge sits
-            # `size` units up along cam_up.  view is row-major so
-            # row 0 = camera right, row 1 = camera up.  Numbers come
-            # from view directly so the rectangle stays camera-facing
-            # exactly like the textured quad.
+            # straddles the HP_Fire point horizontally AND vertically,
+            # so the box centroid sits exactly on the hardpoint
+            # (matching the centered fire billboard in particles.py).
+            # view is row-major so row 0 = camera right, row 1 =
+            # camera up.  Numbers come from view directly so the
+            # rectangle stays camera-facing exactly like the textured
+            # quad.
             cam_right = view[0, :3]
             cam_up    = view[1, :3]
             size      = float(self.fire_billboards.size)
             half_w    = 0.5 * size
-            top_h     = 1.0 * size
+            half_h    = 0.5 * size
             yellow    = (1.0, 1.0, 0.0)
             segs = []
             for em in self.fire_billboards.emitters:
                 pos = np.asarray(em['pos'], dtype=np.float32)
-                bl = pos - cam_right * half_w
-                br = pos + cam_right * half_w
-                tr = br  + cam_up    * top_h
-                tl = bl  + cam_up    * top_h
+                bl = pos - cam_right * half_w - cam_up * half_h
+                br = pos + cam_right * half_w - cam_up * half_h
+                tr = pos + cam_right * half_w + cam_up * half_h
+                tl = pos - cam_right * half_w + cam_up * half_h
                 segs.append((tuple(bl), tuple(br), yellow))
                 segs.append((tuple(br), tuple(tr), yellow))
                 segs.append((tuple(tr), tuple(tl), yellow))
@@ -6772,6 +8233,132 @@ class Viewer:
     # Main loop
     # ------------------------------------------------------------------
 
+    def _go_maximized(self):
+        """Maximise the pygame window so it fills the screen but
+        keeps its title bar / taskbar / chrome.
+
+        Different from fullscreen-exclusive: the desktop's taskbar
+        stays visible, the window remains a normal app citizen for
+        ALT-TAB / window-snap, and the OS chrome at the top still
+        has the [_] / [□] / [X] buttons.  Just bigger.
+
+        Implementation: Win32 ShowWindow(HWND, SW_MAXIMIZE).  The
+        resulting WM_SIZE fires SDL_WINDOWEVENT_SIZE_CHANGED ->
+        pygame VIDEORESIZE, which our existing handle_input branch
+        catches and feeds to _on_resize for the GL viewport +
+        side-panel relayout.
+
+        No-op fallback on non-Windows: just stays at the windowed
+        dimensions.
+        """
+        if os.name != 'nt':
+            self._is_fullscreen = False
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            wm_info = pygame.display.get_wm_info()
+            hwnd = wm_info.get('window') if wm_info else None
+            if not hwnd:
+                self._is_fullscreen = False
+                return
+            SW_MAXIMIZE = 3
+            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+            self._is_fullscreen = True
+        except Exception as exc:
+            print(f"[viewer] maximize failed: {exc}")
+            self._is_fullscreen = False
+
+    def _go_windowed(self):
+        """Restore the maximised window back to a normal resizable
+        window at its prior dimensions.  Companion to
+        `_go_maximized`; reached via F11 mid-session.
+
+        Implementation: Win32 ShowWindow(HWND, SW_RESTORE).  SDL2
+        remembers the pre-maximise size + position natively, so
+        SW_RESTORE drops back to exactly where the user had it
+        (or the launch dimensions if no manual resize happened).
+        """
+        if os.name != 'nt':
+            self._is_fullscreen = False
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            wm_info = pygame.display.get_wm_info()
+            hwnd = wm_info.get('window') if wm_info else None
+            if not hwnd:
+                self._is_fullscreen = False
+                return
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            self._is_fullscreen = False
+        except Exception as exc:
+            print(f"[viewer] windowed restore failed: {exc}")
+
+    def _toggle_fullscreen(self):
+        """F11 hotkey: flip between windowed and maximised states.
+        Method name kept as `_toggle_fullscreen` since F11 is the
+        conventional fullscreen-toggle key, but the underlying
+        action is OS-window maximise (chrome preserved) -- see
+        `_go_maximized` for the rationale.
+        """
+        if getattr(self, '_is_fullscreen', False):
+            self._go_windowed()
+        else:
+            self._go_maximized()
+
+    def _set_borderless(self, borderless):
+        """Toggle the OS title-bar / resize-border on the pygame
+        window via Win32 SetWindowLongW.
+
+        Pygame's `NOFRAME` flag can't be flipped after creation
+        without recreating the window (which throws away the GL
+        context and every shader / texture / VAO bound to it), so
+        we mutate the existing HWND's style flags directly via
+        Win32.
+
+        Style bits toggled:
+            WS_CAPTION    (title bar)
+            WS_THICKFRAME (resizable border + corner grips)
+
+        SetWindowPos with SWP_FRAMECHANGED forces the new style to
+        take effect without a move/resize/zorder change.
+
+        No-op on non-Windows or when ctypes / the WM info isn't
+        available -- the splash just looks the same as the rest of
+        the session there, which is the existing behaviour.
+        """
+        if os.name != 'nt':
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            wm_info = pygame.display.get_wm_info()
+            hwnd = wm_info.get('window') if wm_info else None
+            if not hwnd:
+                return
+            GWL_STYLE        = -16
+            WS_CAPTION       = 0x00C00000
+            WS_THICKFRAME    = 0x00040000
+            SWP_NOSIZE       = 0x0001
+            SWP_NOMOVE       = 0x0002
+            SWP_NOZORDER     = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+            cur = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            if borderless:
+                new = cur & ~(WS_CAPTION | WS_THICKFRAME)
+            else:
+                new = cur |  (WS_CAPTION | WS_THICKFRAME)
+            if new != cur:
+                user32.SetWindowLongW(hwnd, GWL_STYLE, new)
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE
+                    | SWP_NOZORDER | SWP_FRAMECHANGED)
+        except Exception as exc:
+            print(f"[viewer] borderless toggle failed: {exc}")
+
     def run(self):
         """Enter the main event loop; returns after the window is closed."""
         # Tear down the startup splash (if any) -- from this point on
@@ -6783,6 +8370,15 @@ class Viewer:
             except Exception as exc:
                 print(f"[viewer] splash cleanup: {exc}")
             self.splash = None
+        # Maximise the window for the main viewing experience.
+        # Splash rendered in the original 1280x720 client area so
+        # it stayed centred in a known viewport; now that init is
+        # done we want every available pixel for the tank + tree +
+        # side panels, but still want the taskbar / title-bar /
+        # ALT-TAB to behave like a normal windowed app.  Maximise
+        # rather than fullscreen-exclusive does that.  F11 toggles
+        # back to the windowed dimensions.
+        self._go_maximized()
 
         while self.running:
             self.handle_input()

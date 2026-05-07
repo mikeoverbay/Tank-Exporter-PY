@@ -58,7 +58,7 @@ msgstr "비교"
 msgid "Language"
 msgstr "언어"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "테마"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "FBX 가져오기 취소됨"
 
 msgid "FBX import failed"
 msgstr "FBX 가져오기 실패"
+
+
+msgid "Extract"
+msgstr "추출"
+
+msgid "Open Extract Loc"
+msgstr "위치 열기"
+
+msgid "Remove from res_mods"
+msgstr "제거"
+
+msgid "Shaded"
+msgstr "셰이딩"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "불"
+
+msgid "Smoke"
+msgstr "연기"

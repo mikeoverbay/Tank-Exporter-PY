@@ -58,7 +58,7 @@ msgstr "Сравн."
 msgid "Language"
 msgstr "Язык"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "Тема"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "Импорт FBX отменён"
 
 msgid "FBX import failed"
 msgstr "Ошибка импорта FBX"
+
+
+msgid "Extract"
+msgstr "Извлечь"
+
+msgid "Open Extract Loc"
+msgstr "Открыть"
+
+msgid "Remove from res_mods"
+msgstr "Удалить"
+
+msgid "Shaded"
+msgstr "Затенён."
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "Огонь"
+
+msgid "Smoke"
+msgstr "Дым"

@@ -37,9 +37,34 @@ them with PBR + IBL lighting, and round-trips back out as
   `gas_large`, `diesel_small`, `diesel_medium`, `diesel_large`,
   `diesel_strv`) -- the loaded tank's `<exhaust><pixie>` value
   auto-wires which slot the sliders read/write, so a tier-1 light
-  doesn't puff Maus-scale clouds.  Fire billboards are anchored
-  bottom-center on each `HP_Fire_*` hardpoint so flames rise up out
-  of the deck rather than sinking through it.
+  doesn't puff Maus-scale clouds.  Fire billboards are centred on
+  each `HP_Fire_*` hardpoint -- the artist authors HPs at the
+  centroid of where the flame should appear, so centered anchoring
+  matches in-game placement.
+- **Crash damage shader** -- damaged tanks render with the standard
+  PBR pass plus a multiplicative damage layer (replicates WoT's
+  `PBS_tank_crash.fx`).  A single shared tile
+  (`vehicles/russian/Tank_detail/crash_tile.dds`) packs three
+  grayscale dirt / scorch variants into RGB; a world-space hash
+  picks one channel per ~0.6 m region and a per-load offset rotates
+  which channel each region picks, so reloading the same damaged
+  tank cycles through every authored variant.
+- **Multi-language UI** -- 21 localizations via Python's stdlib
+  `gettext` and a curated translation table.  Languages: Bulgarian,
+  Chinese (Simplified + Traditional), Czech, English, French,
+  German, Hungarian, Italian, Japanese, Korean, Polish, Portuguese
+  (Brazilian), Romanian, Russian, Spanish (Spain + Argentina), Thai,
+  Turkish, Ukrainian, Vietnamese.  Pick via the **Language** button
+  in the IO group; selection persists in `tankExporterPy.json`
+  under `language` and applies on next launch.  Untranslated
+  strings fall back to the canonical English `msgid` so the UI
+  never shows blank labels even if a catalog is incomplete.
+- **Themed UI palette** -- 10 curated colour presets (TEPY Default,
+  Solarized Dark, Dracula, Nord, Gruvbox Dark, Tokyo Night,
+  Monokai, Catppuccin Mocha, One Dark, Material Dark) drive every
+  button accent + clear colour + console text colour via four
+  named slots (c1 / c2 / c3 / c4) plus a free-form bg.  Pick via
+  the **Theme** button in the IO group; live-applies (no restart).
 
 ### Diagnose & inspect
 - **Surface-normal debug shader** -- geometry-shader pass renders
@@ -192,7 +217,13 @@ your WoT pkgs (~3 seconds) -- you'll see progress in the console
 panel.  After that, every later launch is fast.
 
 Companion bats:
-- `start.bat` -- minimal launcher (no install dance, just launch).
+- `launch_skip_deps.bat` -- bypass-the-install-check launcher.  No
+  import probe, no requirements\ shuffling -- straight to
+  `python tankExporterPy.py`.  **Only use this after a successful
+  `go.bat`** has installed the runtime packages once; running it on
+  a fresh machine just gets you a Python ImportError.  (Was
+  `start.bat` pre-v1.67.3 -- renamed because the obvious-sounding
+  name was steering new users away from `go.bat`.)
 - `uninstall.bat` -- pip-uninstalls the four runtime packages.
 - `reinstall.bat` -- restores `requirements/` from the backup and
   force-reinstalls everything.
@@ -224,28 +255,77 @@ After launch, pick a tank from the right-hand tier-filtered tree,
 confirm in the load dialog, and the viewer assembles the full vehicle
 (hull + chassis + best turret + top gun) with correct offsets.
 
-### Top buttons -- the IO group
+The left panel is split into collapsible sections.  Click the
+chevron in any section header (`▼ <name>` expanded, `▶ <name>`
+collapsed) to fold it; state persists in `tankExporterPy.json`
+under `section_collapsed`.  The right panel has one matching
+collapsible group titled **Debug**.
 
-| Button       | What it does                                                   |
-| ------------ | -------------------------------------------------------------- |
-| **Set Paths**| Configure WoT install paths (saved to `tankExporterPy.json`).      |
-| **Import**   | Read FBX / GLB / OBJ back into the viewer (Blender bridge).    |
-| **Export**   | Write the loaded tank as FBX / GLB / GLTF / OBJ.               |
-| **Save Prim**| Write hull / chassis / turret / gun back as `.primitives_processed` into `res_mods/`. |
+### `res_mods` group (top)
+
+Operations against your `<res_mods>/<version>/` folder.
+
+| Button                   | What it does                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Extract**              | Tk dialog: tick Hull / Chassis / Turret / Gun + an "Extract textures" toggle.  Copies `.primitives_processed` + `.visual_processed` (+ optional `.model`) to res_mods at the canonical pkg paths.  Damaged tanks land under `/crash/`; normal under `/normal/`.  **Existing textures are never overwritten** -- they're kept so you can't accidentally clobber edits.  |
+| **Open Extract Loc**     | Opens Explorer at the variant subfolder Extract just wrote into (`.../normal/` or `.../crash/`).  Falls back to the whole-tank dir if only the *other* variant has been extracted.  Asks via Tk yes/no whether to run Extract now if neither is present. |
+| **Remove from res_mods** | Deletes the loaded tank's whole-tank res_mods folder (both variants).  **Strong confirmation** -- a Tk dialog requires you to *type* the tank's xml basename to enable the Delete button.  Counts files before deleting and prunes empty parent dirs after. |
 
 ### UI group
 
-| Button       | What it does                                                   |
-| ------------ | -------------------------------------------------------------- |
-| **Meshes**   | Open the per-mesh visibility window.                           |
-| **Flip**     | Toggle between FBX-imported and PKG-loaded mesh sets.          |
-| **Compare**  | Side-by-side per-part stats (FBX vs PKG).                      |
+| Button       | What it does                                                                                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Grid**     | Show the ground grid.                                                                                                                                                            |
+| **Axes**     | Show the world XYZ axis lines at origin.                                                                                                                                         |
+| **Light**    | Show the orbit-light indicator spheres.                                                                                                                                          |
+| **Orbit**    | Animate the three scene lights orbiting the model.                                                                                                                               |
+| **Skybox**   | Show / hide the cubemap skybox (IBL keeps working either way).                                                                                                                   |
+| **Terrain**  | Show / hide the procedural ground plane.                                                                                                                                         |
+
+### Model group
+
+Operations on the loaded mesh set rather than the viewport.
+
+| Button       | What it does                                                                                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Meshes**   | Open the per-mesh visibility window.                                                                                                                                             |
+| **Flip**     | Toggle between FBX-imported and PKG-loaded mesh sets.                                                                                                                            |
+| **Compare**  | Side-by-side per-part stats (FBX vs PKG).                                                                                                                                        |
+| **Wireframe**| Polygon-offset wireframe overlay on top of the solid pass.                                                                                                                       |
+| **Shaded**   | Render the loaded tank in cheap diffuse + bump Phong (no PBR / IBL / GMM / damage / armour tint).  Surface flat-coloured at the active theme's `c1 × 0.75` (burnt orange on TEPY Default; theme-aware on every preset).  Useful as a diagnostic A/B against the full PBR look. |
+
+### IO group
+
+| Button        | What it does                                                                                                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Set Paths** | Configure WoT install paths (saved to `tankExporterPy.json`).                                                                                                                       |
+| **Import**    | Read FBX / GLB / OBJ back into the viewer (Blender bridge).                                                                                                                      |
+| **Export**    | Write the loaded tank as FBX / GLB / GLTF / OBJ.                                                                                                                                 |
+| **Save Prim** | Write hull / chassis / turret / gun back as `.primitives_processed` into `res_mods/`.                                                                                           |
+| **Language**  | Tk picker for the in-app UI language; restart-to-apply.                                                                                                                          |
+| **Theme**     | Tk picker showing every preset palette as a row of swatch previews (c1 / c2 / c3 / c4 / bg).  Click a row → Set to apply live (no restart); Cancel keeps the previous theme.    |
 
 ### Tools group
 
 | Button       | What it does                                                   |
 | ------------ | -------------------------------------------------------------- |
 | **ItemList** | Rebuild `TheItemList.xml` from every kept pkg.                 |
+
+### Right panel -- Debug group
+
+Smoke / fire / normals sliders + PerVtx / Debug checkboxes.
+Same chevron toggle as the left-panel sections.  Collapsed:
+panel shrinks to the header strip and the GL viewport reclaims
+the bottom-right of the screen.
+
+### Load dialog
+
+A "**Load from res_mods**" checkbox at the top of the dialog
+controls whether the loader walks res_mods overrides (default
+checked) or reads textures + visuals straight from pkg
+(unchecked).  Per-load setting; persists across sessions.
+FBX-import → PKG-twin auto-loads always use pkg-only,
+regardless of the checkbox.
 
 ### Camera & keys
 
@@ -257,6 +337,7 @@ confirm in the load dialog, and the viewer assembles the full vehicle
 | `W`                    | Toggle wireframe                                  |
 | `N`                    | Toggle normal map                                 |
 | `R`                    | Reset camera                                      |
+| `F11`                  | Toggle maximized ↔ windowed                       |
 | `ESC`                  | Quit                                              |
 
 ---

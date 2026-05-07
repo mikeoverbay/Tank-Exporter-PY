@@ -3,29 +3,99 @@
   "res_mods": "C:/Games/World_of_Tanks_NA/res_mods/2.2.1.2",
   "lookup_xml": "C:/experiment/TheItemList.xml",
   "blender_exe": "",
+  "fbx_converter_exe": "",
+  "language": "en",
   "info_panel_collapsed": false,
-  "light_value": 0.25,
+  "theme": "TEPY Default",
+  "theme_bg": null,
+  "light_value": 0.2078125,
   "ambient_value": 0.5,
-
   "smoke_groups": {
-    "gas_small":     { "start_size": 0.06, "end_size": 0.16, "speed": 1.5, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "gas_medium":    { "start_size": 0.10, "end_size": 0.25, "speed": 2.0, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "gas_large":     { "start_size": 0.18, "end_size": 0.42, "speed": 2.5, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "diesel_small":  { "start_size": 0.07, "end_size": 0.18, "speed": 1.6, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "diesel_medium": { "start_size": 0.11, "end_size": 0.27, "speed": 2.0, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "diesel_large":  { "start_size": 0.20, "end_size": 0.45, "speed": 2.5, "fade_start_frame": 30.0, "fade_end_frame": 60.0 },
-    "diesel_strv":   { "start_size": 0.09, "end_size": 0.22, "speed": 1.8, "fade_start_frame": 30.0, "fade_end_frame": 60.0 }
+    "gas_small": {
+      "start_size": 0.1037037037037037,
+      "end_size": 0.16,
+      "speed": 1.5,
+      "fade_start_frame": 20.385185185185186,
+      "fade_end_frame": 39.82222222222222
+    },
+    "gas_medium": {
+      "start_size": 0.1,
+      "end_size": 0.25,
+      "speed": 2.0,
+      "fade_start_frame": 30.0,
+      "fade_end_frame": 49.77777777777778
+    },
+    "gas_large": {
+      "start_size": 0.08148148148148149,
+      "end_size": 0.7555555555555555,
+      "speed": 3.437037037037037,
+      "fade_start_frame": 2.8444444444444446,
+      "fade_end_frame": 56.41481481481482
+    },
+    "diesel_small": {
+      "start_size": 0.07,
+      "end_size": 0.18,
+      "speed": 1.6,
+      "fade_start_frame": 30.0,
+      "fade_end_frame": 60.0
+    },
+    "diesel_medium": {
+      "start_size": 0.11,
+      "end_size": 0.27,
+      "speed": 2.0,
+      "fade_start_frame": 30.0,
+      "fade_end_frame": 60.0
+    },
+    "diesel_large": {
+      "start_size": 0.2,
+      "end_size": 0.45,
+      "speed": 2.5,
+      "fade_start_frame": 0.0,
+      "fade_end_frame": 60.0
+    },
+    "diesel_strv": {
+      "start_size": 0.09,
+      "end_size": 0.22,
+      "speed": 1.8,
+      "fade_start_frame": 30.0,
+      "fade_end_frame": 60.0
+    }
   },
-
   "fire_groups": {
-    "gas_small":     { "size": 1.0 },
-    "gas_medium":    { "size": 1.6 },
-    "gas_large":     { "size": 2.4 },
-    "diesel_small":  { "size": 1.1 },
-    "diesel_medium": { "size": 1.7 },
-    "diesel_large":  { "size": 2.6 },
-    "diesel_strv":   { "size": 1.4 }
+    "gas_small": {
+      "size": 0.7407407407407407
+    },
+    "gas_medium": {
+      "size": 1.4814814814814814
+    },
+    "gas_large": {
+      "size": 1.5407407407407407
+    },
+    "diesel_small": {
+      "size": 1.1
+    },
+    "diesel_medium": {
+      "size": 1.7
+    },
+    "diesel_large": {
+      "size": 1.4222222222222223
+    },
+    "diesel_strv": {
+      "size": 1.4
+    }
   },
-
-  "show_hardpoints": false
+  "load_from_res_mods": true,
+  "section_collapsed": {
+    "res_mods": false,
+    "UI": false,
+    "Model": false,
+    "IO": false,
+    "Tools": false,
+    "Debug": false
+  },
+  "motif_bg": null,
+  "normals_length": 0.0,
+  "normals_per_vertex": false,
+  "debug": false,
+  "show_terrain": false
 }

@@ -1,15 +1,23 @@
 @echo off
 :: ============================================================================
-::  Tank Exporter PY -- minimal launcher
+::  Tank Exporter PY -- skip-deps launcher
 ::
-::  start.bat is the bare-bones "just run the app" entry point.  Use it
-::  when you know the dependencies are already installed and you just
-::  want to spin up the viewer fast.  No import probe, no install path,
-::  no requirements\ folder shuffling -- just python tankExporterPy.py and
-::  any args you pass through.
+::  launch_skip_deps.bat is the "I know my deps are installed, just
+::  run the app" entry point.  No import probe, no install path, no
+::  requirements\ folder shuffling -- just python tankExporterPy.py
+::  and any args you pass through.  Use this only after a successful
+::  go.bat has installed the runtime packages once.
 ::
-::  If you're not sure whether the deps are installed, use go.bat
-::  instead -- that one verifies and installs on demand before launching.
+::  >>> If you're a new user or unsure whether deps are installed,
+::  >>> use go.bat instead.  That one verifies + installs on demand
+::  >>> before launching.  This script will fail with a Python
+::  >>> ImportError if pygame / PyOpenGL / numpy / Pillow aren't
+::  >>> already present.
+::
+::  History: this file was called `start.bat` until v1.67.3.  Renamed
+::  because the obvious-sounding name was tricking fresh installers
+::  into clicking it before go.bat had a chance to bootstrap the
+::  environment.
 ::
 ::  Errors land in this window; pause-on-exit so you can read the
 ::  traceback if Python bails before the GL window appears.

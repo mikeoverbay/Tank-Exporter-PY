@@ -58,7 +58,7 @@ msgstr "เปรียบเทียบ"
 msgid "Language"
 msgstr "ภาษา"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "ธีม"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "ยกเลิกการนำเข้า FBX"
 
 msgid "FBX import failed"
 msgstr "นำเข้า FBX ล้มเหลว"
+
+
+msgid "Extract"
+msgstr "แยก"
+
+msgid "Open Extract Loc"
+msgstr "เปิดตำแหน่ง"
+
+msgid "Remove from res_mods"
+msgstr "ลบ"
+
+msgid "Shaded"
+msgstr "แรเงา"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "ไฟ"
+
+msgid "Smoke"
+msgstr "ควัน"

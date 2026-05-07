@@ -58,7 +58,7 @@ msgstr "Compară"
 msgid "Language"
 msgstr "Limbă"
 
-msgid "Motif"
+msgid "Theme"
 msgstr "Temă"
 
 # ---- IO-section buttons ------------------------------------------------
@@ -125,3 +125,26 @@ msgstr "Import FBX anulat"
 
 msgid "FBX import failed"
 msgstr "Import FBX eșuat"
+
+
+msgid "Extract"
+msgstr "Extrage"
+
+msgid "Open Extract Loc"
+msgstr "Desch. loc."
+
+msgid "Remove from res_mods"
+msgstr "Sterge"
+
+msgid "Shaded"
+msgstr "Umbrit"
+
+msgid "res_mods"
+msgstr "res_mods"
+
+
+msgid "Fire"
+msgstr "Foc"
+
+msgid "Smoke"
+msgstr "Fum"
