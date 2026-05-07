@@ -109,6 +109,12 @@ def main():
         # `use_custom_normals` still exports (just without the
         # flag); newer Blender that DOES have it gets the
         # correct behaviour.
+        # `bake_anim=False` suppresses the entire animation block.
+        # Blender's exporter otherwise writes a `Take001` track even
+        # when no mesh has any animation data attached -- 3ds Max
+        # then picks up a phantom animation channel that the user
+        # has to manually delete.  TEPY only exports static
+        # geometry; we never want an animation block.
         _fbx_kwargs = dict(
             filepath=args.output,
             use_selection=False,
@@ -120,6 +126,7 @@ def main():
             use_mesh_modifiers=True,
             mesh_smooth_type='FACE',
             use_custom_normals=True,
+            bake_anim=False,
             # path_mode='AUTO' writes texture paths into the FBX that
             # point at our existing <base>_textures/ sidecar folder
             # (the one _build_mesh_object already populated).  We used
@@ -147,12 +154,15 @@ def main():
         # GLB is the binary glTF container -- single self-contained
         # file with geometry buffer + textures + materials all packed
         # in.  Best for "send me the model" workflows.
+        # `export_animations=False` mirrors the FBX side -- no
+        # phantom animation channels in the output.
         bpy.ops.export_scene.gltf(
             filepath=args.output,
             export_format='GLB',
             export_apply=True,
             export_materials='EXPORT',
             export_image_format='AUTO',     # keep PNG as PNG, JPG as JPG
+            export_animations=False,
         )
     elif fmt == 'gltf':
         # GLTF_EMBEDDED writes ONE .gltf file with the geometry buffer
@@ -170,6 +180,7 @@ def main():
             export_apply=True,
             export_materials='EXPORT',
             export_image_format='AUTO',
+            export_animations=False,
         )
     elif fmt == 'obj':
         bpy.ops.wm.obj_export(

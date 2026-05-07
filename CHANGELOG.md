@@ -9,6 +9,30 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Suppress phantom animation block on every export format (1.60.1)
+
+Tester saw an unwanted Take001 animation track on the exported
+FBX (and presumably similar phantoms on GLB / GLTF).  Blender's
+exporters write an animation block by default even when no mesh
+has any animation data attached -- 3ds Max then picks it up as a
+static animation channel the user has to manually delete.
+
+Killed across every output format:
+
+* **FBX**:  `bake_anim=False` on `export_scene.fbx`
+* **GLB**:  `export_animations=False` on `export_scene.gltf`
+* **GLTF**: `export_animations=False` on `export_scene.gltf`
+
+OBJ has no animation concept so no change there.
+
+TEPY only exports static geometry; we never want an animation
+block on any output.  Tank meshes' transforms are baked into
+their world matrices at load time; rigging / bone weights ride
+through the per-vertex `WoTBoneIdx` / `WoTBoneWeight` color
+attributes (decoded by the importer for round-trip).
+
+Files: `tankExporterPy/exporters/_blender_runner.py`.
+
 ### FBX export: vertex normals visible in 3ds Max 2018 (1.60.0)
 
 Tester reported "3ds Max isn't finding the vertex normals" on
