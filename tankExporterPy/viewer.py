@@ -1345,6 +1345,15 @@ class Viewer:
         # the same `_('...')` form.  When the language doesn't change
         # mid-session, `_('Grid')` is deterministic so the lookups
         # work identically to the pre-i18n code.
+        # UI display toggles -- viewport-rendering flags (grid /
+        # axes lines / sky / lights / wireframe / etc.).  Olive
+        # accent in the IDLE state; the existing global burnt-
+        # orange "this toggle is ON" colour still wins when active.
+        # Categorised separately from the model-tool action
+        # buttons (Meshes / Flip / Compare) which get a burnt-
+        # orange accent -- see the `Model` group in
+        # `_layout_widgets`.
+        _UI_OLIVE = (0.42, 0.45, 0.18, 1.0)
         for label, attr in [
             (_('Grid'),      'show_grid'),
             (_('Axes'),      'show_axes'),
@@ -1357,6 +1366,7 @@ class Viewer:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
             btn.attr = attr
+            btn.accent_color = _UI_OLIVE
             x       += btn.w + self.ui.BUTTON_SPACING
 
         # --- Action buttons (one-shot, no toggle attr) -------------------
@@ -1366,10 +1376,17 @@ class Viewer:
                            action=self._show_paths_dialog)
         x       += 84 + self.ui.BUTTON_SPACING
 
+        # Model tools.  Operate on the loaded mesh set rather than
+        # the viewport.  Burnt-orange accent so they read as a
+        # different category from the olive UI toggles.  Same
+        # palette family, distinct role.
+        _MODEL_BURNT_ORANGE = (0.65, 0.32, 0.10, 1.0)
+
         # 'Meshes' opens / closes the mesh-visibility window.  Always
         # available; population happens at load time.
-        self.ui.add_button(_('Meshes'), x, y, 70, h, active=False,
-                           action=self._toggle_mesh_window)
+        meshes_btn = self.ui.add_button(_('Meshes'), x, y, 70, h, active=False,
+                                          action=self._toggle_mesh_window)
+        meshes_btn.accent_color = _MODEL_BURNT_ORANGE
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Export' opens a Save dialog and spawns Blender (--background)
@@ -1400,16 +1417,19 @@ class Viewer:
         # PKG (WoT-loaded).  No-op when the other set is empty.  Lets
         # the user A/B-compare an import against the in-game data
         # before exporting back out to .primitives_processed.
-        self.ui.add_button(_('Flip'), x, y, 70, h, active=False,
-                           action=self._flip_active_set)
+        flip_btn = self.ui.add_button(_('Flip'), x, y, 70, h, active=False,
+                                        action=self._flip_active_set)
+        flip_btn.accent_color = _MODEL_BURNT_ORANGE
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Compare' opens the side-by-side per-part stats window
         # (face/vert/index counts, UV2 presence, vertex format) so the
         # user can verify the imported FBX matches the PKG data slot
         # for slot before re-export.
-        self.ui.add_button(_('Compare'), x, y, 70, h, active=False,
-                           action=self._on_compare_clicked)
+        compare_btn = self.ui.add_button(_('Compare'), x, y, 70, h,
+                                           active=False,
+                                           action=self._on_compare_clicked)
+        compare_btn.accent_color = _MODEL_BURNT_ORANGE
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Save Prim' opens a component picker (Hull / Chassis /
@@ -5684,6 +5704,9 @@ class Viewer:
         # doesn't change mid-session, `_()` is deterministic so the
         # `btn_by_label` lookup below finds every button.
         button_groups = [
+            # UI toggles -- viewport rendering flags.  Olive
+            # accent applied per-button in `_build_ui`.  Seven
+            # toggles fill 3-3-1 across three rows.
             (_('UI'), [
                 (_('Grid'),      0, 1),
                 (_('Axes'),      1, 1),
@@ -5692,9 +5715,14 @@ class Viewer:
                 (_('Skybox'),    1, 1),
                 (_('Wireframe'), 2, 1),
                 (_('Terrain'),   0, 1),
-                (_('Meshes'),    1, 1),
-                (_('Flip'),      2, 1),
-                (_('Compare'),   0, 1),
+            ]),
+            # Model tools -- act on the loaded tank rather than
+            # the viewport.  Burnt-orange accent.  Three buttons
+            # fit in a single row.
+            (_('Model'), [
+                (_('Meshes'),    0, 1),
+                (_('Flip'),      1, 1),
+                (_('Compare'),   2, 1),
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),

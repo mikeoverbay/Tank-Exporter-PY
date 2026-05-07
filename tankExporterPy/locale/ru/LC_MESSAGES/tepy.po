@@ -21,6 +21,9 @@ msgstr "Ввод/Выв."
 msgid "Tools"
 msgstr "Инструм."
 
+msgid "Model"
+msgstr "Модель"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Сетка"

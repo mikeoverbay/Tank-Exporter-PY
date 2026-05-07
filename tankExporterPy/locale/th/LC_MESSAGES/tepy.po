@@ -21,6 +21,9 @@ msgstr "เข้า/ออก"
 msgid "Tools"
 msgstr "เครื่องมือ"
 
+msgid "Model"
+msgstr "โมเดล"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "ตาราง"

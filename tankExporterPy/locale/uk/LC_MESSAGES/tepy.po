@@ -21,6 +21,9 @@ msgstr "Вв/Вив"
 msgid "Tools"
 msgstr "Інстр."
 
+msgid "Model"
+msgstr "Модель"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Сітка"

@@ -21,6 +21,9 @@ msgstr "输入/输出"
 msgid "Tools"
 msgstr "工具"
 
+msgid "Model"
+msgstr "模型"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "网格"

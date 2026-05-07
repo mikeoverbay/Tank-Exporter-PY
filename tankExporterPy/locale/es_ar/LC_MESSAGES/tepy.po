@@ -21,6 +21,9 @@ msgstr "E/S"
 msgid "Tools"
 msgstr "Herram."
 
+msgid "Model"
+msgstr "Modelo"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Grilla"

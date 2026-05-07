@@ -21,4 +21,4 @@ Use cust_tools/bump_version.py to bump and persist:
     python cust_tools/bump_version.py major   # 1.14.0 -> 2.0.0
 """
 
-__version__ = "1.60.3"
+__version__ = "1.61.0"

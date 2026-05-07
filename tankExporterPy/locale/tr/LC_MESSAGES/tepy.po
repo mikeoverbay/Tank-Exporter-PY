@@ -21,6 +21,9 @@ msgstr "G/Ç"
 msgid "Tools"
 msgstr "Araçlar"
 
+msgid "Model"
+msgstr "Model"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Izgara"

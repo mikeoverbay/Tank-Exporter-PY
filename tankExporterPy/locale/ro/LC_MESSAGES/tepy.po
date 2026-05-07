@@ -21,6 +21,9 @@ msgstr "I/O"
 msgid "Tools"
 msgstr "Unelte"
 
+msgid "Model"
+msgstr "Model"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Grilă"

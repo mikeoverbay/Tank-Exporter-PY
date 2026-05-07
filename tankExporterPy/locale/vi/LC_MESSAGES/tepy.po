@@ -21,6 +21,9 @@ msgstr "V/R"
 msgid "Tools"
 msgstr "Công cụ"
 
+msgid "Model"
+msgstr "Mô hình"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Lưới"

@@ -21,6 +21,9 @@ msgstr "IO"
 msgid "Tools"
 msgstr "Tools"
 
+msgid "Model"
+msgstr "Model"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Grid"

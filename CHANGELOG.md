@@ -9,6 +9,30 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Split UI section: UI toggles (olive) + Model tools (orange) (1.61.0)
+
+The single `UI` section in the left panel mixed display
+toggles (Grid / Axes / Skybox / Wireframe / ...) with
+model-tool actions (Meshes / Flip / Compare).  Two distinct
+roles, same neutral grey colour -- hard to scan.
+
+Split into two sections:
+
+* **UI** (display toggles -- 7 buttons across 3 rows):
+  Grid / Axes / Light / Orbit / Skybox / Wireframe / Terrain.
+  Olive accent in the IDLE state.  When a toggle is ON, the
+  existing global burnt-orange "this is on" colour still wins,
+  so active state still pops.
+* **Model** (model-tool actions -- 3 buttons in 1 row):
+  Meshes / Flip / Compare.  Burnt-orange accent.
+
+`Model` translated for every supported language: `Modèle` /
+`Modell` / `Модель` / `モデル` / `모델` / `模型` / etc.
+
+Files: `tankExporterPy/viewer.py`,
+`tankExporterPy/locale/*/LC_MESSAGES/tepy.{po,mo}` (all 21
+languages), `cust_tools/seed_locale_translations.py`.
+
 ### Save Prim accent: burnt yellow (1.60.3)
 
 Continues the IO-section warm-palette trio.  `Save Prim` (the

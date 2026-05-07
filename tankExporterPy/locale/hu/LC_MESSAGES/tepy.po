@@ -21,6 +21,9 @@ msgstr "B/K"
 msgid "Tools"
 msgstr "Eszk."
 
+msgid "Model"
+msgstr "Modell"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Rács"

@@ -21,6 +21,9 @@ msgstr "入出力"
 msgid "Tools"
 msgstr "ツール"
 
+msgid "Model"
+msgstr "モデル"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "グリッド"

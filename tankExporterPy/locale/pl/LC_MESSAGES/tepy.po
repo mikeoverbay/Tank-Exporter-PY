@@ -21,6 +21,9 @@ msgstr "WE/WY"
 msgid "Tools"
 msgstr "Narzęd."
 
+msgid "Model"
+msgstr "Model"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Siatka"

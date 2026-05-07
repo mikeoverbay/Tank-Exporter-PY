@@ -21,6 +21,9 @@ msgstr "V/V"
 msgid "Tools"
 msgstr "Nástroje"
 
+msgid "Model"
+msgstr "Model"
+
 # ---- UI-section buttons ------------------------------------------------
 msgid "Grid"
 msgstr "Mřížka"
