@@ -107,6 +107,20 @@ them with PBR + IBL lighting, and round-trips back out as
 - **`cust_tools/compare_sections.py`** -- diffs every
   `.primitives_processed` under a `res_mods` tank against its pkg
   original at the section-table level.
+- **`cust_tools/dump_track_skinning.py`** -- for any tank +
+  side, walks the chassis primitives + visual_processed and
+  dumps the renderSet bone palette, the per-vertex bone-index
+  groupings, per-wheel Z-windows, and a side-view PNG colouring
+  every track vertex by its dominant bone.  Use to investigate
+  how the track skinning rig drives per-wheel sag.
+- **`cust_tools/demo_terrain_corners.py`** -- sanity-check the
+  Terrain Y sampler and compute chassis pitch/roll for a virtual
+  T110E4 placed at any world (X, Z) + yaw on the loaded terrain.
+  Builds the heightmap headlessly so it runs without a GL context.
+- **`cust_tools/paint_sand_desert.py`** -- generates a tileable
+  procedural sand texture + grayscale displacement companion at
+  up to 16K resolution (see "Painting a procedural sand texture"
+  below).
 
 ---
 

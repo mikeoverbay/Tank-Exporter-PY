@@ -250,6 +250,85 @@ def _load_terrain_diffuse(path):
 
 
 # ---------------------------------------------------------------------------
+# Bilinear height sampler -- shared by Terrain.sample_height /
+# sample_heights AND any standalone test code that builds a height
+# grid without going through the GL-touching `Terrain.__init__`.
+# ---------------------------------------------------------------------------
+
+def bilinear_sample_height(heightmap, world_size, x, z, base_y=0.0):
+    """Bilinear-sample a (size, size) heightmap at world (x, z).
+
+    Args:
+        heightmap  (np.ndarray): (size, size) float32 grid spanning
+            world `[-world_size/2, +world_size/2]` on both X and Z
+            (matches the Terrain class's `_heightmap` layout).  Row
+            index = Z, column index = X.
+        world_size (float): physical extent of the grid in metres.
+        x, z       (float): world coords to sample at.
+        base_y     (float): added to the interpolated value so the
+            caller can pass a terrain `base_y` offset through.
+
+    Returns:
+        float: world Y at (x, z), or `base_y` if the point is
+        outside the grid.
+    """
+    half = float(world_size) * 0.5
+    if not (-half <= x <= half) or not (-half <= z <= half):
+        return float(base_y)
+    n  = heightmap.shape[0] - 1
+    u  = (x + half) / float(world_size) * n   # column (X)
+    v  = (z + half) / float(world_size) * n   # row    (Z)
+    i0 = int(np.floor(v))
+    j0 = int(np.floor(u))
+    i1 = min(i0 + 1, n)
+    j1 = min(j0 + 1, n)
+    fy = float(v - i0)
+    fx = float(u - j0)
+    h00 = float(heightmap[i0, j0])
+    h01 = float(heightmap[i0, j1])
+    h10 = float(heightmap[i1, j0])
+    h11 = float(heightmap[i1, j1])
+    top = h00 * (1.0 - fx) + h01 * fx
+    bot = h10 * (1.0 - fx) + h11 * fx
+    return float(top * (1.0 - fy) + bot * fy + base_y)
+
+
+def bilinear_sample_heights(heightmap, world_size, xs, zs, base_y=0.0):
+    """Vectorised counterpart of `bilinear_sample_height`.
+
+    `xs` / `zs` can be any matching shape; returns a numpy array
+    of the same shape with float32 Y values, defaulting to
+    `base_y` outside the grid.
+    """
+    xs   = np.asarray(xs, dtype=np.float32)
+    zs   = np.asarray(zs, dtype=np.float32)
+    out  = np.full_like(xs, float(base_y), dtype=np.float32)
+    half = float(world_size) * 0.5
+    in_b = ((xs >= -half) & (xs <= half)
+            & (zs >= -half) & (zs <= half))
+    if not np.any(in_b):
+        return out
+    n   = heightmap.shape[0] - 1
+    ws  = float(world_size)
+    u   = (xs[in_b] + half) / ws * n
+    v   = (zs[in_b] + half) / ws * n
+    i0  = np.floor(v).astype(np.int32)
+    j0  = np.floor(u).astype(np.int32)
+    i1  = np.minimum(i0 + 1, n)
+    j1  = np.minimum(j0 + 1, n)
+    fy  = (v - i0).astype(np.float32)
+    fx  = (u - j0).astype(np.float32)
+    h00 = heightmap[i0, j0]
+    h01 = heightmap[i0, j1]
+    h10 = heightmap[i1, j0]
+    h11 = heightmap[i1, j1]
+    top = h00 * (1.0 - fx) + h01 * fx
+    bot = h10 * (1.0 - fx) + h11 * fx
+    out[in_b] = top * (1.0 - fy) + bot * fy + float(base_y)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Tiled detail-displacement sampler
 # ---------------------------------------------------------------------------
 
@@ -701,6 +780,36 @@ class Terrain:
     def height_range(self):
         """(min_y, max_y) of the generated heightmap in world units."""
         return (self._min_y, self._max_y)
+
+    # ------------------------------------------------------------------
+    def sample_height(self, x, z):
+        """Return the world-Y of the terrain surface at world (x, z).
+
+        Includes the macro heightmap AND any tiled sand-detail
+        displacement -- both are baked into `self._heightmap` at
+        construction time, so this is a single bilinear
+        interpolation against that 2-D grid plus the `base_y`
+        offset (matching exactly what the GPU mesh renders at
+        the requested point).  Out-of-bounds queries return
+        `base_y` so downstream physics can sample edge-of-world
+        without special-casing.
+        """
+        return bilinear_sample_height(
+            self._heightmap, self.world_size, x, z,
+            base_y=self.base_y)
+
+    # ------------------------------------------------------------------
+    def sample_heights(self, xs, zs):
+        """Vectorised counterpart of `sample_height`.
+
+        `xs` / `zs` can be any matching shape; returns a numpy
+        array of the same shape with the terrain Y at each point.
+        Designed for hot-path use (12 wheels x 60 FPS is microseconds
+        when batched).
+        """
+        return bilinear_sample_heights(
+            self._heightmap, self.world_size, xs, zs,
+            base_y=self.base_y)
 
     # ------------------------------------------------------------------
     def render(self, shader, view, proj, light_dir):

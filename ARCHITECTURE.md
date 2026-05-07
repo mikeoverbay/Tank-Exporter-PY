@@ -493,8 +493,15 @@ once in `__init__`.
 |---|---|---|
 | `__init__(seed, size, world_size, height_scale, ..., image_path, sand_path, detail_image_path, ...)` | Build heightmap, vertex grid, indices, normals, GL buffers; load sand texture if present | `size` defaults to 1025; `world_size` to 160 m |
 | `render(shader, view, proj, light_dir)` | One indexed draw call.  Uploads `u_view / u_proj / u_light_dir / u_height_min / u_height_max / u_eye / u_sand_tex / u_has_sand_tex / u_sand_tile_size` and binds the sand texture to unit 0 | — |
+| `sample_height(x, z)` | Return terrain world-Y at a single point.  Macro heightmap + sand-detail displacement included; out-of-bounds returns `base_y` | bilinear sample of `_heightmap` |
+| `sample_heights(xs, zs)` | Vectorised version; numpy in / numpy out, any shape | hot-path-friendly (12 wheels x 60 FPS = microseconds) |
 | `cleanup()` | Free VAO, VBOs, sand texture | Idempotent |
 | `height_range` | (min_y, max_y) in world units | property |
+
+Module-level free helpers `bilinear_sample_height` and
+`bilinear_sample_heights` carry the same math, so headless tools
+can sample the height grid without needing the GL-touching
+`Terrain.__init__`.
 
 ### Module helpers
 

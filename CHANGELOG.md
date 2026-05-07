@@ -9,6 +9,61 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Bone-skinning analysis + terrain-Y sampler (1.79.0)
+
+Two new tools and a new on-class API land together to support
+the bone-blending investigation and the eventual tank-on-terrain
+physics.
+
+**`cust_tools/dump_track_skinning.py`** -- chassis track-skinning
+dumper.  For a given tank tag + side, walks
+`Chassis.primitives_processed` + `Chassis.visual_processed` and
+writes:
+
+* the renderSet bone palette (vertex `iii` byte / 3 = palette
+  index, the SC_UBYTE4_REVERSE_PADDED convention every Bigworld
+  game uses),
+* an explicit vertex-group table grouping every track vertex by
+  dominant `iii` byte, with per-group Z-window + centroid + bone
+  name,
+* a 2-D side-view PNG (z, y) of the track mesh with one colour
+  per dominant bone -- so the per-wheel influence regions of
+  the bottom run pop visually.
+
+Run it on T110E4 + T92 to confirm the rig pattern: the bottom
+track run is segmented per-wheel into ~30 cm Z windows; each
+wheel "owns" ~138 verts; transition zones use 2-bone blends at
+discrete weights (0.502 / 0.6 / 0.7 / 0.8 = byte 128 / 154 /
+179 / 204 quantised); top run + ends bind 100% to `V_BlendBone`
+(chassis-rigid).  Reference write-up:
+`hand_off/TRACK_SKINNING_T110E4.md`.
+
+**`Terrain.sample_height(x, z)` + `sample_heights(xs, zs)`**.
+
+The `Terrain` class now exposes a runtime API for "what's the
+terrain Y at this world (x, z)?" -- bilinear interpolation of
+the composed heightmap (macro image + tiled sand-detail
+displacement, both baked into `self._heightmap` at init).
+Vectorised path is fully numpy: 12 wheels x 60 FPS lookup
+rounds to single-microsecond cost when batched.  Out-of-bounds
+queries return `base_y` so downstream physics doesn't have to
+special-case the world edges.  Two free helpers
+(`bilinear_sample_height`, `bilinear_sample_heights`) live at
+module scope so headless / offline tools can sample the same
+height grid without needing a GL context.
+
+**`cust_tools/demo_terrain_corners.py`** -- sanity demo for the
+sampler.  Builds the terrain heightmap headlessly (re-uses the
+same `_heightmap_from_image` / `_make_heightmap` /
+`_detail_displacement` helpers `Terrain.__init__` calls, just
+without the VAO upload), samples Y at known points, drops a
+virtual T110E4 chassis at a configurable world (X, Z) and yaw,
+samples the terrain Y under the four corner wheels, then fits a
+plane through the four wheel-centre points -> chassis pitch +
+roll in degrees.  All the math (`fit_plane`,
+`normal_to_pitch_roll`) is in the same file for easy lifting
+into a real physics pass later.
+
 ### Wireframe polygon offset bumped to 4 (1.78.1)
 
 The stacked `+2 / -2` recipe in 1.78.0 still flickered at grazing

@@ -152,6 +152,48 @@ texture across a large terrain via `GL_REPEAT`:
    layers (low-freq noise contributing to colour) become
    wallpaper at distance.
 
+### SC_UBYTE4_REVERSE_PADDED bone bytes -> `byte / 3` is the index
+
+Bigworld vertex skinning stores `iii` (bone index triplets) and
+`ww` (weight triplets) in the SC_UBYTE4_REVERSE_PADDED format
+(per `shaders/formats/*.xml` in the engine).  The byte values
+are NOT direct indices into the renderSet bone palette -- they
+are `palette_idx * 3`, because the bone matrix uniform array
+is uploaded as `vec4 bones[N*3]` (each bone = three vec4s for
+a 3x4 affine matrix).  The shader vertex stage reads each
+byte + offset directly into the flat-vec4 array.
+
+So when the picker reports `bone bytes [27 0 3 0]` for a vertex,
+the actual palette indices are `[9, 0, 1, 0]`.  Look those up
+in the renderSet `<node>` list (parsed from
+`Chassis.visual_processed`) to recover the real bone names.
+
+`cust_tools/dump_track_skinning.py` and the per-tank vertex-group
+dumps in `hand_off/TRACK_SKINNING_*.md` always do the divide-by-3
+before looking up the palette.
+
+### Track skinning rig: per-wheel Z windows + 2-bone blends
+
+Every WoT chassis I've inspected (T110E4, T92) follows the same
+track-skinning architecture:
+
+* Bottom run is segmented into N contiguous Z windows, one per
+  main road wheel; each window's verts are dominantly bound to
+  that wheel's `Track_<side><i>_BlendBone`.  Wheel ordering
+  is rear-to-front (`Track_L0` is rearmost).
+* ~138 verts per wheel zone (give or take, with the front /
+  drive-sprocket wheel slightly denser).
+* Top run + nose + tail bind 100% to `V_BlendBone` (chassis
+  root) -- never sag.
+* Transition zones between adjacent wheels use 2-bone blends at
+  discrete byte-quantised weights: `0.502 / 0.6 / 0.7 / 0.8`
+  (bytes 128 / 154 / 179 / 204) -- no continuous gradient.
+* Per-vertex 3- or 4-bone blends are NOT used by the track mesh
+  on any tank we've examined.  Only V_BlendBone (1 slot) +
+  pairs of Track_<side><i> (2 slots).
+
+Reference write-up: `hand_off/TRACK_SKINNING_T110E4.md`.
+
 ### Picker / overlay shaders MUST consume `u_model`
 
 The off-screen triangle picker and its overlay shader take the
@@ -247,6 +289,22 @@ the second.
   detail-displacement layer.  Output defaults to
   `resources/sand_painted.png`; the terrain auto-loader picks
   that up over `resources/sand.png` when both exist.
+* `dump_track_skinning.py <tag> [--side L|R]` -- chassis
+  track-skinning analysis tool.  Walks `Chassis.primitives_processed`
+  + `Chassis.visual_processed` to dump the renderSet bone palette,
+  group every track vert by its dominant `iii` byte, and render a
+  side-view PNG colouring verts by their dominant bone.  Built
+  during the bone-blending investigation; canonical reference
+  output for T110E4 lives at `hand_off/TRACK_SKINNING_T110E4.md`.
+* `demo_terrain_corners.py [--x ...] [--z ...] [--yaw ...]` --
+  sanity demo for `Terrain.sample_height` / `sample_heights`.
+  Builds the heightmap headlessly (re-uses the same helpers
+  `Terrain.__init__` calls without the VAO upload), samples Y at
+  known points, drops a virtual T110E4 chassis on the terrain
+  and fits a plane through its four corner wheel centres ->
+  pitch + roll.  Plane-fit math (`fit_plane`,
+  `normal_to_pitch_roll`) lives in the same file for easy lifting
+  into a real physics pass later.
 
 ---
 
