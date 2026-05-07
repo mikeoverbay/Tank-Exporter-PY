@@ -58,6 +58,9 @@ msgstr "Порівн."
 msgid "Language"
 msgstr "Мова"
 
+msgid "Motif"
+msgstr "Тема"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "Шляхи"

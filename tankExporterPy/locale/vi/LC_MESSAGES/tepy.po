@@ -58,6 +58,9 @@ msgstr "So sánh"
 msgid "Language"
 msgstr "Ngôn ngữ"
 
+msgid "Motif"
+msgstr "Chủ đề"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "Đường dẫn"

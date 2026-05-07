@@ -58,6 +58,9 @@ msgstr "Compare"
 msgid "Language"
 msgstr "Language"
 
+msgid "Motif"
+msgstr "Motif"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "Set Paths"

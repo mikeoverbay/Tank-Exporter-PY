@@ -33,6 +33,7 @@ from OpenGL.GL import *
 
 from .loaders  import MeshParser, VisualLoader, TextureLoader, VehicleXMLLoader, PkgExtractor
 from .         import config as _config
+from .         import motif   as _motif
 from .mesh     import Mesh
 from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
@@ -497,7 +498,17 @@ class Viewer:
         pygame.display.set_caption(f"TEPY  v{_APP_VERSION}")
 
         glEnable(GL_DEPTH_TEST)
-        glClearColor(0.1, 0.1, 0.12, 1.0)
+        # Activate persisted motif before we touch any colour.  All
+        # subsequent button accents / clear-colour / console-text
+        # tints read from motif.c1() / c2() / c3() / bg(), so a
+        # `set_active(...)` here flips the entire palette before
+        # any widget gets built.
+        _motif.set_active(self._cfg.get('motif') or _motif.DEFAULT_NAME)
+        # Optional persisted bg override (free-form colour picker).
+        bg_override = self._cfg.get('motif_bg')
+        if bg_override:
+            _motif.set_bg(tuple(bg_override))
+        glClearColor(*_motif.bg())
 
         # ---- Splash screen ------------------------------------------------
         # Painted as soon as the GL context exists so the user sees
@@ -1353,7 +1364,10 @@ class Viewer:
         # buttons (Meshes / Flip / Compare) which get a burnt-
         # orange accent -- see the `Model` group in
         # `_layout_widgets`.
-        _UI_OLIVE = (0.42, 0.45, 0.18, 1.0)
+        # UI display toggles -- secondary accent (motif.c2).
+        # Default motif's c2 is the original olive; other motifs
+        # supply their own complementary colour.
+        _UI_OLIVE = _motif.c2()
         for label, attr in [
             (_('Grid'),      'show_grid'),
             (_('Axes'),      'show_axes'),
@@ -1387,7 +1401,11 @@ class Viewer:
         # the viewport.  Burnt-orange accent so they read as a
         # different category from the olive UI toggles.  Same
         # palette family, distinct role.
-        _MODEL_BURNT_ORANGE = (0.65, 0.32, 0.10, 1.0)
+        # Model tools -- primary accent (motif.c1).
+        # Default motif's c1 is the original burnt orange; swapping
+        # motif rotates this through whatever the new preset
+        # supplies (Dracula orange, Solarized yellow, ...).
+        _MODEL_BURNT_ORANGE = _motif.c1()
 
         # 'Meshes' opens / closes the mesh-visibility window.  Always
         # available; population happens at load time.
@@ -1405,7 +1423,7 @@ class Viewer:
         export_btn = self.ui.add_button(
             _('Export'), x, y, 70, h, active=False,
             action=self._on_export_clicked)
-        export_btn.accent_color = (0.65, 0.32, 0.10, 1.0)   # burnt orange
+        export_btn.accent_color = _motif.c1()
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Import' opens a file picker and spawns Blender to read an
@@ -1417,7 +1435,7 @@ class Viewer:
         import_btn = self.ui.add_button(
             _('Import'), x, y, 70, h, active=False,
             action=self._on_import_clicked)
-        import_btn.accent_color = (0.42, 0.45, 0.18, 1.0)   # olive
+        import_btn.accent_color = _motif.c2()
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Flip' toggles the active mesh set between FBX (imported) and
@@ -1450,7 +1468,13 @@ class Viewer:
         save_prim_btn = self.ui.add_button(
             _('Save Prim'), x, y, 70, h, active=False,
             action=self._on_save_prim_clicked)
-        save_prim_btn.accent_color = (0.68, 0.52, 0.10, 1.0)  # burnt yellow
+        # Save Prim joins the warm-accent family (motif.c1).  Its
+        # previous standalone burnt-yellow is gone -- the user's
+        # two-colour-per-button rule means every IO button has
+        # to pick c1 or c2, and Save Prim outputs data (warm) like
+        # Export.  If a future motif wants a third button colour
+        # we'll revisit.
+        save_prim_btn.accent_color = _motif.c1()
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'Language' opens a Tk dropdown picker.  Sister to Set Paths
@@ -1458,6 +1482,15 @@ class Viewer:
         # under `language` and applies on next launch.
         self.ui.add_button(_('Language'), x, y, 70, h, active=False,
                            action=self._on_language_clicked)
+        x       += 70 + self.ui.BUTTON_SPACING
+
+        # 'Motif' opens a Tk picker listing every preset palette.
+        # Phase 1: dropdown with restart-to-apply (paired with the
+        # button-accent live updates we already do at startup).
+        # Phase 2 will replace this with an in-app scrolling
+        # color-pair preview window with live preview on hover.
+        self.ui.add_button(_('Motif'), x, y, 70, h, active=False,
+                           action=self._on_motif_clicked)
         x       += 70 + self.ui.BUTTON_SPACING
 
         # 'ItemList' rebuilds TheItemList.xml from scratch by walking
@@ -2274,6 +2307,91 @@ class Viewer:
         self._show_info_popup(
             "Language saved",
             f"UI language set to {LANGUAGE_NAMES.get(chosen, chosen)} ({chosen}).\n\n"
+            f"Restart TEPY for the change to take effect.")
+
+    # ------------------------------------------------------------------
+    def _on_motif_clicked(self):
+        """Action-button callback: show a Tk dropdown for motif/theme.
+
+        Phase 1 implementation -- a quick-and-dirty Combobox
+        listing every preset in `motif.PRESETS`.  Save persists
+        the choice to `tankExporterPy.json` under `motif`; restart
+        applies it (button accent geometry colours pick the new
+        motif at next `_build_ui`; existing baked text textures
+        keep their old tint until then).
+
+        Phase 2 will replace this with an in-app draggable
+        scrolling preview that shows the c1 / c2 / c3 / bg
+        swatches per preset and a free-form colour picker for
+        the bg override.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            self.log_error("Motif picker: tkinter not available.")
+            return
+
+        cur_name = _motif.get_active_name()
+
+        root = tk.Tk()
+        root.title("TEPY -- Motif")
+        try:
+            root.attributes('-topmost', True)
+        except Exception:
+            pass
+        root.geometry("+400+250")
+        root.resizable(False, False)
+
+        frame = ttk.Frame(root, padding=12)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="Choose UI motif:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text=f"Current: {cur_name}",
+                  foreground='gray').pack(anchor='w', pady=(0, 8))
+
+        choice_var = tk.StringVar(value=cur_name)
+        combo = ttk.Combobox(frame, values=list(_motif.PRESET_NAMES),
+                             state='readonly', textvariable=choice_var,
+                             width=28)
+        combo.pack(fill='x', pady=(0, 8))
+
+        ttk.Label(frame, text="Takes effect on next launch.",
+                  foreground='gray').pack(anchor='w')
+
+        result = {'name': None}
+
+        def _ok():
+            result['name'] = choice_var.get()
+            root.destroy()
+
+        def _cancel():
+            root.destroy()
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill='x', pady=(8, 0))
+        ttk.Button(button_row, text='Save',   command=_ok).pack(side='right')
+        ttk.Button(button_row, text='Cancel', command=_cancel).pack(side='right',
+                                                                    padx=(0, 6))
+
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        root.mainloop()
+
+        chosen = result['name']
+        if chosen is None or chosen == cur_name:
+            return
+
+        self._cfg['motif'] = chosen
+        try:
+            _config.save(self._cfg)
+        except Exception as exc:
+            self.log_error(f"Motif: config save failed: {exc}")
+            return
+        self.log(f"Motif set to {chosen!r} -- restart TEPY to apply.")
+        self._show_info_popup(
+            "Motif saved",
+            f"UI motif set to '{chosen}'.\n\n"
             f"Restart TEPY for the change to take effect.")
 
     # ------------------------------------------------------------------
@@ -5744,6 +5862,7 @@ class Viewer:
                 [_('Export'), _('Import')],
                 (_('Save Prim'), 0, 3),
                 (_('Language'),  0, 3),
+                (_('Motif'),     0, 3),
             ]),
             (_('Tools'), [
                 (_('ItemList'),  0, 3),

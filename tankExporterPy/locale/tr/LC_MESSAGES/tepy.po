@@ -58,6 +58,9 @@ msgstr "Karşılaş."
 msgid "Language"
 msgstr "Dil"
 
+msgid "Motif"
+msgstr "Tema"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "Yollar"

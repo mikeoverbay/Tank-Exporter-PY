@@ -58,6 +58,9 @@ msgstr "比較"
 msgid "Language"
 msgstr "語言"
 
+msgid "Motif"
+msgstr "主題"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "設定路徑"

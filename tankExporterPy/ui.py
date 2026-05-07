@@ -37,6 +37,26 @@ from OpenGL.GL import *
 from .shaders import UIShader
 
 
+# ===========================================================================
+# Global font scale.  Multiplies every font point size we hand to
+# pygame.font.SysFont throughout the UI module.  1.0 = original
+# sizes; 1.1 = the user-requested 10% upsize.  Pickup is at every
+# `_scaled_font(...)` call; no widget heights / paddings change so
+# extreme values may overflow the existing layout.  Tweak via the
+# config key `font_scale` if a tester wants 1.0 / 1.2 / etc.
+FONT_SCALE = 1.1
+
+
+def _scaled_pt(size):
+    """Apply FONT_SCALE to a nominal point size, return int >= 1."""
+    return max(1, int(round(size * FONT_SCALE)))
+
+
+def _scaled_font(family, size, bold=False):
+    """Convenience wrapper: pygame.font.SysFont with FONT_SCALE applied."""
+    return pygame.font.SysFont(family, _scaled_pt(size), bold=bold)
+
+
 # ============================================================================
 # UIButton
 # ============================================================================
@@ -1528,7 +1548,17 @@ class UIConsole:
         """
         if text is None:
             return
-        col = color if color is not None else (220, 222, 230)
+        # Default text colour comes from the active motif's c3
+        # (the "text-on-dark" accent -- wheat in the TEPY default
+        # palette, themed differently per preset).  motif.c3()
+        # returns 0..1 floats; the line buffer historically stores
+        # 0..255 ints, so we scale on the way through.
+        if color is not None:
+            col = color
+        else:
+            from . import motif as _m
+            r, g, b, _a = _m.c3()
+            col = (int(r * 255), int(g * 255), int(b * 255))
         for piece in str(text).split('\n'):
             self._lines.append((piece, col, bg_color))
             self._line_tex.append(None)   # built on next render
@@ -1754,7 +1784,7 @@ class UIConsole:
             if self._chev_tex:
                 try: glDeleteTextures(1, [self._chev_tex])
                 except Exception: pass
-            big_font = pygame.font.SysFont('Segoe UI', 16, bold=True)
+            big_font = _scaled_font('Segoe UI', 16, bold=True)
             surf = big_font.render(chev, True, (220, 220, 230))
             data = pygame.image.tostring(surf, 'RGBA', False)
             w, h = surf.get_width(), surf.get_height()
@@ -1935,7 +1965,7 @@ class UIManager:
         # panels.  The font name falls back to plain Calibri if the
         # Bold cut isn't installed (very rare on Windows -- it ships
         # with the OS).
-        self.font       = pygame.font.SysFont('Calibri', 13, bold=True)
+        self.font       = _scaled_font('Calibri', 13, bold=True)
         self._active_slider = None
 
         # Side panels + modal dialogs (created on demand by Viewer)
@@ -2041,7 +2071,7 @@ class UIManager:
         Returns:
             (tid, w, h) -- texture id and pixel dimensions.
         """
-        font = pygame.font.SysFont(font_name, size, bold=False)
+        font = _scaled_font(font_name, size, bold=False)
         surf = font.render(glyph, True, color)
         data = pygame.image.tostring(surf, 'RGBA', False)
         w, h = surf.get_width(), surf.get_height()
@@ -2468,7 +2498,7 @@ class UIManager:
             glDeleteTextures(1, [self._chevron_tex])
         # Wingdings at 18pt -- the symbol font expects a slightly
         # larger size than the prose-text Segoe UI it replaced.
-        big = pygame.font.SysFont('Wingdings', 18, bold=False)
+        big = _scaled_font('Wingdings', 18, bold=False)
         surf = big.render(glyph, True, (220, 220, 230))
         data = pygame.image.tostring(surf, 'RGBA', False)
         w, h = surf.get_width(), surf.get_height()

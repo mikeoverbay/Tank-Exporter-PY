@@ -54,6 +54,16 @@ _DEFAULTS = {
                               # the 'Language' button in the IO section;
                               # takes effect on next launch.
     'info_panel_collapsed': False,  # remember the left-panel collapse state
+    # UI motif (theme).  String name from
+    # `tankExporterPy.motif.PRESET_NAMES` -- e.g. 'TEPY Default',
+    # 'Solarized Dark', 'Dracula', 'Nord'.  Empty / unknown ->
+    # falls back to the default.  See `motif.py` for the full
+    # preset list and per-colour definitions.
+    'motif':       'TEPY Default',
+    # Free-form background-colour override.  When set (RGBA tuple
+    # 0..1), beats the preset's own bg.  None / missing = use
+    # the preset's bg.  Set via the in-app colour picker.
+    'motif_bg':    None,
     'light_value':   0.10,  # Light slider (direct sun brightness)
     'ambient_value': 0.50,  # Ambient slider (flat ambient fill)
     # Per-engine-class smoke / fire settings.  Filled in by the

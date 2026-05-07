@@ -9,6 +9,81 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Phase 1: motif system + curated presets + 110% font scale (1.63.0)
+
+Foundation for the upcoming theme work.  Three named accent
+colours + a free-form background drive the entire UI palette:
+
+* **`motif.c1`** -- primary / warm accent.  Used by Export,
+  Save Prim, the Model-tool buttons.
+* **`motif.c2`** -- secondary / cool accent.  Used by Import
+  and the UI display toggles.
+* **`motif.c3`** -- text-on-dark accent.  Console pane lines
+  default to this colour.
+* **`motif.bg`** -- form / clear-colour.  Free-form via the
+  upcoming colour picker.
+
+Ten curated presets sourced from popular IDE / editor schemes:
+
+```
+TEPY Default   (the original burnt-orange / olive / wheat)
+Solarized Dark
+Dracula
+Nord
+Gruvbox Dark
+Tokyo Night
+Monokai
+Catppuccin Mocha
+One Dark
+Material Dark
+```
+
+Wiring:
+
+* `Viewer.__init__` calls `motif.set_active(...)` from the
+  persisted `motif` key in `tankExporterPy.json` BEFORE any
+  widget gets built.
+* `glClearColor(*motif.bg())` replaces the hardcoded clear
+  colour.
+* Every `accent_color` assignment in `_build_ui` now reads
+  `motif.c1()` / `motif.c2()` instead of a literal RGBA.
+* `UIConsole.add_line` defaults its text colour to `motif.c3()`
+  instead of the hardcoded `(220, 222, 230)` light grey.
+
+UI:
+
+* New **`Motif`** button in the IO group.  Tk dropdown picker
+  listing every preset; persists to config as `motif`;
+  restart-to-apply (next `_build_ui` reads the new colours).
+  Translated for all 21 languages (`Motiv` / `Тема` / `テーマ`
+  / `主题` / etc.).
+
+Font scaling:
+
+* Module-level **`FONT_SCALE = 1.1`** in `ui.py` with helper
+  `_scaled_font(family, size, bold)` -- every `pygame.font.SysFont`
+  call site inside `ui.py` routes through it.  10% upsize on
+  the button labels, slider labels, value text, the spine
+  chevron, the icon glyphs.  Widget heights unchanged so a
+  larger scale than ~1.15 may overflow -- tweak `FONT_SCALE`
+  if a tester pushes for bigger / smaller.
+
+Phase 2-5 (deferred):
+
+* In-app draggable scrolling motif picker with c1 / c2 / c3
+  swatch previews per preset (replaces the Tk dropdown).
+* Free-form bg colour picker.
+* Mid-session texture rebuild so motif changes apply without
+  a restart.
+* General "drag any popup" infrastructure across both Tk
+  dialogs and in-app pygame dialogs.
+
+Files: new `tankExporterPy/motif.py`; edits to
+`tankExporterPy/viewer.py`, `tankExporterPy/ui.py`,
+`tankExporterPy/config.py`,
+`tankExporterPy/locale/*/LC_MESSAGES/tepy.{po,mo}` (all 21),
+`cust_tools/seed_locale_translations.py`.
+
 ### Spine icon: Wingdings 't'/'u' (Segoe UI tofu fix) (1.62.2)
 
 Tester reported the spine glyph rendering as a tofu rectangle.

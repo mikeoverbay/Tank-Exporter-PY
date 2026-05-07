@@ -58,6 +58,9 @@ msgstr "Össz."
 msgid "Language"
 msgstr "Nyelv"
 
+msgid "Motif"
+msgstr "Motívum"
+
 # ---- IO-section buttons ------------------------------------------------
 msgid "Set Paths"
 msgstr "Útvonalak"
