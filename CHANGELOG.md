@@ -9,6 +9,23 @@ available at the time this file was written).
 
 ## 2026-05-06
 
+### Left-spine icon: solid filled triangles (matching console) (1.61.1)
+
+`UIManager._ensure_chevron` rendered the info-panel spine glyph
+as `<` / `>` (ASCII line characters).  v1.56.1 had already
+upgraded the bottom-console chevron to solid triangles
+(`▲` / `▼`).  The two toggles now read as a coherent family:
+
+| Toggle | Expanded | Collapsed | Glyph type |
+| --- | --- | --- | --- |
+| Info panel spine | `◀` | `▶` | solid filled triangles |
+| Bottom console   | `▼` | `▲` | solid filled triangles |
+
+Direction logic unchanged -- arrow points where the click sends
+the panel.
+
+Files: `tankExporterPy/ui.py`.
+
 ### Split UI section: UI toggles (olive) + Model tools (orange) (1.61.0)
 
 The single `UI` section in the left panel mixed display

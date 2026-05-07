@@ -2377,8 +2377,18 @@ class UIManager:
         return (x <= mx < x + w) and (y <= my < y + h)
 
     def _ensure_chevron(self):
-        """Build (or rebuild) the chevron texture for the current state."""
-        glyph = '>' if self.info_collapsed else '<'
+        """Build (or rebuild) the chevron texture for the current state.
+
+        Solid filled triangles -- '◀' (BLACK LEFT-POINTING) when
+        expanded so the user sees an arrow pointing left ("click to
+        collapse leftward"), '▶' (BLACK RIGHT-POINTING) when
+        collapsed so the arrow points right ("click to expand").
+        Same Unicode-triangle treatment as the bottom-console
+        chevron (▲ / ▼) -- both spine and console read as
+        a coherent solid-arrow family rather than the old mix of
+        line glyphs (`<`, `>`) and ASCII (`+`, `-`).
+        """
+        glyph = '▶' if self.info_collapsed else '◀'
         if glyph == self._chevron_glyph and self._chevron_tex is not None:
             return
         if self._chevron_tex is not None:
