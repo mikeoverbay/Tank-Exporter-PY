@@ -18,6 +18,7 @@ Classes:
 """
 
 import ctypes
+import math
 import os
 import re
 import shutil
@@ -643,6 +644,11 @@ class Viewer:
         # held, the crosshair is hidden so it doesn't clutter the
         # normal viewing scene.
         self.lookat_lines = LineBatch(line_width=1.5)
+        # Tank-physics debug overlay: per-wheel ground contacts +
+        # target wheel-centre markers + yellow suspension lines.
+        # Painted only when both Debug checkbox + tank physics
+        # active so a normal viewing session isn't cluttered.
+        self.physics_lines = LineBatch(line_width=1.5)
         # Flag set by `handle_input` each tick; checked by
         # `render` to decide whether to draw the crosshair.  Lives
         # on `self` (not a render-time recheck) so we can capture
@@ -926,6 +932,19 @@ class Viewer:
         # there's no startup cost when the feature isn't in use.
         from .picker import TrianglePicker
         self.picker = TrianglePicker()
+
+        # Tank-on-terrain physics.  When the Terrain toggle is on
+        # AND a tank is loaded, this samples per-wheel terrain Y
+        # each frame and produces a chassis pose (translate + tilt)
+        # that places the tank visually on the ground.  Hardcoded
+        # to T110E4 wheel geometry for now; tank physics enabled
+        # unconditionally when terrain is up so the tank doesn't
+        # float over the sand.  Toggleable in code via
+        # `self.tank_physics_enabled = False` if you want the old
+        # "tank centred at world origin" behaviour back.
+        from .tank_physics import TankPhysics
+        self.tank_physics         = TankPhysics.for_t110e4()
+        self.tank_physics_enabled = True
 
         # Toggleable display flags
         self.show_grid    = False
@@ -7927,6 +7946,40 @@ class Viewer:
         shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
         self._show_lookat_lines = bool(shift_held or btns[1])
 
+        # Tank-driving keys: arrow keys move the tank around the
+        # terrain (XZ only -- physics handles Y / pitch / roll).
+        # Useful for watching the suspension respond to the heightmap
+        # in real time.  Speed scales with frame dt so movement feels
+        # uniform regardless of FPS.  Q / E rotate the chassis yaw.
+        if (self.tank_physics_enabled and self.tank_physics
+                and self.show_terrain and self.terrain):
+            keys = pygame.key.get_pressed()
+            dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
+            move_speed = 5.0   # m/s
+            yaw_speed  = 60.0  # deg/s
+            if keys[pygame.K_UP]:
+                # Move "forward" relative to current yaw.
+                yaw = math.radians(self.tank_physics.yaw_deg)
+                self.tank_physics.pos[0] += math.sin(yaw) * move_speed * dt
+                self.tank_physics.pos[2] += math.cos(yaw) * move_speed * dt
+            if keys[pygame.K_DOWN]:
+                yaw = math.radians(self.tank_physics.yaw_deg)
+                self.tank_physics.pos[0] -= math.sin(yaw) * move_speed * dt
+                self.tank_physics.pos[2] -= math.cos(yaw) * move_speed * dt
+            if keys[pygame.K_LEFT]:
+                # Strafe left.
+                yaw = math.radians(self.tank_physics.yaw_deg)
+                self.tank_physics.pos[0] -= math.cos(yaw) * move_speed * dt
+                self.tank_physics.pos[2] += math.sin(yaw) * move_speed * dt
+            if keys[pygame.K_RIGHT]:
+                yaw = math.radians(self.tank_physics.yaw_deg)
+                self.tank_physics.pos[0] += math.cos(yaw) * move_speed * dt
+                self.tank_physics.pos[2] -= math.sin(yaw) * move_speed * dt
+            if keys[pygame.K_q]:
+                self.tank_physics.yaw_deg -= yaw_speed * dt
+            if keys[pygame.K_e]:
+                self.tank_physics.yaw_deg += yaw_speed * dt
+
         if not self.ui.is_pointer_over_ui(*mouse_pos):
             dx = mouse_pos[0] - self.mouse_last[0]
             dy = mouse_pos[1] - self.mouse_last[1]
@@ -8058,6 +8111,46 @@ class Viewer:
         view = self.camera.get_view_matrix()
         proj = self.camera.get_projection_matrix()
 
+        # ---- Tank physics (per-wheel terrain conformance) ------------
+        # Runs BEFORE every per-mesh upload below so the picker FBO,
+        # the main mesh pass, the wireframe overlay, and the normals
+        # debug pass all use the post-physics model_matrix.
+        #
+        # Recipe: the FIRST frame after each tank load, save each
+        # mesh's load-time `model_matrix` to `bind_model_matrix`
+        # (the bone-baked rest pose).  Every subsequent frame,
+        # rebuild `model_matrix = chassis_pose @ bind_model_matrix`
+        # so the chassis pose layers on top of the per-component
+        # offsets WITHOUT mutating the rest pose.
+        #
+        # Disabled paths:
+        #   * Terrain off                  -> chassis pose = identity.
+        #   * No tank loaded               -> nothing to apply.
+        #   * `tank_physics_enabled` False -> identity (debug knob).
+        if (self.tank_physics_enabled and self.meshes
+                and self.show_terrain and self.terrain
+                and self.tank_physics is not None):
+            # Save each mesh's load-time matrix once per load.
+            for m in self.meshes:
+                if not hasattr(m, 'bind_model_matrix'):
+                    m.bind_model_matrix = np.array(
+                        m.model_matrix, dtype=np.float32, copy=True)
+            # Tick the physics with the frame delta tracked in run().
+            # Clamp to a reasonable minimum so a paused / single-step
+            # frame doesn't make the physics solver jitter.
+            dt = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
+            chassis_pose = self.tank_physics.update(self.terrain, dt)
+            # Apply chassis pose to every sub-mesh.
+            for m in self.meshes:
+                m.model_matrix = (chassis_pose
+                                   @ m.bind_model_matrix).astype(np.float32)
+        else:
+            # Restore bind pose if we ever applied physics earlier
+            # in this load (e.g. terrain toggled off mid-session).
+            for m in self.meshes:
+                if hasattr(m, 'bind_model_matrix'):
+                    m.model_matrix = m.bind_model_matrix.copy()
+
         # ---- Triangle picker (off-screen colour-pick) ----------------
         # When the Pick Tri tool is on, render the tank into a hidden
         # FBO with the picking shader and read back the pixel under
@@ -8132,6 +8225,41 @@ class Viewer:
                 ((cx, cy_, cz - H), (cx, cy_, cz + H), PINK),  # Z
             ])
             self.lookat_lines.render(self.color_shader, view, proj)
+
+        # Tank physics overlay: per-wheel ground / wheel-centre dots
+        # connected by yellow suspension lines.  Drawn behind the
+        # main mesh pass via the shared "no depth test" pass below
+        # so the markers are always visible.  Gated by Debug
+        # checkbox + physics-enabled + at least one wheel sampled.
+        if (self.tank_physics_enabled and self.tank_physics is not None
+                and self._debug and self.meshes
+                and self.show_terrain and self.terrain
+                and len(self.tank_physics.last_wheel_world)):
+            tp     = self.tank_physics
+            PINK   = (1.0, 0.55, 0.75)   # ground-contact dots
+            CYAN   = (0.50, 0.95, 0.95)  # target wheel-centre dots
+            YELLOW = (1.0, 0.95, 0.30)
+            DOT_R  = 0.06   # 6 cm marker radius -- visible at any zoom
+            segs = []
+            for i, (wx, _wy, wz) in enumerate(tp.last_wheel_world):
+                ty = float(tp.last_terrain_y[i])
+                wc = float(tp.last_target_y[i])   # wheel CENTRE Y target
+                # Pink "X" at ground contact.
+                segs.append(((wx - DOT_R, ty, wz),
+                             (wx + DOT_R, ty, wz), PINK))
+                segs.append(((wx, ty, wz - DOT_R),
+                             (wx, ty, wz + DOT_R), PINK))
+                # Cyan "X" at the wheel-centre target.
+                segs.append(((wx - DOT_R, wc, wz),
+                             (wx + DOT_R, wc, wz), CYAN))
+                segs.append(((wx, wc, wz - DOT_R),
+                             (wx, wc, wz + DOT_R), CYAN))
+                # Yellow line from contact -> wheel centre = the
+                # suspension shaft for that wheel.
+                segs.append(((wx, ty, wz),
+                             (wx, wc, wz), YELLOW))
+            self.physics_lines.update(segs)
+            self.physics_lines.render(self.color_shader, view, proj)
 
         glEnable(GL_DEPTH_TEST)
 
@@ -8933,6 +9061,7 @@ class Viewer:
         self.hp_lines.cleanup()
         self.fire_outlines.cleanup()
         self.lookat_lines.cleanup()
+        self.physics_lines.cleanup()
         if self.smoke_particles is not None:
             self.smoke_particles.cleanup()
         if self.fire_smoke_particles is not None:

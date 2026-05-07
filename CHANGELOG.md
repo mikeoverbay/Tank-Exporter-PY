@@ -9,6 +9,66 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Tank-on-terrain physics, rigid-body conformance (1.80.0)
+
+The first slice of "tank rides the terrain" -- a per-wheel
+ground-collision + plane-fit solver that pitches / rolls /
+translates the loaded tank so its wheels visually rest on the
+sand-detail-displaced heightmap.  Drives the user input arrow
+keys / Q / E so you can drive the tank around the world and
+watch the suspension respond.
+
+What it does
+* Per frame, samples `terrain.sample_heights` at every wheel's
+  world-XZ (12 wheels, vectorised) and computes target wheel-
+  centre Y as `terrain_y + group_radius`.
+* Determines support: a wheel is supported if its required
+  suspension delta lies within the gameplay XML envelope
+  (`<groundNodes>` minOffset / maxOffset).  Out-of-envelope
+  wheels are noted but don't pull the plane fit.
+* Fits a least-squares plane through the supported wheels'
+  targets -> chassis pitch + roll.  Sets chassis Y so the
+  average supported wheel sits at its target.
+* Falling: when the kinematic target is far below current
+  pose (more than the suspension travel range -- e.g. tank
+  driven off a cliff edge), integrates gravity * dt vertical
+  velocity until at least one wheel catches.
+
+What it does NOT do (yet)
+* Per-vertex track sag.  The tank moves as a rigid body --
+  individual track segments don't sag per-wheel.  That needs
+  a real skinning shader pipeline (the next bone-tools arc).
+* Wheel rotation around its own axis (track scroll / wheel spin
+  during travel).  Static visuals for now.
+* Lateral / longitudinal friction, slope-induced sliding.
+  This is a kinematic positioner -- "tank reads as on the
+  terrain", not a full vehicle dynamics sim.
+
+Wheel rig data is hardcoded for T110E4 right now (the wheel
+positions, radius, suspension envelope).  Other tanks will load
+and use the same rig parameters -- visually plausible but not
+calibrated.  A future pass should auto-extract this from the
+loaded chassis primitives + gameplay XML so the physics is
+correct for any tank.
+
+Files
+* `tankExporterPy/tank_physics.py` -- new module with the
+  `TankPhysics` class + plane-fit math + matrix helpers.  A
+  `for_t110e4()` factory pre-loads the right rig parameters.
+* `tankExporterPy/viewer.py` -- physics tick wired into
+  `render()` immediately after camera matrices, with the
+  `chassis_pose @ bind_model_matrix` composition applied
+  before any per-mesh draw.  Bind-pose preserved on first
+  frame after each load so toggling terrain on/off bounces
+  cleanly.
+
+Controls (terrain on, tank loaded):
+* Arrow keys -- drive tank XZ along its current heading.
+* Q / E      -- yaw the chassis.
+* Debug checkbox -- shows the per-wheel overlay: pink dots
+  at ground contact, cyan at target wheel centre, yellow
+  suspension shaft connecting them.
+
 ### dump_track_skinning auto-resolves geom names + `--part chass` (1.79.1)
 
 Generalised the dumper so it works across the WoT chassis
