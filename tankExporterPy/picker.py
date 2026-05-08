@@ -364,6 +364,14 @@ class TrianglePicker:
                 continue
             if mesh.vao is None:
                 continue
+            # Skip rubber-band track ribbon -- matches the viewer's
+            # main draw pass which has it gated off (see
+            # ARCHITECTURE.md "Track physics roadmap").  Without this
+            # the picker would report hits on triangles the user
+            # cannot see.
+            _mn = getattr(mesh, 'name', '') or ''
+            if _mn.startswith('track_') and 'Shape' in _mn:
+                continue
             # Match the main render's culling convention so the
             # picker sees the same surface the user does.
             if getattr(mesh, 'double_sided', False):

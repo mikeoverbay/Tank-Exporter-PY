@@ -444,22 +444,38 @@ regardless of the checkbox.
 
 ### Camera & keys
 
-| Input                  | Action                                            |
-| ---------------------- | ------------------------------------------------- |
-| Right-click drag       | Orbit                                             |
-| Middle-click drag      | Pan on the XZ ground plane                        |
-| `Shift` + drag         | Lift / drop the look-at point on the world Y axis (drag DOWN raises, drag UP lowers).  Suspends orbit/pan while held. |
-| Scroll                 | Zoom (or scroll the tree when cursor is over it)  |
-| `W`                    | Toggle wireframe                                  |
-| `N`                    | Toggle normal map                                 |
-| `R`                    | Reset camera                                      |
-| `F11`                  | Toggle maximized ↔ windowed                       |
-| `ESC`                  | Quit                                              |
+Mouse drag is **mode-aware** — left-drag means different things in
+different camera modes (cycle with `C`):
 
-While `Shift` is held OR the middle mouse button is held, a
-**pale-pink crosshair** (10 units total per axis: X / Y / Z)
-draws at the look-at point so the camera pivot is always
-visible during a move.  Hidden otherwise.
+| Mode | Left-drag | Right-drag | Wheel |
+|------|-----------|-----------|-------|
+| 0 (orbit / free cam)        | Orbit world camera | Pan on XZ ground plane | Zoom |
+| 1 (chase, default)          | Orbit chase angle in chassis-local frame (camera tracks the tank's yaw — kid-out-the-window behavior) | Pan look-at | Zoom (chassis-local distance) |
+| 2 (commander, in the seat)  | Rotate the head left/right + up/down in chassis-local space (look around the tank's interior) | Pan look-at | (no zoom — fixed seat) |
+
+| Input                       | Action                                            |
+| --------------------------- | ------------------------------------------------- |
+| `C`                         | Cycle camera mode (orbit → chase → commander → orbit).  Default at startup AND on every tank load = chase. |
+| `R`                         | Reset camera (orbit defaults; goes back to mode-0 view next time you cycle there) |
+| Middle-click hold           | Show look-at crosshair (also fires automatically on right-drag) |
+| `Shift` + middle-click drag | Lift / drop the look-at point on the world Y axis (drag DOWN raises, drag UP lowers) |
+| `F2`                        | Toggle wireframe overlay                          |
+| `N`                         | Toggle normal map                                 |
+| `W` `S`                     | Drive forward (hold)                              |
+| `Z` `X`                     | Drive backward (hold)                             |
+| `A` `Q`                     | Yaw left                                          |
+| `D` `E`                     | Yaw right                                         |
+| `0` – `9`                   | Speed step (0 = stopped, 1 = top speed, 9 = creep) |
+| `O`                         | Toggle auto-circle drive                          |
+| `F11`                       | Toggle maximized ↔ windowed                       |
+| `ESC`                       | Quit                                              |
+
+A **pale-pink crosshair** (10 units total per axis: X / Y / Z)
+draws at the look-at point during right-button-drag (pan) and
+middle-button-hold (Y-lift), so the camera pivot is always visible
+during a move.  Hidden otherwise.  Depth-tested — when the look-
+at point sits inside geometry, only the parts that emerge to the
+surface are visible.
 
 When the cursor enters the TEPY window, focus is automatically
 transferred so the next click registers as a UI action --

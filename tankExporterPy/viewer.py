@@ -1003,13 +1003,46 @@ class Viewer:
         # 0 = orbit (default trackball, mouse-driven, free-fly)
         # 1 = driver-side chase camera (anchored behind + above + driver
         #     side of the chassis, rotates with chassis_pose so it
-        #     follows pitch / roll / yaw)
+        #     follows pitch / roll / yaw) -- DEFAULT at startup + load
         # 2 = commander view (anchored at the centre of the hull
         #     above the chassis, looking forward along the tank's
         #     visible-front axis; turret + gun meshes are hidden in
         #     this mode so the commander has a clear view-out)
-        self.camera_mode    = 0
+        #
+        # `camera_mode` is NOT persisted and is touched by EXACTLY
+        # TWO sites (per 2026-05-08 user rule):
+        #   * `load_vehicle` (the tank-tree pick path)  -> reset to 1
+        #   * the `C` key handler in handle_input       -> cycle (mod 3)
+        # The assignment below is the ctor's once-only initial value;
+        # the runtime never touches camera_mode anywhere else.
+        self.camera_mode    = 1
         self._N_CAMERA_MODES = 3
+
+        # Commander head rotation (mode 2 only).  Driven by LEFT-drag
+        # while in commander seat -- rotates the look-direction within
+        # CHASSIS-LOCAL space, so "looking left" stays left-of-tank as
+        # the tank turns (the chassis yaw is applied on top via the
+        # chassis_matrix multiplication in _anchored_view_matrix).
+        # Reset to 0 / 0 (looking straight forward, level) on every
+        # entry into commander mode -- see the C key handler.
+        self._head_yaw_deg   = 0.0    # +ve = look right of forward
+        self._head_pitch_deg = 0.0    # +ve = look up
+
+        # Chase orbit state (mode 1 only).  Same idea as the commander
+        # head rotation: stored in CHASSIS-LOCAL space so the chase
+        # camera tracks the chassis yaw automatically -- if the user
+        # drags to look at the tank's right side, that orientation
+        # PERSISTS through tank turns (eye stays right-of-tank no
+        # matter how the tank yaws in world space).
+        #
+        #   _chase_yaw_deg = 0  -> eye directly BEHIND the tank
+        #                          (behind = +Z chassis-local, since
+        #                          tank front = -Z chassis-local)
+        #   _chase_pitch_deg    -> elevation above the chassis Y plane
+        #   _chase_distance     -> zoom
+        self._chase_yaw_deg   = 0.0
+        self._chase_pitch_deg = 25.0
+        self._chase_distance  = 6.0
 
         # ---- Auto circle-drive (`O` toggles) ---------------------------
         # When True, the tank ignores the arrow keys and instead
@@ -4041,31 +4074,83 @@ class Viewer:
         # of the tank lives at chassis-local -Z (the user's repeated
         # convention).  +X is right, -X left.
         if self.camera_mode == 1:
-            # Driver-side chase (free camera, locked look-at).  The
-            # CAMERA position uses the orbit camera's mouse-driven
-            # state -- user can pan / orbit / zoom freely.  The
-            # LOOK-AT point gets pinned to the driver's seat in
-            # chassis-local space and transformed by chassis_pose
-            # each frame, so the camera always faces the driver
-            # side of the tank no matter where the orbit puts the
-            # eye.
+            # Chassis-locked chase camera.  Both the eye AND the
+            # look-at are computed in chassis-local space, then
+            # transformed by chassis_matrix to world.  Because the
+            # eye offset is relative to the chassis frame (NOT the
+            # world frame), the camera tracks the tank's yaw
+            # automatically -- "looking at the tank's right side"
+            # stays right-of-tank as the tank turns.  Same
+            # "child-out-the-window" rotation behavior we use for
+            # the commander seat.  User request 2026-05-08.
             #
             # Driver-position chassis-local: +X side (right; US
             # tanks like T110E4 put the driver on the right hull),
-            # near front (Z = -2.0 in our visible-front-is--Z
-            # convention), at hatch height (+0.6 Y).  Tunable
-            # per-tank if the position feels off.
-            driver_local = np.array([+0.7, +0.6, -2.0, 1.0],
+            # near front (Z = -2.0), at hatch height (+0.6 Y).
+            driver_local = np.array([+0.7, +0.6, -2.0],
                                      dtype=np.float64)
-            driver_world = (chassis @ driver_local)[:3]
-            self.camera.center = driver_world.astype(np.float32)
-            return self.camera.get_view_matrix()
+            # Orbit-style offset around the driver in chassis-local
+            # frame.  Same convention as scene.Camera:
+            #   yaw = 0 -> eye on +Z side of center (= BEHIND the
+            #              tank, since tank front = -Z chassis-local)
+            #   pitch>0 -> eye lifted above the XZ plane
+            #   distance -> radial zoom
+            cy_ = math.cos(math.radians(self._chase_yaw_deg))
+            sy_ = math.sin(math.radians(self._chase_yaw_deg))
+            cp_ = math.cos(math.radians(self._chase_pitch_deg))
+            sp_ = math.sin(math.radians(self._chase_pitch_deg))
+            d   = float(self._chase_distance)
+            eye_local_xyz = driver_local + np.array(
+                [d * cp_ * sy_, d * sp_, d * cp_ * cy_],
+                dtype=np.float64)
+            eye_local    = np.array(
+                [eye_local_xyz[0], eye_local_xyz[1],
+                 eye_local_xyz[2], 1.0], dtype=np.float64)
+            target_local = np.array(
+                [driver_local[0], driver_local[1],
+                 driver_local[2], 1.0], dtype=np.float64)
+            # Mirror the chase eye world-position into self.camera
+            # so any consumer that reads self.camera.center / etc.
+            # (debug overlays, etc.) gets a sensible value.
+            target_world_pos = (chassis @ target_local)[:3]
+            self.camera.center = target_world_pos.astype(np.float32)
         else:
             # Commander POV: centre of hull, head height above the
-            # chassis floor.  Looking forward means the look-at point
-            # is way out at chassis-local -Z.
-            eye_local    = np.array([+0.0, +1.95, +0.0, 1.0], dtype=np.float64)
-            target_local = np.array([+0.0, +1.95, -10.0, 1.0], dtype=np.float64)
+            # chassis floor.  The head can rotate via LEFT-drag (see
+            # `handle_input` commander branch); `_head_yaw_deg` and
+            # `_head_pitch_deg` carry the head orientation IN
+            # CHASSIS-LOCAL space -- so "looking left" stays
+            # left-of-tank when the tank yaws, exactly the
+            # "child looking out a side window" behavior.
+            #
+            # Forward direction at zero head rotation is chassis-
+            # local -Z (visible-front-of-tank convention).  Apply
+            # head yaw around chassis-local +Y, then head pitch
+            # around chassis-local +X, to that forward vector.
+            head_yaw   = math.radians(self._head_yaw_deg)
+            head_pitch = math.radians(self._head_pitch_deg)
+            cy_, sy_ = math.cos(head_yaw),   math.sin(head_yaw)
+            cp_, sp_ = math.cos(head_pitch), math.sin(head_pitch)
+            # Forward = -Z, then yaw (around Y) -> tilts in XZ:
+            #   (sin(yaw), 0, -cos(yaw))
+            # Then pitch (around X) -> tilts in YZ:
+            #   X stays, Y = sin(pitch) * (-cos(yaw_part... hmm))
+            # Simplest: build forward = R_yaw * R_pitch * (0, 0, -1).
+            # R_pitch * (0, 0, -1) = (0, sin(pitch) * 1, -cos(pitch))
+            #   wait, R_pitch around X: (x, y*cp - z*sp, y*sp + z*cp)
+            #   so (0, 0, -1) -> (0, -(-1)*sp, -1*cp) = (0, sp, -cp)
+            # R_yaw around Y on (0, sp, -cp):
+            #   (x*cy - (-1)*sy * ..., wait around Y: (x*cy + z*sy, y, -x*sy + z*cy))
+            #   (0*cy + (-cp)*sy, sp, -0*sy + (-cp)*cy)
+            #   = (-cp*sy, sp, -cp*cy)
+            fwd = np.array([-cp_ * sy_, sp_, -cp_ * cy_], dtype=np.float64)
+            eye_local    = np.array([+0.0, +1.95, +0.0, 1.0],
+                                    dtype=np.float64)
+            target_local = np.array([
+                eye_local[0] + 10.0 * fwd[0],
+                eye_local[1] + 10.0 * fwd[1],
+                eye_local[2] + 10.0 * fwd[2],
+                1.0], dtype=np.float64)
 
         eye    = (chassis @ eye_local)[:3]
         target = (chassis @ target_local)[:3]
@@ -7005,9 +7090,14 @@ class Viewer:
 
             # Fit camera and remember bbox for 'R' reset.  Only
             # fit-to-bounds on the FIRST load this session -- after
-            # that the camera state (orbit yaw / pitch / distance,
-            # plus camera_mode for chase / commander) sticks across
-            # tank reloads.  Press R for an explicit reset.
+            # that the orbit-camera state (yaw / pitch / distance)
+            # sticks across tank reloads.
+            #
+            # `camera_mode` is intentionally NOT touched here.  Per
+            # 2026-05-08 user request, only `load_vehicle` (the tank-
+            # tree pick path) and the C-key cycle handler may write
+            # to it -- this single-file FBX/GLB import path leaves
+            # the current mode alone.
             all_pos  = np.concatenate(all_positions, axis=0)
             bbox_min = np.min(all_pos, axis=0)
             bbox_max = np.max(all_pos, axis=0)
@@ -7281,7 +7371,26 @@ class Viewer:
                      turret_tag=None, gun_tag=None,
                      status_callback=None,
                      prefer_res_mods=True):
-        """Load a complete tank from a WoT vehicle XML definition file.
+        """Load a complete tank from a WoT vehicle XML definition file."""
+        # Reset camera mode to 1 (chase) on every tank load -- so a
+        # session that ended in commander view doesn't reopen with
+        # the turret hidden.  Press C to cycle to chase / commander
+        # again.  (Was previously only being reset in load_mesh,
+        # which is the single-file FBX/GLB import path -- not this
+        # one, the tank-tree pick path.)
+        self.camera_mode = 1
+        return self._load_vehicle_impl(
+            xml_path, damaged=damaged, skin=skin,
+            chassis_tag=chassis_tag, turret_tag=turret_tag,
+            gun_tag=gun_tag, status_callback=status_callback,
+            prefer_res_mods=prefer_res_mods)
+
+    def _load_vehicle_impl(self, xml_path, damaged=False,
+                           skin=None, chassis_tag=None,
+                           turret_tag=None, gun_tag=None,
+                           status_callback=None,
+                           prefer_res_mods=True):
+        """Implementation body for `load_vehicle`.
 
         Picks the best (highest-price) turret and the top gun (last listed)
         by default; pass *_tag overrides to swap any component, and *skin*
@@ -8698,7 +8807,72 @@ class Viewer:
                              else (180, 180, 180))
                 elif event.key == K_c:
                     # Cycle camera mode: orbit -> chase -> commander -> orbit.
-                    self.camera_mode = (self.camera_mode + 1) % self._N_CAMERA_MODES
+                    #   0 (orbit / free cam) -> 1 (chase)
+                    #   1 (chase)            -> 2 (commander)
+                    #   2 (commander)        -> 0 (orbit)
+                    #
+                    # On the 2 -> 0 hop (commander -> free cam),
+                    # snapshot commander's CURRENT eye + look-at into
+                    # the orbit camera state.  Why: commander view is
+                    # locked to the chassis -- as the tank moves, the
+                    # commander-view eye moves with it.  Without this
+                    # save, free cam would yank back to a stale
+                    # pre-commander orbit pose, leaving the camera
+                    # somewhere the tank used to be.  By copying
+                    # commander's now-position into self.camera, free
+                    # cam picks up exactly where commander was looking
+                    # at the moment of the press.  User request
+                    # 2026-05-08.
+                    if (self.camera_mode == 2
+                            and self.tank_physics is not None):
+                        chassis = np.asarray(
+                            self.tank_physics.chassis_matrix(),
+                            dtype=np.float64)
+                        # Use the SAME eye + head-rotated target the
+                        # commander view is actually looking at -- so
+                        # free cam picks up at the current head
+                        # rotation, not the forward-locked default.
+                        # Mirror of _anchored_view_matrix's C2 branch.
+                        head_yaw   = math.radians(self._head_yaw_deg)
+                        head_pitch = math.radians(self._head_pitch_deg)
+                        cy_, sy_ = math.cos(head_yaw),   math.sin(head_yaw)
+                        cp_, sp_ = math.cos(head_pitch), math.sin(head_pitch)
+                        fwd = np.array(
+                            [-cp_ * sy_, sp_, -cp_ * cy_],
+                            dtype=np.float64)
+                        eye_local    = np.array(
+                            [0.0, 1.95, 0.0, 1.0], dtype=np.float64)
+                        target_local = np.array(
+                            [eye_local[0] + 10.0 * fwd[0],
+                             eye_local[1] + 10.0 * fwd[1],
+                             eye_local[2] + 10.0 * fwd[2],
+                             1.0], dtype=np.float64)
+                        eye_world    = (chassis @ eye_local)[:3]
+                        target_world = (chassis @ target_local)[:3]
+                        # offset points from look-at BACK to eye --
+                        # which is exactly the orbit camera's
+                        # eye-relative-to-center vector.
+                        offset = eye_world - target_world
+                        dist   = float(np.linalg.norm(offset))
+                        if dist > 1e-6:
+                            self.camera.center   = (
+                                target_world.astype(np.float32))
+                            self.camera.distance = max(0.5, dist)
+                            self.camera.yaw     = float(np.degrees(
+                                np.arctan2(offset[0], offset[2])))
+                            self.camera.pitch   = float(np.degrees(
+                                np.arctan2(
+                                    offset[1],
+                                    np.hypot(offset[0], offset[2]))))
+                    self.camera_mode = (
+                        self.camera_mode + 1) % self._N_CAMERA_MODES
+                    # Entering commander mode: reset head rotation to
+                    # straight-forward + level so the user always
+                    # starts the seat ride facing where the tank is
+                    # facing.  Mouse drag rotates from there.
+                    if self.camera_mode == 2:
+                        self._head_yaw_deg   = 0.0
+                        self._head_pitch_deg = 0.0
                     label = ('orbit', 'chase (driver side)',
                              'commander (turret POV)')[self.camera_mode]
                     self.log(f"camera: {label}",
@@ -8759,11 +8933,23 @@ class Viewer:
                 mx, my = pygame.mouse.get_pos()
                 if self.ui.handle_mouse_wheel(mx, my, event.y):
                     pass  # consumed by the tree
-                elif event.y > 0:
-                    # SDL2 / pygame 2: event.y > 0 = wheel forward = zoom in
-                    self.camera.distance *= 0.9
-                elif event.y < 0:
-                    self.camera.distance *= 1.1
+                else:
+                    # Mode-aware zoom: chase has its own
+                    # `_chase_distance` (chassis-local orbit radius);
+                    # commander is fixed-position and ignores wheel
+                    # zoom; orbit/free uses the standard
+                    # `self.camera.distance`.
+                    if event.y > 0:
+                        zoom = 0.9    # wheel forward -> zoom in
+                    elif event.y < 0:
+                        zoom = 1.1
+                    else:
+                        zoom = 1.0
+                    if self.camera_mode == 1:
+                        self._chase_distance = max(
+                            0.5, self._chase_distance * zoom)
+                    elif self.camera_mode != 2:
+                        self.camera.distance *= zoom
 
             elif event.type == MOUSEBUTTONDOWN:
                 mx, my = event.pos
@@ -8820,11 +9006,17 @@ class Viewer:
         # the cue.
         shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
         # Crosshair shows whenever the user is moving the look-at
-        # point: middle-mouse-button (XZ pan or, with Shift, Y
-        # lift).  Shift alone no longer triggers anything visible
-        # -- it's now a modifier on the middle-button drag, not a
-        # standalone mode.
-        self._show_lookat_lines = bool(btns[1])
+        # point.  After the 2026-05-08 mouse rebind:
+        #   RIGHT-button held  -> XZ pan  -> show crosshair
+        #   MIDDLE-button held -> Y-lift (with Shift) -> show crosshair
+        # Either chord turns it on so the user always sees where
+        # they're aiming during a pan / Y-lift.  Drawn with depth
+        # test ENABLED (see render() near `lookat_lines.render`)
+        # so the lines occlude correctly behind the tank / terrain
+        # -- the look-at point inside a piece of geometry only shows
+        # the parts of the cross that emerge to the surface, which
+        # reads as the natural "your aim is here" cue.
+        self._show_lookat_lines = bool(btns[1] or btns[2])
 
         # Tank-driving keys: arrow keys move the tank around the
         # terrain (XZ only -- physics handles Y / pitch / roll).
@@ -8959,17 +9151,34 @@ class Viewer:
                     color=(180, 220, 255))
                 self._drive_keys_seen = True
 
-        if not self.ui.is_pointer_over_ui(*mouse_pos):
+        # Block the camera path entirely while a UI slider is being
+        # dragged.  The slider's MOUSEMOTION+buttons[0] handler at
+        # line ~8806 fires regardless of whether the cursor wandered
+        # outside the panel mid-drag -- without this guard, dragging
+        # a slider off the panel would simultaneously update the
+        # slider AND orbit the camera (since LEFT-button now does
+        # both).
+        slider_active = self.ui._active_slider is not None
+        if (not self.ui.is_pointer_over_ui(*mouse_pos)
+                and not slider_active):
             dx = mouse_pos[0] - self.mouse_last[0]
             dy = mouse_pos[1] - self.mouse_last[1]
 
-            # Shift + MIDDLE-MOUSE -> lift / drop the look-at point
-            # on the world Y axis.  Shift alone no longer triggers
-            # anything (was previously a standalone Y-lift mode);
-            # now it's a modifier on the middle-button drag.  This
-            # prevents an accidental Shift held during keyboard
-            # typing from yanking the camera upward as the cursor
-            # moves.
+            # Mouse-button bindings (2026-05-08 user request):
+            #   LEFT   (btns[0]) -> orbit (yaw / pitch the camera)
+            #   RIGHT  (btns[2]) -> pan on the XZ ground plane
+            #   MIDDLE (btns[1]) -> show look-at crosshair; +Shift = Y-lift
+            #   WHEEL scroll      -> zoom (handled in MOUSEBUTTONDOWN above)
+            #
+            # The `is_pointer_over_ui` gate above means LEFT-click on a
+            # UI button / slider goes to the UI handler instead of orbit,
+            # so the rebind doesn't break panel interaction.  The
+            # `not slider_active` extra gate handles the case where the
+            # user drags a slider OUT of the panel mid-drag (still want
+            # the slider to win, not have orbit kick in).
+            #
+            # Shift + MIDDLE keeps Y-lift on its own dedicated chord so
+            # an accidental Shift during typing doesn't yank the camera.
             if shift_held and btns[1] and (dx or dy):
                 # Half the pan-XZ speed so the Y lift feels deliberate
                 # and lands precisely instead of overshooting.  The
@@ -8984,12 +9193,38 @@ class Viewer:
                 # mental model of "push the world down to lift my
                 # gaze" / "pull the world up to look down".
                 self.camera.center[1] += dy * speed_y
-            elif btns[2]:   # right-click -> orbit
-                self.camera.yaw   += dx * 0.5
-                self.camera.pitch += dy * 0.5
-                self.camera.pitch  = np.clip(self.camera.pitch, -89, 89)
+            elif btns[0]:   # LEFT-drag
+                if self.camera_mode == 2:
+                    # Commander mode: drag rotates the HEAD in
+                    # chassis-local space, not the orbit camera.
+                    # Lets the user look around from the commander
+                    # seat (left, right, up, down) while the
+                    # chassis-locked anchor preserves "tracks the
+                    # car's turn" -- a head rotated 90 deg right
+                    # in chassis-local stays right-of-tank as the
+                    # tank yaws.  Pitch clamped to keep the head
+                    # from flipping over.
+                    self._head_yaw_deg   += dx * 0.5
+                    self._head_pitch_deg += dy * 0.5
+                    self._head_pitch_deg  = float(np.clip(
+                        self._head_pitch_deg, -85.0, +85.0))
+                elif self.camera_mode == 1:
+                    # Chase mode: drag rotates the orbit angle in
+                    # CHASSIS-LOCAL space (so chase tracks the
+                    # tank's yaw automatically -- same kid-out-
+                    # the-window behavior as commander).
+                    self._chase_yaw_deg   += dx * 0.5
+                    self._chase_pitch_deg += dy * 0.5
+                    self._chase_pitch_deg  = float(np.clip(
+                        self._chase_pitch_deg, -85.0, +85.0))
+                else:
+                    # Free cam (orbit / mode 0): drag the world-
+                    # frame orbit camera.
+                    self.camera.yaw   += dx * 0.5
+                    self.camera.pitch += dy * 0.5
+                    self.camera.pitch  = np.clip(self.camera.pitch, -89, 89)
 
-            if btns[1] and not shift_held:   # middle-click -> pan on XZ ground plane
+            if btns[2]:   # RIGHT-drag -> pan on XZ ground plane
                 # Pan speed (formerly a UI slider, baked at 0.20)
                 speed = 0.01 * self.camera.distance * 0.20
                 view  = self.camera.get_view_matrix()
@@ -9044,7 +9279,27 @@ class Viewer:
         if self._debug_cb is not None:
             self._debug = bool(self._debug_cb.checked)
         if self._suspension_cb is not None:
-            self.tank_physics_enabled = bool(self._suspension_cb.checked)
+            new_susp = bool(self._suspension_cb.checked)
+            # Susp ON -> OFF transition: chase / commander cameras
+            # read `tank_physics.chassis_matrix()` for their anchor.
+            # If we leave the physics state at its previously-settled
+            # pose (pos.y = -10 cm, pitch / roll / vy from the last
+            # solve) but RESTORE the meshes to bind below, the
+            # chassis_matrix and the rendered mesh disagree -- camera
+            # anchors to "below origin" while the tank renders at
+            # world origin.  Result: pressing Susp visibly yanks the
+            # camera even though nothing else changed.
+            #
+            # Fix: snap the physics pose back to bind on every OFF
+            # transition so chassis_matrix() returns identity and
+            # the camera sits where the tank actually is.
+            if (not new_susp and getattr(self, 'tank_physics_enabled', False)
+                    and self.tank_physics is not None):
+                self.tank_physics.pos[:]    = 0.0
+                self.tank_physics.pitch_deg = 0.0
+                self.tank_physics.roll_deg  = 0.0
+                self.tank_physics.vy        = 0.0
+            self.tank_physics_enabled = new_susp
 
         # ---- GPU timer query: begin -------------------------------------
         # Lazy-create the two-query pool the first time we render the
@@ -9099,9 +9354,16 @@ class Viewer:
         # we've tested without producing visible gaps where adjacent
         # tris meet (which is the failure mode if you push too far).
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        if self.wireframe:
-            glEnable(GL_POLYGON_OFFSET_FILL)
-            glPolygonOffset(4.0, 4.0)
+        # NOTE: GL_POLYGON_OFFSET_FILL is set immediately before the
+        # SOLID MESH PASS later in render() (around the
+        # `for mesh in self.meshes:` loop) -- not here.  Doing it
+        # here meant the offset was active during the intervening
+        # passes (terrain, picker FBO, skybox, hull bbox), which
+        # could nudge those off where they belonged AND was at risk
+        # of being clobbered by intermediate `glDisable` /
+        # `glPolygonOffset` calls before the solid pass actually
+        # ran.  In-place enable just before the mesh draw is
+        # robust against that.
 
         view = self._anchored_view_matrix()
         proj = self.camera.get_projection_matrix()
@@ -9245,78 +9507,19 @@ class Viewer:
         # render) so it draws on top of the rendered tank
         # without being overwritten.
 
-        # Tank physics overlay: per-wheel ground / wheel-centre
-        # markers + yellow suspension lines.  Gated by the master
-        # Debug checkbox AND the Susp checkbox -- terrain markers
-        # are debug-overlay info, hidden in normal viewing.  When
-        # Debug is OFF, the chassis still moves correctly under
-        # the suspension; we just don't draw the markers.
+        # Tank physics overlay (markers): drawn DOWN-STREAM after the
+        # tank mesh + wireframe + normals + picker passes, so the
+        # markers respect the z buffer and occlude correctly behind
+        # the chassis / hull (instead of always-on-top).  The block
+        # below builds nothing and just runs the per-bone console
+        # dump -- the actual segment-build + draw lives later in
+        # render() near the look-at crosshair.
         if (self._debug
                 and self.tank_physics_enabled and self.tank_physics is not None
                 and self.meshes
                 and self.show_terrain and self.terrain
                 and len(self.tank_physics.last_wheel_world)):
             tp     = self.tank_physics
-            PINK   = (1.0, 0.40, 0.65)   # ground-contact dots
-            CYAN   = (0.40, 0.95, 0.95)  # target wheel-centre dots
-            YELLOW = (1.0, 0.92, 0.20)
-            BLUE   = (0.20, 0.45, 1.00)  # physics hit-location X
-            # 20 cm asterisk: visible at any zoom level.  Drawn as a
-            # 3-axis cross + diagonal so the marker reads as a "star"
-            # against the terrain texture even when the camera is
-            # far back.
-            DOT_R  = 0.20
-            DIAG   = DOT_R * 0.71   # 1/sqrt(2) -- equal-length diagonals
-            segs   = []
-            for i, (wx, _wy, wz) in enumerate(tp.last_wheel_world):
-                ty = float(tp.last_terrain_y[i])
-                wc = float(tp.last_target_y[i])
-
-                # ---- Ground contact: pink star (XZ + diagonals) ----
-                # Render in the XZ plane at terrain Y so it reads as
-                # "footprint on the ground".
-                segs.append(((wx - DOT_R, ty, wz),
-                             (wx + DOT_R, ty, wz), PINK))
-                segs.append(((wx, ty, wz - DOT_R),
-                             (wx, ty, wz + DOT_R), PINK))
-                segs.append(((wx - DIAG, ty, wz - DIAG),
-                             (wx + DIAG, ty, wz + DIAG), PINK))
-                segs.append(((wx - DIAG, ty, wz + DIAG),
-                             (wx + DIAG, ty, wz - DIAG), PINK))
-
-                # ---- Wheel-centre target: cyan star in XY plane ---
-                # Use vertical (Y) axis so the marker is always
-                # visible regardless of camera angle.
-                segs.append(((wx - DOT_R, wc, wz),
-                             (wx + DOT_R, wc, wz), CYAN))
-                segs.append(((wx, wc - DOT_R, wz),
-                             (wx, wc + DOT_R, wz), CYAN))
-                segs.append(((wx - DIAG, wc - DIAG, wz),
-                             (wx + DIAG, wc + DIAG, wz), CYAN))
-                segs.append(((wx - DIAG, wc + DIAG, wz),
-                             (wx + DIAG, wc - DIAG, wz), CYAN))
-
-                # ---- Suspension shaft: yellow line ----------------
-                segs.append(((wx, ty, wz),
-                             (wx, wc, wz), YELLOW))
-
-                # ---- Physics hit-location: blue X -----------------
-                # Two diagonal segments at the wheel's terrain
-                # sample point.  Lifted 1 mm above the terrain Y
-                # so it doesn't z-fight with the ground texture
-                # (the pink star sits at exact terrain Y; the X
-                # rides 1 mm proud and reads as a separate
-                # marker).  Used to visually verify the physics's
-                # computed hit location matches what's under the
-                # rendered wheel.
-                ty_x = ty + 0.001
-                segs.append(((wx - DOT_R, ty_x, wz - DOT_R),
-                             (wx + DOT_R, ty_x, wz + DOT_R), BLUE))
-                segs.append(((wx - DOT_R, ty_x, wz + DOT_R),
-                             (wx + DOT_R, ty_x, wz - DOT_R), BLUE))
-            self.physics_lines.update(segs)
-            self.physics_lines.render(self.color_shader, view, proj)
-
             # ---- Live console dump of per-bone angles ----------------
             # Clear + reprint every frame so the user gets a real-time
             # readout of what each wheel's suspension is doing.  Slows
@@ -9582,12 +9785,41 @@ class Viewer:
         # the breech.  Mode 0 / 1 leave everything visible.
         hide_turret_gun = (self.camera_mode == 2)
 
+        # Re-assert polygon-offset state IMMEDIATELY before the solid
+        # mesh pass.  An earlier enable site at the top of render()
+        # was being clobbered by some intervening pass (terrain,
+        # picker FBO, hull bbox draws each manage their own polygon
+        # state and at least one was leaving GL_POLYGON_OFFSET_FILL
+        # disabled by the time the solid mesh pass actually fired --
+        # result: the wireframe-overlay z-fighting that came back
+        # mid-2026-05-08).  Re-asserting the offset right here
+        # guarantees the solid mesh pass below renders with depth
+        # pushed back, so the line pass at natural Z reliably wins
+        # the depth test.  Value bumped (4 -> 8) for additional
+        # margin at far-from-camera distances and grazing angles.
+        if self.wireframe:
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            glPolygonOffset(8.0, 8.0)
+        else:
+            glDisable(GL_POLYGON_OFFSET_FILL)
+
         # Draw each primitive group
         for mesh in self.meshes:
             if not getattr(mesh, 'visible', True):
                 continue   # user toggled this sub-mesh off in the info panel
             if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
                 continue   # commander POV: hide turret + gun
+            # Rubber-band track ribbon (track_LShape* / track_RShape*
+            # inside Chassis.primitives_processed) -- temporarily
+            # blanked out while the kinematic-bone-driven NURB track
+            # replacement (see ARCHITECTURE.md "Track physics roadmap")
+            # is built.  Flip RENDER_RUBBER_BAND_TRACK to True to
+            # bring the rubber band back for an A/B.
+            RENDER_RUBBER_BAND_TRACK = False  # if (false) blank
+            if not RENDER_RUBBER_BAND_TRACK:
+                _mn = getattr(mesh, 'name', '') or ''
+                if _mn.startswith('track_') and 'Shape' in _mn:
+                    continue
             # Alpha test
             if mesh.alpha_test_enable:
                 active.set_int(  'alpha_test_enable', 1)
@@ -9650,6 +9882,10 @@ class Viewer:
                     continue
                 if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
                     continue
+                # Skip rubber-band track ribbon (see solid-pass note).
+                _mn = getattr(mesh, 'name', '') or ''
+                if _mn.startswith('track_') and 'Shape' in _mn:
+                    continue
                 active.set_mat4('model', mesh.model_matrix)
                 _upload_skinning(mesh)
                 mesh.render(active)
@@ -9690,6 +9926,10 @@ class Viewer:
                 if not getattr(mesh, 'visible', True):
                     continue
                 if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
+                    continue
+                # Skip rubber-band track ribbon (see solid-pass note).
+                _mn = getattr(mesh, 'name', '') or ''
+                if _mn.startswith('track_') and 'Shape' in _mn:
                     continue
                 if mesh.vao is None:
                     continue
@@ -9874,15 +10114,99 @@ class Viewer:
             self.picker.draw_overlay(view, proj,
                                       _theme.c1(), _theme.c2())
 
+        # ---- Tank physics markers (depth-tested, post-tank) ----------
+        # Per-wheel ground-contact pink stars + cyan target stars +
+        # yellow suspension shaft + blue physics-hit X.  Drawn HERE
+        # (after the tank mesh / wireframe / normals / picker passes)
+        # with depth test ENABLED so they correctly occlude behind
+        # the chassis / hull / terrain.  Pre-2026-05-08 these were
+        # drawn earlier in the pass with depth test disabled, which
+        # made them ALWAYS visible on top of geometry -- couldn't
+        # tell whether a marker was inside or outside the tank.
+        # Gated by Debug + Susp + tank loaded + Terrain on, same as
+        # before.
+        if (self._debug
+                and self.tank_physics_enabled and self.tank_physics is not None
+                and self.meshes
+                and self.show_terrain and self.terrain
+                and len(self.tank_physics.last_wheel_world)):
+            tp     = self.tank_physics
+            PINK   = (1.0, 0.40, 0.65)   # ground-contact dots
+            CYAN   = (0.40, 0.95, 0.95)  # target wheel-centre dots
+            YELLOW = (1.0, 0.92, 0.20)
+            BLUE   = (0.20, 0.45, 1.00)  # physics hit-location X
+            # 20 cm asterisk: visible at any zoom level.  Drawn as a
+            # 3-axis cross + diagonal so the marker reads as a "star"
+            # against the terrain texture even when the camera is
+            # far back.
+            DOT_R  = 0.20
+            DIAG   = DOT_R * 0.71   # 1/sqrt(2) -- equal-length diagonals
+            segs   = []
+            for i, (wx, _wy, wz) in enumerate(tp.last_wheel_world):
+                ty = float(tp.last_terrain_y[i])
+                wc = float(tp.last_target_y[i])
+
+                # ---- Ground contact: pink star (XZ + diagonals) ----
+                # Render in the XZ plane at terrain Y so it reads as
+                # "footprint on the ground".
+                segs.append(((wx - DOT_R, ty, wz),
+                             (wx + DOT_R, ty, wz), PINK))
+                segs.append(((wx, ty, wz - DOT_R),
+                             (wx, ty, wz + DOT_R), PINK))
+                segs.append(((wx - DIAG, ty, wz - DIAG),
+                             (wx + DIAG, ty, wz + DIAG), PINK))
+                segs.append(((wx - DIAG, ty, wz + DIAG),
+                             (wx + DIAG, ty, wz - DIAG), PINK))
+
+                # ---- Wheel-centre target: cyan star in XY plane ---
+                # Use vertical (Y) axis so the marker is always
+                # visible regardless of camera angle.
+                segs.append(((wx - DOT_R, wc, wz),
+                             (wx + DOT_R, wc, wz), CYAN))
+                segs.append(((wx, wc - DOT_R, wz),
+                             (wx, wc + DOT_R, wz), CYAN))
+                segs.append(((wx - DIAG, wc - DIAG, wz),
+                             (wx + DIAG, wc + DIAG, wz), CYAN))
+                segs.append(((wx - DIAG, wc + DIAG, wz),
+                             (wx + DIAG, wc - DIAG, wz), CYAN))
+
+                # ---- Suspension shaft: yellow line ----------------
+                segs.append(((wx, ty, wz),
+                             (wx, wc, wz), YELLOW))
+
+                # ---- Physics hit-location: blue X -----------------
+                # Two diagonal segments at the wheel's terrain
+                # sample point.  Lifted 1 mm above the terrain Y
+                # so it doesn't z-fight with the ground texture
+                # (the pink star sits at exact terrain Y; the X
+                # rides 1 mm proud and reads as a separate
+                # marker).  Used to visually verify the physics's
+                # computed hit location matches what's under the
+                # rendered wheel.
+                ty_x = ty + 0.001
+                segs.append(((wx - DOT_R, ty_x, wz - DOT_R),
+                             (wx + DOT_R, ty_x, wz + DOT_R), BLUE))
+                segs.append(((wx - DOT_R, ty_x, wz + DOT_R),
+                             (wx + DOT_R, ty_x, wz - DOT_R), BLUE))
+            self.physics_lines.update(segs)
+            # Explicit depth test ON: prior passes (terrain, mesh)
+            # left it on, but if any future pass drops it, this
+            # local enable keeps the markers from going always-on-top.
+            glEnable(GL_DEPTH_TEST)
+            self.physics_lines.render(self.color_shader, view, proj)
+
         # Look-at crosshair: pale-pink lines spanning 10 units along
         # each world axis (X / Y / Z), centred on `camera.center`.
         # Drawn HERE -- after every tank-mesh / wireframe / picker
-        # pass -- so the tank doesn't overdraw it.  Depth-test off
-        # while drawing so the lines stay visible even when the
-        # camera is buried inside the tank or behind terrain;
-        # restore depth state afterward for the UI / overlay
-        # passes that follow.  Visibility gated by
-        # `_show_lookat_lines` (mouse wheel button held).
+        # pass -- so the tank doesn't overdraw it.  Depth test
+        # explicitly ENABLED below (re-enabled per Professor
+        # Coffee's request 2026-05-08): the crosshair occludes
+        # correctly behind tank / terrain, so when the look-at
+        # point is *inside* a piece of geometry the user sees the
+        # lines emerge only at the surface -- which is the natural
+        # cue for "your aim point is here".  Visibility gated by
+        # `_show_lookat_lines` (RIGHT-button = pan, or MIDDLE-button
+        # = Y-lift / crosshair-only).
         if self._show_lookat_lines:
             cx, cy_, cz = (float(self.camera.center[0]),
                            float(self.camera.center[1]),
@@ -9894,9 +10218,13 @@ class Viewer:
                 ((cx, cy_ - H, cz), (cx, cy_ + H, cz), PINK),  # Y (up in GL)
                 ((cx, cy_, cz - H), (cx, cy_, cz + H), PINK),  # Z
             ])
-            glDisable(GL_DEPTH_TEST)
-            self.lookat_lines.render(self.color_shader, view, proj)
+            # Explicit glEnable so the crosshair never accidentally
+            # renders in always-on-top mode if some earlier pass
+            # left depth test off.  (Most passes restore it, but
+            # being explicit here means a future regression in any
+            # of those passes can't cause this draw to "float".)
             glEnable(GL_DEPTH_TEST)
+            self.lookat_lines.render(self.color_shader, view, proj)
 
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)

@@ -2956,11 +2956,24 @@ class VehicleXMLLoader:
             #      `<tracks><trackPair><trackDebris>
             #      <physicalParams>` -- legacy older naming.
             # First-found wins; we deep-search for both.
+            #
+            # The two fields disagree on sign convention: T110E4
+            # publishes `renderModelOffset = +0.016`, T30 publishes
+            # `renderModelOffset = -0.029`.  Both mean "the rubber
+            # track ribbon is N metres thick between the wheel hub
+            # and the ground" -- a strictly positive geometric
+            # quantity.  TankPhysics uses
+            #   target_centre_Y = terrain_Y + radius + track_thickness
+            # so a negative value would drop the wheel into the
+            # ground (2026-05-08 user report on T30).  Take abs()
+            # at parse time so downstream code never has to worry
+            # about which tank's authors flipped the sign.
             for fld in ('trackThickness', 'renderModelOffset'):
                 el = best_chassis.find('.//' + fld)
                 if el is not None and el.text:
                     try:
-                        info['chassis']['renderModelOffset'] = float(el.text.strip())
+                        info['chassis']['renderModelOffset'] = abs(
+                            float(el.text.strip()))
                         break
                     except ValueError:
                         pass

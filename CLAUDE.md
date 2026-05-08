@@ -13,13 +13,32 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 
 ## Where to look first
 
-| Question                                               | Read                                              |
-| ------------------------------------------------------ | ------------------------------------------------- |
-| What's the project structure?                          | `ARCHITECTURE.md`                                 |
-| User-facing features / controls                        | `README_TANK_VIEWER.md`                           |
-| Recent changes / why things are the way they are       | `CHANGELOG.md` (newest entries first)             |
-| Coordinate-system conventions                          | `COORDINATE_SYSTEMS.md`                           |
-| `.primitives_processed` byte format (read **and** write) | `VISUAL_PROCESSED_FORMAT.md`                    |
+**Before any `Grep` over source code, run the doc search:**
+
+```
+python cust_tools/arch.py search "<topic>"      # grep docs, group by file + section
+python cust_tools/arch.py list                  # enumerate every doc heading
+python cust_tools/arch.py stale                 # flag docs older than the .py they describe
+```
+
+The docs folder is split per-domain and is the FIRST stop.  Picking
+the right doc shortcuts most "where does X live" questions before
+they turn into a code-grep round trip.
+
+| Question | Read |
+|----------|------|
+| Topic → doc map | `docs/INDEX.md` |
+| Wheel suspension, contact classification, plane fit, drive controls, settling math, total tank weight | `docs/PHYSICS.md` |
+| Kinematic-bone-driven NURB track rewrite (in progress) | `docs/TRACK_PHYSICS.md` |
+| Render passes, draw order, mesh-skip gates (solid / wireframe / normals / picker), camera modes | `docs/RENDERING.md` |
+| Per-module file-by-file API breakdown, WoT-specific notes table | `ARCHITECTURE.md` |
+| User-facing features / controls | `README_TANK_VIEWER.md` |
+| Recent changes / why things are the way they are | `CHANGELOG.md` (newest entries first) |
+| Coordinate-system conventions | `COORDINATE_SYSTEMS.md` |
+| `.primitives_processed` byte format (read **and** write) | `VISUAL_PROCESSED_FORMAT.md` |
+
+When you change code, update the matching doc IN THE SAME COMMIT.
+`arch.py stale` will flag drift; don't let it accumulate.
 
 ---
 

@@ -9,6 +9,200 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Tank-physics + camera deep-clean (1.100.0)
+
+Long second session covering wheel-physics correctness, camera UX
+overhaul, and the tooling spin-out into per-domain docs +
+`cust_tools/arch.py`.  All bugs identified by Professor Coffee in
+real-time testing; every fix traced back through the math before
+landing.
+
+#### Wheel physics: correctness fixes
+
+* **Z-frame double-flip removed.**  `from_chassis_meshes` was negating
+  the Z component of every extracted wheel centroid (`tup = (cx, cy,
+  -cz, ...)` at `tank_physics.py:693`) on top of the chassis vert
+  positions which were ALREADY in GL frame (`flip_z = False` for
+  skinned meshes per `loaders.py:336`).  Net effect: physics held
+  wheels at `+Z = front` while the rendered chassis had front at
+  `-Z` -- markers and contact-hit points appeared mirrored about Z.
+  Fixed at the extraction site; `T110E4_WHEELS` hardcoded fallback
+  was un-negated at the use sites (`for_t110e4`, the
+  `from_chassis_meshes` fallback path) for consistency.  Stale
+  comment about "rear-to-front by NEGATED Z" updated to
+  "front-to-rear by ascending Z".
+* **WD_ wheels filtered out when W_ exists.**  T30 in particular
+  carries `WD_L0` (drive sprocket) just inside the 15 cm Y-band, so
+  the existing band post-pass leaked it through and the rig had 10
+  wheels per side instead of 9.  New filter (`tank_physics.py:699`)
+  drops every accepted `WD_` candidate from a side IF that side
+  has at least one `W_` road-wheel bone -- safe rule for tracked
+  tanks; Hotchkiss-EBR-style rigs (no W_ bones at all) keep their
+  WD_ road wheels because the `has_w` check is false there.
+* **`track_thickness` regression in v1.93.2 rollback fixed.**  When
+  rolling tank_physics.py back to remove the WD_ partial-follow
+  Pass 3, the `from_chassis_meshes` signature lost its
+  `track_thickness` kwarg.  Viewer was passing it via
+  `_chassis_kwargs` from the per-tank XML parse, and the call
+  raised `TypeError` -- caught silently at the try/except, leaving
+  the rig stuck on the T110E4 hardcoded default (which has T110E4
+  wheel positions, not the loaded tank's).  Stars / Xs drew at
+  T110E4 positions on every tank.  Fixed by re-adding the kwarg +
+  forwarding it to the constructor in both the extracted-rig and
+  fallback paths.
+* **`renderModelOffset` sign convention normalised.**  T30 publishes
+  `<renderModelOffset>-0.029</renderModelOffset>`, T110E4 publishes
+  `+0.016`.  Both mean "track ribbon is N metres of rubber between
+  wheel hub and ground" -- a strictly positive geometric quantity.
+  TankPhysics' formula `target_centre = ty + radius +
+  track_thickness` was sinking T30's wheels 2.9 cm into the dirt
+  with the negative value.  Fixed at the parse site
+  (`loaders.py:2962`) -- `abs(float(el.text))` so downstream code
+  never sees the sign convention difference.
+* **Residual sign convention cleaned end-to-end.**  Pre-fix:
+  `last_residual_y = -(target - rigid)` (counter-intuitive
+  negative-meaning-up), `bone_matrix_array` Pass 1 used `out[pi,
+  1, 3] = ry` (no flip).  An old "shader sign quirk" docstring
+  claimed the shader chain flipped the sign empirically, requiring
+  the inverted storage convention.  **It doesn't.** Walked
+  `shaders/mesh.vert` end-to-end: standard `world = model * skin *
+  position` with no flip anywhere.  Bone Y > 0 produces visible
+  vertex up.  The "quirk" was a misdiagnosis years ago that's been
+  propagating since.  Fixed: `_compute_residual_y` now publishes
+  `target - rigid` cleanly (+up = wheel rises into hull), and Pass
+  1 / Pass 2 of `bone_matrix_array` write `out[pi, 1, 3] = +ry`
+  directly.  Verified end-to-end: T30 on flat terrain, all 18
+  wheels render with center at world Y = 0.374 = exactly
+  `terrain + radius + track_thickness` (delta = 0.0000 across
+  every wheel).  Wheel BOTTOMS sit at `+0.029` -- exactly track
+  thickness above terrain -- so the outer track face kisses
+  ground, no rim submerged.  Old "wheels up to their rims"
+  symptom is gone.
+* **Stale "Sort rear-to-front by NEGATED Z" comment fixed** to read
+  "Sort front-to-rear by ascending Z" since the negation no longer
+  applies after the Z-frame fix.
+
+The corrected pipeline was verified by a Python probe that builds a
+TankPhysics rig from T30's chassis primitives, ticks 50 settle
+frames against flat terrain, and dumps per-wheel target / residual
+/ rendered Y -- all 18 wheels show delta of 0.0000 m vs target.
+Probe lives at the experiment-tree root and is not shipped.
+
+#### Camera + mouse: UX overhaul
+
+* **Mouse rebind: LEFT = orbit, RIGHT = pan, WHEEL = zoom.**
+  Previously RIGHT was orbit and MIDDLE was pan -- standard mod-
+  driven 3D-tool convention, but Professor Coffee preferred the
+  CAD-style left-orbit / right-pan layout.  UI safety preserved:
+  a slider drag started inside the panel that wanders outside no
+  longer simultaneously updates the slider AND orbits the camera
+  (added `slider_active` guard at `viewer.py:8975`).
+* **Right-button shows the look-at crosshair.**  Pale-pink XYZ
+  cross now appears whenever RIGHT (pan) OR MIDDLE (Y-lift /
+  crosshair-only) is held.  Depth test explicitly enabled around
+  the draw so the crosshair occludes correctly behind tank /
+  terrain -- the look-at point inside geometry shows only the
+  parts that emerge to the surface.
+* **Camera mode now starts on chase (1) and never persists.**
+  Default at `Viewer.__init__` is `camera_mode = 1`; every tank
+  load reset to 1 explicitly inside `load_vehicle` (was
+  accidentally only firing inside `load_mesh`, the FBX/GLB path).
+  `camera_mode` is touched by EXACTLY two sites by rule: the
+  `load_vehicle` reset and the C-key cycle handler.  Susp toggle
+  no longer changes camera mode (verified) and does not move the
+  camera position either (Susp ON → OFF transition snaps
+  `tp.pos`, `pitch_deg`, `roll_deg`, `vy` back to 0 so chase /
+  commander cameras don't anchor to a stale settled pose).
+* **Chase cam (mode 1) is now chassis-locked in yaw + pitch +
+  roll.**  Stored independently in `_chase_yaw_deg`,
+  `_chase_pitch_deg`, `_chase_distance` (chassis-local frame).
+  LEFT-drag in chase mode rotates the chassis-local orbit angle
+  around the driver, NOT the world-frame orbit.  Result: drag
+  to look at the tank's right side, then drive into a turn --
+  the camera STAYS on the right side as the tank yaws.  Same
+  "child looking out a side window" behavior the user specified.
+  Wheel zoom is mode-aware: scales `_chase_distance` in chase,
+  `self.camera.distance` in orbit, no-op in commander.
+* **Commander cam (mode 2) gains head rotation.**  LEFT-drag in
+  commander mode now rotates the head -- `_head_yaw_deg`
+  (left/right) + `_head_pitch_deg` (up/down, clamped to ±85°) --
+  in chassis-local space, so head orientation persists through
+  tank turns.  Reset to 0 / 0 (looking straight forward, level)
+  on every entry into commander mode so each "stepping into the
+  seat" starts known.
+* **C cycle: 0 → 1 → 2 → 0, with commander view exported on the
+  2 → 0 hop.**  When leaving commander, the head-rotated eye +
+  target are baked into `self.camera.center / yaw / pitch /
+  distance` so free cam picks up exactly where commander was
+  looking instead of yanking back to a stale pre-commander
+  pose.  Free cam was being "left behind" when the tank had
+  driven a long way during commander mode -- this fix snaps it
+  forward to the chassis-locked commander position.
+
+#### Render passes: depth-test + ordering fixes
+
+* **Wheel markers now respect the z buffer.**  Pink ground stars,
+  cyan wheel-target stars, yellow suspension shafts, and blue
+  physics-hit Xs were drawn BEFORE the tank mesh pass (with depth
+  test disabled, inheriting state from the grid/axes background
+  pass).  Result: markers always-on-top regardless of geometry.
+  Moved to AFTER the tank-mesh + wireframe + normals + picker
+  passes (line ~9897), with explicit `glEnable(GL_DEPTH_TEST)`
+  before the draw -- markers now correctly occlude behind the
+  hull / chassis.  Per-bone console-dump kept at its old location
+  (CPU print, no GL state).
+* **Wireframe overlay polygon offset re-asserted in-place.**  The
+  pre-existing `glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(4,
+  4)` block ran way at the top of `render()` -- before the
+  terrain, picker FBO, hull-bbox, etc. passes.  Any of those could
+  legitimately call `glDisable` / `glPolygonOffset(0, 0)` for their
+  own state, leaving the offset stale by the time the solid mesh
+  pass actually fired -> wireframe lines z-fought the surfaces
+  again.  Fix: removed the early enable; new in-place enable +
+  offset is set ONE STATEMENT before the `for mesh in self.meshes:`
+  loop.  Bumped (4, 4) -> (8, 8) for additional margin at far-from-
+  camera distances and grazing angles.  Explicit `else: glDisable`
+  so wireframe-off frames don't inherit a stale enable.
+
+#### Track render
+
+* **Rubber-band track ribbon (`track_LShape*` / `track_RShape*`
+  inside `Chassis.primitives_processed`) blanked off.**  Skipped
+  in the solid + wireframe + normals + picker passes via the
+  `RENDER_RUBBER_BAND_TRACK = False` gate at `viewer.py:9793`.
+  Set to `True` to bring the rubber band back for an A/B against
+  the upcoming kinematic-bone-driven NURB pads.  Per-tank bone-
+  palette layout dump (T30 baseline) added to `docs/PHYSICS.md`
+  so future readers know the W_ road-wheel bones live in
+  `chassis_*Shape21_split_0`, NOT in the track meshes.
+
+#### Docs split
+
+The single 700-line `ARCHITECTURE.md` got split into per-domain
+files under `docs/`:
+
+* `docs/INDEX.md` -- topic → doc map; entry point.
+* `docs/PHYSICS.md` -- `tank_physics.py`: contact classification,
+  plane fit, drive controls, bone matrix passes, residual sign
+  convention, settling math, T30 bone-palette table.
+* `docs/TRACK_PHYSICS.md` -- the in-progress NURB track roadmap
+  (Phase A → E + open probes); was at the bottom of `ARCHITECTURE.md`.
+* `docs/RENDERING.md` -- viewer.py render pass order, four mesh-
+  iteration sites + their gates, camera modes, look-at crosshair,
+  wireframe polygon-offset recipe.
+
+`cust_tools/arch.py` is the entry-point search/list/stale tool:
+
+```
+python cust_tools/arch.py search "<topic>"   # phrase + token-AND fallback
+python cust_tools/arch.py list                # every doc heading
+python cust_tools/arch.py stale               # docs older than the .py they describe
+```
+
+`CLAUDE.md` updated with the new "use arch.py first" rule -- before
+grepping source, search the docs to find which one covers the
+topic.
+
 ### Track-physics roadmap committed (1.99.0)
 
 Today opened the rewrite of the track render system.  The current

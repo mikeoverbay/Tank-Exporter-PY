@@ -544,7 +544,13 @@ class TankPhysics:
         Kept for the legacy in-app default; new code should prefer
         `from_chassis_meshes` so the rig works for any tank."""
         d = T110E4_WHEELS
-        return cls(d['wheels_left'], d['wheels_right'],
+        # See note in the from_chassis_meshes T110E4 fallback:
+        # T110E4_WHEELS data is Z pre-negated and must be un-negated
+        # at the use site to align with the post-GPU-skinning chassis
+        # frame.  Negate once here; the data file stays as-is.
+        wl = [(x, y, -z) for (x, y, z) in d['wheels_left']]
+        wr = [(x, y, -z) for (x, y, z) in d['wheels_right']]
+        return cls(wl, wr,
                    radius=d['radius'],
                    min_offset=d['min_offset'],
                    max_offset=d['max_offset'])
@@ -554,7 +560,8 @@ class TankPhysics:
     def from_chassis_meshes(cls, chassis_meshes,
                             radius=0.33,
                             min_offset=-0.04,
-                            max_offset=+0.08):
+                            max_offset=+0.08,
+                            track_thickness=0.016):
         """Build a TankPhysics rig by walking already-loaded chassis
         sub-meshes (the `Mesh` objects in `Viewer.meshes` whose
         `component == 'chassis'`).  Discovers wheel groups by
@@ -687,13 +694,44 @@ class TankPhysics:
                     continue
                 side = 'left' if cx < 0 else 'right'
 
-            # Z negate to match TEPY's render-side world-Z convention
-            # (see T110E4_WHEELS comment).
-            tup = (cx, cy, -cz, wheel_name)
+            # NO Z negation here.  Skinned chassis primitives have
+            # `flip_z = False` on load (loaders.py:336 "skinned
+            # meshes are authored with forward = -Z and we must NOT
+            # flip them") -- so the raw chassis vert Z is already
+            # in GL frame (front = -Z).  The earlier `-cz` here
+            # double-flipped to +Z and mirrored the wheel markers
+            # / contact hit-points relative to the rendered chassis
+            # (2026-05-08 user report on T30: "the marker points
+            # are backwards in z").  T110E4_WHEELS hardcoded
+            # fallback data is documented as "pre-negated" and is
+            # un-negated at the fallback site below for consistency.
+            tup = (cx, cy, cz, wheel_name)
             if side == 'left':
                 wheels_left.append(tup)
             else:
                 wheels_right.append(tup)
+
+        # If a side has at least one accepted `W_` road-wheel bone,
+        # drop every accepted `WD_` candidate from THAT SIDE.  WD_
+        # bones on tracked tanks are the drive sprocket (rear) +
+        # idler / tensioner (front) + return rollers -- they ride
+        # the track ribbon, not the ground, and shouldn't bias the
+        # plane fit.  T30 in particular has WD_L0 (drive sprocket)
+        # within ~10 cm Y of the road wheels, so the Y-band post-
+        # pass below leaks it through; this explicit drop kills it
+        # before the band check runs.  Hotchkiss-EBR-style rigs
+        # with NO W_ bones (only WD_) are untouched -- their WD_
+        # entries ARE the road wheels.  (2026-05-08 user report: T30
+        # was showing 8 + 9 markers because the rear sprocket got
+        # accepted as wheel index 0.)
+        def _drop_wd_if_w_present(wheels):
+            has_w = any(re.match(r'^W_', w[3] or '') for w in wheels)
+            if has_w:
+                return [w for w in wheels
+                        if not re.match(r'^WD_', w[3] or '')]
+            return wheels
+        wheels_left  = _drop_wd_if_w_present(wheels_left)
+        wheels_right = _drop_wd_if_w_present(wheels_right)
 
         # Y-band post-pass.  Some chassis carry "wheel-shaped"
         # decorative bones that sit ABOVE the actual road-wheel
@@ -717,7 +755,12 @@ class TankPhysics:
             min_y = min(w[1] for w in wheels_right)
             wheels_right = [w for w in wheels_right if w[1] <= min_y + Y_BAND]
 
-        # Sort each side rear-to-front by NEGATED Z (visible Z).
+        # Sort each side FRONT-to-rear by ascending raw Z.  Chassis-
+        # local frame has front at -Z (GL convention; see the
+        # `flip_z = False` rule for skinned meshes in loaders.py).
+        # So ascending Z = front-to-rear, with self.wheels[0] = the
+        # frontmost wheel on the left side.  (Was rear-to-front
+        # pre-Z-fix when wheels carried negated Z; updated 2026-05-08.)
         wheels_left.sort (key=lambda t: t[2])
         wheels_right.sort(key=lambda t: t[2])
 
@@ -737,10 +780,18 @@ class TankPhysics:
                   f"{sum(1 for k in key_to_pts if not k.startswith('__byte_'))} "
                   "with palette names)")
             d = T110E4_WHEELS
-            return cls(d['wheels_left'], d['wheels_right'],
+            # T110E4_WHEELS stores Z pre-negated (the data was
+            # authored back when chassis was non-skinned and
+            # got z-flipped on load).  GPU skinning made flip_z
+            # False for the chassis, so the runtime now expects
+            # raw chassis-frame Z (front = -Z).  Un-negate here.
+            wl = [(x, y, -z) for (x, y, z) in d['wheels_left']]
+            wr = [(x, y, -z) for (x, y, z) in d['wheels_right']]
+            return cls(wl, wr,
                        radius=d['radius'],
                        min_offset=d['min_offset'],
-                       max_offset=d['max_offset'])
+                       max_offset=d['max_offset'],
+                       track_thickness=track_thickness)
 
         named_count = sum(1 for n in (names_left + names_right) if n)
         print(f"[tank_physics] extracted rig: {len(wheels_left)}L + "
@@ -751,7 +802,8 @@ class TankPhysics:
         inst = cls(wheels_left, wheels_right,
                    radius=radius,
                    min_offset=min_offset,
-                   max_offset=max_offset)
+                   max_offset=max_offset,
+                   track_thickness=track_thickness)
         # Stash the parallel name list so `bone_matrix_array` knows
         # which palette entries correspond to wheels we ACTUALLY
         # accepted (drops a tracked tank's WD_ idlers / sprockets
@@ -1379,28 +1431,22 @@ class TankPhysics:
         For each wheel:
           * `target_world_y`  = terrain Y under wheel + wheel radius
           * `rigid_world_y`   = chassis_pose @ wheel_local_pos -> .y
-          * `residual_world_y` = `-(target_world_y - rigid_world_y)`
+          * `residual_world_y` =  target_world_y - rigid_world_y
 
-        Sign convention (Professor Coffee, this session): the bone
-        Y-translation in mesh-local space comes out FLIPPED relative
-        to what the rigid-pose-to-target delta would naively suggest.
-        Empirically: when terrain rises under a wheel (target > rigid)
-        the wheel should COMPRESS upward into the hull, but the
-        un-flipped residual translated the WHEEL GEOMETRY downward
-        (i.e. away from the hull).  The flip below makes the
-        rendered deflection track terrain in the correct direction.
-        Why this happens: the bone matrix is consumed inside
-        `mesh.vert` as a pre-multiplication on `position` BEFORE the
-        model/view/projection chain, but the bone "moves the wheel"
-        is conceptually equivalent to "moves the chassis-relative
-        attachment point", and the relationship between those
-        directions is signed-opposite for the suspension semantics
-        we're modelling.  Cleanest patch: flip the residual sign at
-        the source so every downstream consumer (shader, debug
-        overlay) sees a consistent "+ve = wheel up" convention.
-        TODO: trace this through the chassis_pose composition order
-        if we ever add per-wheel arm rotation; for now the flip is
-        correct for the translation-only path.
+        Sign convention -- `last_residual_y[i] > 0` means the wheel
+        needs to RISE (UP, into the hull, compression direction);
+        `< 0` means the wheel needs to DROP (DOWN, away from the
+        hull, extension direction).  This matches normal mechanical
+        intuition AND the GL skinning math: the shader does
+        `world = model * (T(0, ry, 0) * position)`, so bone Y > 0
+        moves the visible vertex UP.  No sign flip anywhere — what
+        we publish here is what the bone matrix carries through.
+
+        (An earlier docstring claimed there was a "shader-side sign
+        quirk" requiring a flip.  That was a misdiagnosis -- the
+        wheels were sinking because of the unrelated sign error in
+        bone_matrix_array, not because the shader flipped anything.
+        See viewer.py `_upload_skinning` and shaders/mesh.vert.)
 
         Suspension envelope clamp: physical tanks have a finite
         suspension travel range -- defined per-tank in the gameplay
@@ -1426,9 +1472,13 @@ class TankPhysics:
         ])                                                # (n, 4)
         world = (m @ local_h.T).T                         # (n, 4)
         rigid_world_y = world[:, 1]
-        # Sign-flipped: see docstring.  +ve = wheel pushed UP.
-        residual = -(np.asarray(target_centre, dtype=np.float64)
-                     - np.asarray(rigid_world_y, dtype=np.float64))
+        # Clean sign: +ve = wheel needs to RISE (UP, compression).
+        # The shader-side sign flip is applied inside
+        # bone_matrix_array Pass 1, NOT here, so consumers reading
+        # last_residual_y directly (debug overlays, NURB-track
+        # V_loc binder) get an intuitive value.
+        residual = (np.asarray(target_centre, dtype=np.float64)
+                    - np.asarray(rigid_world_y, dtype=np.float64))
 
         # Envelope caps.  The engine's <groundNodes> stores
         # (minOffset, maxOffset).  Mapping into our +ve-up convention:
@@ -1583,6 +1633,14 @@ class TankPhysics:
             # Road-wheel bone we accepted during extract?
             wheel_idx = name_to_wheel.get(name)
             if wheel_idx is not None:
+                # Direct pass-through: +residual = wheel up.  Shader
+                # does standard `world = model * skin * position` with
+                # no sign flip (verified by walking shaders/mesh.vert
+                # 2026-05-08 against T30's "wheels sinking to the rim"
+                # bug).  An earlier docstring claimed the shader chain
+                # flipped the sign empirically -- it doesn't, the
+                # claim was a misdiagnosis.  Bone Y > 0 -> visible
+                # wheel UP, exactly as you'd expect.
                 ry            = float(residual_src[wheel_idx])
                 out[pi]       = np.eye(4, dtype=np.float32)
                 out[pi, 1, 3] = ry
@@ -1604,60 +1662,9 @@ class TankPhysics:
                 # rigs use Track_<i>_BlendBone with W_<j>_BlendBone
                 # at j != i).  Leave identity.
                 continue
+            # Direct pass-through (same as Pass 1 -- no sign flip).
             ry = float(residual_src[wheel_idx])
             out[pi]      = np.eye(4, dtype=np.float32)
             out[pi, 1, 3] = ry
-
-        # Pass 3: drive sprocket + idler partial follow.
-        # Without this, the track ribbon's wraparound section near
-        # the front idler / rear drive sprocket stays put while
-        # the road-wheel-side track segments deflect -- producing
-        # a visible tear / kink at the seam (worst on tanks like
-        # T30 with tight road-wheel spacing right next to the
-        # tensioner).
-        #
-        # Recipe: scan the palette for `WD_<side>\d+(_BlendBone)?`
-        # bones, identify which side they belong to + their
-        # numeric index.  The LOWEST index per side is the drive
-        # sprocket (rear); the HIGHEST is the idler (front).
-        # Drive sprocket inherits 50% of the rearmost road
-        # wheel's residual; idler inherits 50% of the frontmost
-        # road wheel's residual.  50% gets the seam to blend
-        # without making the wraparound visibly bob.
-        WD_RX = re.compile(r'^WD_([LR])(\d+)(?:_BlendBone)?$')
-        per_side_wd = {'L': [], 'R': []}   # (palette_idx, numeric_idx)
-        for pi, name in enumerate(palette):
-            if pi >= max_bones or not name:
-                continue
-            m = WD_RX.match(name)
-            if m:
-                per_side_wd[m.group(1)].append((pi, int(m.group(2))))
-
-        # Index into self.wheels for rearmost / frontmost on each side.
-        # `wheels_left` is sorted rear-to-front; same for right.
-        SEAM_FOLLOW_FRACTION = 0.5
-        rear_left   = 0                    if self.n_left  > 0 else None
-        front_left  = self.n_left - 1      if self.n_left  > 0 else None
-        rear_right  = self.n_left          if (len(self.wheels) - self.n_left) > 0 else None
-        front_right = len(self.wheels) - 1 if (len(self.wheels) - self.n_left) > 0 else None
-
-        for side, wd_list in per_side_wd.items():
-            if not wd_list:
-                continue
-            wd_list.sort(key=lambda t: t[1])     # ascending by numeric index
-            drive_palette_idx = wd_list[0][0]    # WD_<side>0 = drive sprocket
-            idler_palette_idx = wd_list[-1][0]   # highest-N = idler
-            rear_wheel_idx  = rear_left  if side == 'L' else rear_right
-            front_wheel_idx = front_left if side == 'L' else front_right
-            if rear_wheel_idx is not None:
-                ry = (float(residual_src[rear_wheel_idx])
-                      * SEAM_FOLLOW_FRACTION)
-                out[drive_palette_idx]       = np.eye(4, dtype=np.float32)
-                out[drive_palette_idx, 1, 3] = ry
-            if front_wheel_idx is not None:
-                ry = (float(residual_src[front_wheel_idx])
-                      * SEAM_FOLLOW_FRACTION)
-                out[idler_palette_idx]       = np.eye(4, dtype=np.float32)
-                out[idler_palette_idx, 1, 3] = ry
 
         return out
