@@ -30,7 +30,7 @@ import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
-                            K_a, K_d, K_s, K_x, K_z, K_F2,
+                            K_a, K_d, K_s, K_x, K_z, K_F2, K_F3, K_F4,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -1044,6 +1044,53 @@ class Viewer:
         self._chase_pitch_deg = 25.0
         self._chase_distance  = 6.0
 
+        # ---- 1-Turn auto-test recorder ---------------------------------
+        # Drives the tank in a full 360-degree auto-circle at speed
+        # step 1 (top per-tank speed) and records a frame-by-frame
+        # snapshot of every chassis-pose + per-wheel quantity to a
+        # JSON file under `test_runs/` for offline analysis.  Toggled
+        # by the "1-Turn Test" button in the Tools group.  See
+        # `_on_turn_test_clicked` and `_turn_test_capture_frame`.
+        self._turn_test_active            = False
+        self._turn_test_frames            = []
+        self._turn_test_start_yaw_deg     = 0.0
+        self._turn_test_total_yaw_deg     = 0.0
+        self._turn_test_last_yaw_deg      = 0.0
+        self._turn_test_t_accum_s         = 0.0
+        self._turn_test_btn               = None
+        self._turn_test_prev_speed_step   = 0
+        self._turn_test_prev_auto_circle  = False
+
+        # ---- Zig-zag terrain-sweep test --------------------------------
+        # Drives the tank in a boustrophedon ("ox-turn" / lawnmower)
+        # pattern across the terrain to record chassis pose response
+        # to the full surface, with stops + 180-deg turns at each
+        # end of each pass.  Captures the same per-frame data as
+        # the 1-Turn test plus a per-phase tag and a `nasty_events`
+        # list (pose changes > threshold) so the user can spot
+        # wild-pose locations on a map afterward.
+        self._zigzag_active            = False
+        self._zigzag_phase             = 'idle'   # idle / driving / stopping / turning / shifting / complete
+        self._zigzag_phase_t           = 0.0      # time in current phase (s)
+        self._zigzag_t_accum_s         = 0.0      # total run time (s)
+        self._zigzag_frames            = []
+        self._zigzag_nasty_events      = []
+        self._zigzag_strip_idx         = 0
+        self._zigzag_strip_count       = 10       # number of strips to traverse
+        self._zigzag_strip_width       = 3.0      # m, lateral shift per strip
+        self._zigzag_z_min             = -15.0    # m, start of each pass
+        self._zigzag_z_max             = +15.0    # m, end of each pass
+        self._zigzag_x_start           = -13.5    # m, X coord of strip 0
+        self._zigzag_pass_dir          = -1       # -1 = drive -Z, +1 = drive +Z
+        self._zigzag_target_yaw_deg    = 0.0
+        self._zigzag_drive_command     = False    # True => drive logic
+                                                  # treats it like W key held
+        self._zigzag_prev_speed_step   = 0
+        self._zigzag_prev_auto_circle  = False
+        self._zigzag_btn               = None
+        self._zigzag_prev_pitch        = 0.0
+        self._zigzag_prev_roll         = 0.0
+
         # ---- Auto circle-drive (`O` toggles) ---------------------------
         # When True, the tank ignores the arrow keys and instead
         # drives in a circle of radius `_auto_circle_radius` at the
@@ -1898,6 +1945,33 @@ class Viewer:
         # Stash the button so the toggle handler can mutate `active`
         # for the wheat locked-on border to render.
         self._pick_tri_btn = pick_btn
+        x       += 70 + self.ui.BUTTON_SPACING
+
+        # 1-Turn Test: drive the tank in a full 360-degree auto-circle
+        # at speed step 1 (per-tank top speed), recording per-frame
+        # chassis pose + per-wheel state to a JSON file under
+        # test_runs/.  Auto-stops on completion and restores prior
+        # speed-step + auto-circle state.  See _on_turn_test_clicked.
+        turn_btn = self.ui.add_button(
+            _('1-Turn Test'), x, y, 90, h, active=False,
+            action=self._on_turn_test_clicked)
+        turn_btn.accent_color = _theme.c1()
+        turn_btn.theme_slot   = 'c1'
+        self._turn_test_btn   = turn_btn
+        x       += 90 + self.ui.BUTTON_SPACING
+
+        # Zig-zag terrain sweep: drives the tank back-and-forth
+        # across the full terrain in straight strips, with stops
+        # + 180-deg turns at each end.  Captures full per-frame
+        # pose + flags "nasty plane change" events so the user
+        # can find wild-pose locations on the map.  See
+        # `_on_zigzag_test_clicked`.
+        zig_btn = self.ui.add_button(
+            _('Zig-Zag'), x, y, 70, h, active=False,
+            action=self._on_zigzag_test_clicked)
+        zig_btn.accent_color = _theme.c1()
+        zig_btn.theme_slot   = 'c1'
+        self._zigzag_btn     = zig_btn
         x       += 70 + self.ui.BUTTON_SPACING
 
         # ---- Extract group (top of the left panel) ----------------
@@ -3834,11 +3908,23 @@ class Viewer:
             # but readers see only the latest state.
             sys.stdout.write('\x1b[H\x1b[2J')
 
+            # Yaw-rate readout: instantaneous |dyaw/dt| from the
+            # physics integrator vs the per-tank cap from the chassis
+            # XML's <rotationSpeed>.  CAP suffix flags frames where
+            # the auto-circle clamp engaged (current rate within 0.5
+            # dps of the cap) -- a quick way to see "is this tank
+            # clipping its turn rate right now?" without having to
+            # finalize and re-analyse a recording.
+            _yr   = abs(float(getattr(tp, '_last_yaw_rate_dps', 0.0)))
+            _ycap = float(getattr(tp, 'max_yaw_rate_dps', 60.0))
+            _yflag = '  CAP' if _yr >= (_ycap - 0.5) and _yr > 1.0 else ''
             sys.stdout.write(
                 f'TEPY tank-physics live state\n'
                 f'================================\n'
                 f'pos     : ({tp.pos[0]:+.3f}, {tp.pos[1]:+.3f}, {tp.pos[2]:+.3f}) m\n'
                 f'yaw     : {tp.yaw_deg:+8.3f} deg\n'
+                f'yaw rate: {_yr:6.2f} / {_ycap:6.2f} dps  '
+                f'(XML <rotationSpeed>){_yflag}\n'
                 f'pitch   : {tp.pitch_deg:+8.3f} deg\n'
                 f'roll    : {tp.roll_deg:+8.3f} deg\n'
                 f'vy      : {tp.vy:+8.3f} m/s\n'
@@ -4144,8 +4230,40 @@ class Viewer:
             #   (0*cy + (-cp)*sy, sp, -0*sy + (-cp)*cy)
             #   = (-cp*sy, sp, -cp*cy)
             fwd = np.array([-cp_ * sy_, sp_, -cp_ * cy_], dtype=np.float64)
-            eye_local    = np.array([+0.0, +1.95, +0.0, 1.0],
-                                    dtype=np.float64)
+            # Eye position: gun mount in chassis-local space, lifted
+            # ~0.25 m so the camera sits ABOVE the breech / mantlet
+            # rather than inside it.  Pulled from the gun mesh's
+            # `bind_model_matrix` translation column -- that's
+            # `gun_offset_gl` from VehicleXMLLoader (turret pivot +
+            # gun pivot, + chassis_attach_y on Y, with Z negated).
+            # Falls back to the old fixed (0, 1.95, 0) if no gun
+            # mesh is present (e.g. an FBX-only import without a
+            # full vehicle assembly).  User request 2026-05-08:
+            # "i'm short and can see over the imaginary dashboard"
+            # -- the old fixed eye sat too low for tanks with the
+            # turret (and gun) mounted high (T30, T110E4, etc).
+            EYE_LIFT_M = 0.25
+            gun_world_local = None
+            for m in self.meshes:
+                if getattr(m, 'component', '') == 'gun':
+                    bm = getattr(m, 'bind_model_matrix', None)
+                    if bm is None:
+                        bm = getattr(m, 'model_matrix', None)
+                    if bm is not None:
+                        gun_world_local = (
+                            float(bm[0, 3]),
+                            float(bm[1, 3]),
+                            float(bm[2, 3]))
+                    break
+            if gun_world_local is not None:
+                eye_local = np.array(
+                    [gun_world_local[0],
+                     gun_world_local[1] + EYE_LIFT_M,
+                     gun_world_local[2],
+                     1.0], dtype=np.float64)
+            else:
+                eye_local = np.array([+0.0, +1.95, +0.0, 1.0],
+                                     dtype=np.float64)
             target_local = np.array([
                 eye_local[0] + 10.0 * fwd[0],
                 eye_local[1] + 10.0 * fwd[1],
@@ -5406,6 +5524,812 @@ class Viewer:
         else:
             self.picker.last_hit = None
             self.log_clear(status='')
+
+    # ------------------------------------------------------------------
+    def _on_turn_test_clicked(self):
+        """Start a 1-Turn auto-test recording.
+
+        Drives the tank in a full 360-degree auto-circle at speed
+        step 1 (the per-tank top speed) and captures every frame's
+        chassis pose + per-wheel state to memory.  When the chassis
+        accumulates 360 degrees of yaw, stops the tank, restores the
+        previous speed-step + auto-circle state, and writes the
+        captured data as a JSON file under ``test_runs/`` next to
+        the project root.
+
+        Pre-flight: requires Susp ON + Terrain ON + a tank loaded.
+        If the gates aren't all green, logs a single line and
+        bails -- the button stays inactive.
+
+        UI lock: while the test is running, the button is `active`
+        (wheat border).  Pressing it again mid-test cancels and
+        does NOT save.
+        """
+        # Cancel-mid-test path.
+        if self._turn_test_active:
+            self._turn_test_finalize(write_json=False, reason='cancelled')
+            return
+        # Gate checks.
+        if self.tank_physics is None or not self.meshes:
+            self.log("turn-test: load a tank first.",
+                     color=(255, 160, 160))
+            return
+        if not self.tank_physics_enabled:
+            self.log("turn-test: enable Susp first.",
+                     color=(255, 160, 160))
+            return
+        if not (self.show_terrain and self.terrain):
+            self.log("turn-test: enable Terrain first.",
+                     color=(255, 160, 160))
+            return
+
+        # Snapshot prior state so we can restore on completion.
+        self._turn_test_prev_speed_step  = int(getattr(self, '_speed_step', 0))
+        self._turn_test_prev_auto_circle = bool(getattr(self, '_auto_circle', False))
+
+        # Spawn the tank at a clean known location.  Same prep as
+        # the zig-zag test: origin XZ, all rotations / velocities
+        # zeroed, render-pose + integrators reset.  Without this,
+        # the test would start wherever the user happened to leave
+        # the tank, and the recorder data would carry pre-test
+        # inertia + mismatched chassis pose for the first ~10
+        # frames before the integrator settled.
+        tp = self.tank_physics
+        tp.pos[0]    = 0.0
+        tp.pos[2]    = 0.0
+        tp.yaw_deg   = 0.0
+        tp.pitch_deg = 0.0
+        tp.roll_deg  = 0.0
+        tp.vy        = 0.0
+        tp._render_pos_y     = float(tp.pos[1])
+        tp._render_pitch_deg = 0.0
+        tp._render_roll_deg  = 0.0
+        tp._render_vy        = 0.0
+        tp.omega_pitch_dps   = 0.0
+        tp.omega_roll_dps    = 0.0
+        tp.cur_forward_mps   = 0.0
+        tp._smoothed_a_lat_mps2  = 0.0
+        tp._smoothed_a_long_mps2 = 0.0
+
+        # Force max-speed forward + auto-circle ON.  The drive
+        # logic in handle_input picks these up next frame.
+        self._set_speed_step(1)
+        self._auto_circle = True
+
+        # Reset recorder state.
+        self._turn_test_frames        = []
+        self._turn_test_t_accum_s     = 0.0
+        self._turn_test_start_yaw_deg = float(self.tank_physics.yaw_deg)
+        self._turn_test_last_yaw_deg  = self._turn_test_start_yaw_deg
+        self._turn_test_total_yaw_deg = 0.0
+        self._turn_test_tail_t        = None  # post-360 brake tail timer
+        self._turn_test_active        = True
+        if self._turn_test_btn is not None:
+            self._turn_test_btn.active = True
+
+        self.log_clear(status='1-Turn Test')
+        self.log(
+            f"turn-test: started.  speed=1, auto-circle ON, "
+            f"R={self._auto_circle_radius:.2f} m, "
+            f"top_kph={self._top_speed_kph:.1f}.  "
+            f"Will auto-stop after 360 deg.",
+            color=(180, 220, 255))
+
+    # ------------------------------------------------------------------
+    def _turn_test_capture_frame(self, dt):
+        """Per-frame snapshot.  Called from `render()` immediately
+        after `tank_physics.update()` returns and before the meshes
+        are re-posed for drawing -- so `last_wheel_world`,
+        `last_terrain_y`, `last_target_y`, `last_residual_y`,
+        `last_wheel_state`, and `smoothed_residual_y` all reflect
+        THIS frame's solve.
+
+        Also accumulates the chassis yaw delta + checks the 360-deg
+        completion condition; when reached, calls
+        `_turn_test_finalize` to write the JSON and restore UI
+        state.
+        """
+        if not self._turn_test_active or self.tank_physics is None:
+            return
+        tp = self.tank_physics
+
+        # Wrap-aware yaw delta accumulation.  yaw_deg can wrap from
+        # -180 to +180 (or any 360 boundary depending on the
+        # integrator); wrap by taking the smallest signed delta
+        # mod 360 in (-180, +180].
+        cur_yaw  = float(tp.yaw_deg)
+        d_yaw    = (cur_yaw - self._turn_test_last_yaw_deg + 540.0) % 360.0 - 180.0
+        self._turn_test_total_yaw_deg += d_yaw
+        self._turn_test_last_yaw_deg   = cur_yaw
+
+        # Time accumulator.
+        self._turn_test_t_accum_s += float(dt)
+
+        # Per-wheel snapshot.  We capture BOTH the target-pose-
+        # projected wheel position (`world_xyz` from
+        # `last_wheel_world`, which uses `_chassis_matrix_target`)
+        # AND the rendered (post-skin) wheel position
+        # (`world_xyz_render`, computed inline below from
+        # `chassis_matrix()` (render pose) + the skinning bone-Y
+        # translation).  Plus render-XZ-sampled terrain so the
+        # penetration check uses the terrain UNDER the visible
+        # wheel, not under the target-pose wheel (those XZs differ
+        # when chassis target / render diverge in pitch/roll).
+        STATE_NAMES = {0: 'NONE', 1: 'CONTACT', 2: 'HANGING', 3: 'OVER_COMP'}
+        wheels_out = []
+        n = len(tp.wheels)
+        # Build the render chassis matrix once for this frame.
+        chassis_render = np.asarray(tp.chassis_matrix(), dtype=np.float64)
+        # Pre-sample terrain at every wheel's render-pose XZ in a
+        # single batched call -- much cheaper than per-wheel.
+        if (self.terrain is not None
+                and hasattr(self.terrain, 'sample_heights')):
+            local_h = np.column_stack([
+                tp.wheels[:, 0], tp.wheels[:, 1], tp.wheels[:, 2],
+                np.ones(len(tp.wheels), dtype=np.float64)])
+            world_render_h = (chassis_render @ local_h.T).T
+            terrain_render_y = np.asarray(self.terrain.sample_heights(
+                world_render_h[:, 0], world_render_h[:, 2]),
+                dtype=np.float64)
+        else:
+            terrain_render_y = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            name = (tp.wheel_bone_names[i]
+                    if i < len(tp.wheel_bone_names) and tp.wheel_bone_names[i]
+                    else None)
+            local = tp.wheels[i]
+            wlw   = (tp.last_wheel_world[i]
+                     if i < len(tp.last_wheel_world)
+                     else (0.0, 0.0, 0.0))
+            ty    = (float(tp.last_terrain_y[i])
+                     if i < len(tp.last_terrain_y) else 0.0)
+            tgt   = (float(tp.last_target_y[i])
+                     if i < len(tp.last_target_y) else 0.0)
+            rry   = (float(tp.last_residual_y[i])
+                     if i < len(tp.last_residual_y) else 0.0)
+            sry   = (float(tp.smoothed_residual_y[i])
+                     if hasattr(tp, 'smoothed_residual_y')
+                     and i < len(tp.smoothed_residual_y)
+                     else 0.0)
+            sc    = (int(tp.last_wheel_state[i])
+                     if hasattr(tp, 'last_wheel_state')
+                     and i < len(tp.last_wheel_state)
+                     else 0)
+            # Rendered (visible) wheel-centre position in world.
+            # Mirror of the GPU-skinning formula:
+            #   world = render_chassis @ (lx, ly + bone_y, lz, 1)
+            # Bone Y-translation in the actual GPU path is
+            # `+last_residual_y` (RAW, not smoothed -- per the
+            # 2026-05-08 master-override change in
+            # `bone_matrix_array` Pass 1).  Using `smoothed_residual_y`
+            # here in the recorder produced a phantom 10+ cm
+            # penetration in analysis because the smoothed value
+            # lags the raw one through the asymmetric EMA.
+            local_skinned = np.array(
+                [float(local[0]),
+                 float(local[1]) + rry,
+                 float(local[2]),
+                 1.0], dtype=np.float64)
+            wlw_render = chassis_render @ local_skinned
+            wheels_out.append({
+                'idx':            i,
+                'side':           'L' if i < tp.n_left else 'R',
+                'name':           name,
+                'local_xyz':      [float(local[0]), float(local[1]), float(local[2])],
+                # World wheel-CENTRE in TARGET-pose projection.
+                'world_xyz':      [float(wlw[0]),   float(wlw[1]),   float(wlw[2])],
+                # World wheel-CENTRE in RENDER-pose projection (post-
+                # skin).  This is what the user sees on screen.
+                'world_xyz_render': [float(wlw_render[0]),
+                                     float(wlw_render[1]),
+                                     float(wlw_render[2])],
+                'terrain_y':      ty,
+                # Terrain Y sampled at the RENDER-pose wheel XZ
+                # (the actual visible wheel location).  Use this
+                # for penetration analysis -- `terrain_y` is at
+                # the target-pose XZ which can differ.
+                'terrain_y_render': float(terrain_render_y[i]),
+                'target_y':       tgt,
+                'residual_y':     rry,
+                'smoothed_residual_y': sry,
+                'state_code':     sc,
+                'state':          STATE_NAMES.get(sc, '?'),
+            })
+
+        # `pitch_deg` / `roll_deg` / `pos_y` = TARGET pose (what the
+        # solver computed this frame).  `pitch_render` /
+        # `roll_render` / `pos_y_render` = RENDERED pose (what the
+        # inertia integrator landed on, what the user sees on screen).
+        # Capturing both lets us see the damping behaviour:
+        # post-2026-05-08 the target may briefly spike (e.g., bad
+        # plane fit on a cliff edge) but the render should track
+        # smoothly behind it.
+        self._turn_test_frames.append({
+            'frame':          len(self._turn_test_frames),
+            't_s':            float(self._turn_test_t_accum_s),
+            'dt_s':           float(dt),
+            'yaw_deg':        cur_yaw,
+            'pitch_deg':      float(tp.pitch_deg),         # TARGET
+            'roll_deg':       float(tp.roll_deg),          # TARGET
+            'pitch_render':   float(getattr(tp, '_render_pitch_deg', 0.0)),
+            'roll_render':    float(getattr(tp, '_render_roll_deg',  0.0)),
+            'omega_pitch_dps': float(getattr(tp, 'omega_pitch_dps', 0.0)),
+            'omega_roll_dps':  float(getattr(tp, 'omega_roll_dps',  0.0)),
+            # Lateral-G + centripetal-lean telemetry.
+            'a_lat_mps2':     float(getattr(tp, '_last_a_lat_mps2',   0.0)),
+            'speed_mps':      float(getattr(tp, '_last_speed_mps',    0.0)),
+            'yaw_rate_dps':   float(getattr(tp, '_last_yaw_rate_dps', 0.0)),
+            'lean_target_deg': float(getattr(tp, '_target_lat_lean_roll_deg', 0.0)),
+            # Longitudinal-G + squat/dive telemetry.
+            'a_long_mps2':    float(getattr(tp, '_last_a_long_mps2', 0.0)),
+            'signed_speed_mps': float(getattr(tp, '_last_signed_speed_mps', 0.0)),
+            'pitch_lean_target_deg': float(getattr(tp, '_target_long_lean_pitch_deg', 0.0)),
+            # Smoothed (EMA, 5-frame trailing) accels -- the values
+            # the lean targets are actually computed from.  Compare
+            # against the raw `a_*_mps2` to see how much per-frame
+            # noise the EMA filtered out.
+            'a_lat_smoothed_mps2':  float(getattr(tp, '_smoothed_a_lat_mps2',  0.0)),
+            'a_long_smoothed_mps2': float(getattr(tp, '_smoothed_a_long_mps2', 0.0)),
+            # Pitch-lean gate state -- True when ANY wheel on the
+            # loaded side is over-compressed in the render pose.
+            'gate_rear_over_render':  bool(getattr(
+                tp, '_gate_any_rear_over_render',  False)),
+            'gate_front_over_render': bool(getattr(
+                tp, '_gate_any_front_over_render', False)),
+            'yaw_total_deg':  float(self._turn_test_total_yaw_deg),
+            'pos_x':          float(tp.pos[0]),
+            'pos_y':          float(tp.pos[1]),            # TARGET y
+            'pos_y_render':   float(getattr(tp, '_render_pos_y', 0.0)),
+            'pos_z':          float(tp.pos[2]),
+            'vy_mps':         float(tp.vy),
+            'render_vy_mps':  float(getattr(tp, '_render_vy', 0.0)),
+            'cur_speed_mps_signed': float(getattr(self, '_current_forward', 0.0)),
+            'wheels':         wheels_out,
+        })
+
+        # Completion: total yaw magnitude crossed 360 (auto-circle
+        # winds in one consistent direction so |total_yaw| is the
+        # right metric).
+        #
+        # AFTER the 360 mark hits, we keep recording for a
+        # `BRAKE_TAIL_SECONDS` window so the data captures the
+        # decel + nose-dive event.  The drive logic auto-stops the
+        # tank (sets speed_step=0, _current_forward=0) when
+        # `_turn_test_finalize` runs at the end of the tail; until
+        # then auto-circle stays on at speed 1, producing one extra
+        # frame of full-speed cruise per frame.  Tail window is
+        # short enough not to bloat the recording but long enough
+        # for the brake-dive to fully develop and decay.
+        BRAKE_TAIL_SECONDS = 2.0
+        if abs(self._turn_test_total_yaw_deg) >= 360.0:
+            tail = getattr(self, '_turn_test_tail_t', None)
+            if tail is None:
+                # First frame we crossed 360 -- start the tail
+                # timer + cut the drive INPUT so the tank coasts
+                # to a stop via the existing accel/decel ramp.
+                # IMPORTANT: do NOT directly zero `_current_forward`
+                # / `cur_forward_mps` here -- doing so bypasses the
+                # DRIVE_DECEL ramp and produces a 1283 m/s^2
+                # speed-step artifact (visible as a one-frame
+                # 16.7 -> 0 m/s jump in the 2026-05-08 test).
+                # Setting `_speed_step = 0` makes the next handle_
+                # input frame compute target_forward=0; the ramp
+                # then pulls `_current_forward` toward 0 at
+                # DRIVE_DECEL=10 m/s^2 (~1.67 s from full speed),
+                # which fits comfortably inside the 2 s tail.
+                self._turn_test_tail_t = float(self._turn_test_t_accum_s)
+                self._auto_circle = bool(self._turn_test_prev_auto_circle)
+                try:
+                    self._set_speed_step(0)
+                except Exception:
+                    self._speed_step = 0
+                # _current_forward and cur_forward_mps are LEFT at
+                # their current (cruise) values so the ramp can
+                # naturally decelerate them toward zero.
+            elif self._turn_test_t_accum_s - tail >= BRAKE_TAIL_SECONDS:
+                # Tail window elapsed -- finalize and write.
+                self._turn_test_tail_t = None
+                self._turn_test_finalize(write_json=True, reason='complete')
+
+    # ------------------------------------------------------------------
+    def _turn_test_finalize(self, write_json=True, reason='complete'):
+        """Stop the test, restore prior speed / auto-circle state,
+        and (when `write_json`) write the captured frames to a JSON
+        file under ``<project_root>/test_runs/``."""
+        # Stop the tank, restore prior speed-step + auto-circle.
+        self._auto_circle = bool(self._turn_test_prev_auto_circle)
+        try:
+            self._set_speed_step(0)
+        except Exception:
+            self._speed_step = 0
+        # Hard-stop forward velocity ramp so the tank actually
+        # comes to a halt instead of coasting through the next
+        # frames at the test's max speed.
+        self._current_forward = 0.0
+
+        n_frames = len(self._turn_test_frames)
+        out_path = None
+        if write_json and n_frames > 0:
+            try:
+                out_path = self._turn_test_save_json(reason=reason)
+            except Exception as exc:
+                self.log(f"turn-test: save failed: {exc}",
+                         color=(255, 160, 160))
+                import traceback
+                traceback.print_exc()
+
+        # Reset state + button.
+        self._turn_test_active        = False
+        self._turn_test_frames        = []
+        self._turn_test_total_yaw_deg = 0.0
+        if self._turn_test_btn is not None:
+            self._turn_test_btn.active = False
+
+        if out_path:
+            self.log(f"turn-test: {reason} ({n_frames} frames) -> "
+                     f"{out_path}",
+                     color=(180, 220, 255))
+        else:
+            self.log(f"turn-test: {reason} ({n_frames} frames)",
+                     color=(180, 220, 255))
+
+    # ------------------------------------------------------------------
+    def _turn_test_save_json(self, reason='complete'):
+        """Write the captured run to ``test_runs/<tank>_<ts>.json``
+        with a metadata header."""
+        import os
+        import json
+        from datetime import datetime
+        # Project root (parent of `tankExporterPy/`).
+        proj_root = os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
+        out_dir   = os.path.join(proj_root, 'test_runs')
+        os.makedirs(out_dir, exist_ok=True)
+        tank_name = (self._active_set.source_tank_name
+                     if (self._active_set is not None
+                         and self._active_set.source_tank_name)
+                     else 'unknown_tank')
+        ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path  = os.path.join(out_dir,
+                                  f'turn_test_{tank_name}_{ts}.json')
+
+        tp = self.tank_physics
+        meta = {
+            'schema_version':     1,
+            'kind':               'tank_turn_test',
+            'reason':             reason,
+            'tank':               tank_name,
+            'timestamp':          datetime.now().isoformat(timespec='seconds'),
+            'tepy_version':       __import__(
+                'tankExporterPy', fromlist=['__version__']).__version__,
+            'speed_step':         1,
+            'top_speed_kph':      float(getattr(self, '_top_speed_kph', 50.0)),
+            'auto_circle_radius_m': float(
+                getattr(self, '_auto_circle_radius', 5.0)),
+            'gravity':            float(tp.gravity),
+            'radius_m':           float(tp.radius),
+            'min_offset_m':       float(tp.min_offset),
+            'max_offset_m':       float(tp.max_offset),
+            'track_thickness_m':  float(tp.track_thickness),
+            'mass_kg':            float(tp.mass_kg),
+            'com_local':          [float(c) for c in tp.com_local],
+            'lateral_lean_gain':  float(getattr(tp, 'lateral_lean_gain', 0.0)),
+            'longitudinal_lean_gain': float(getattr(tp, 'longitudinal_lean_gain', 0.0)),
+            'comp_cap_m':         float(-tp.min_offset),
+            'ext_cap_m':          float(-tp.max_offset),
+            'envelope_total_m':   float(tp.max_offset - tp.min_offset),
+            'n_wheels':           int(len(tp.wheels)),
+            'n_left':             int(tp.n_left),
+            'n_right':            int(tp.n_right),
+            'wheel_bone_names':   list(tp.wheel_bone_names),
+            'wheel_local_positions': [
+                [float(w[0]), float(w[1]), float(w[2])]
+                for w in tp.wheels],
+            'state_code_legend':  {
+                '0': 'NONE',
+                '1': 'CONTACT',
+                '2': 'HANGING',
+                '3': 'OVER_COMP',
+            },
+            'frame_count':        int(len(self._turn_test_frames)),
+            'duration_s':         float(self._turn_test_t_accum_s),
+            'final_total_yaw_deg': float(self._turn_test_total_yaw_deg),
+            'sign_convention':    {
+                'residual_y_positive_means': 'wheel rises into hull (compression)',
+                'residual_y_negative_means': 'wheel droops below neutral (extension)',
+            },
+        }
+        # Per-tank config that affects physics interpretation.
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        if ci:
+            meta['chassis_info_xml'] = {
+                k: (float(v) if isinstance(v, (int, float)) else v)
+                for k, v in ci.items()}
+
+        payload = {
+            'meta':   meta,
+            'frames': self._turn_test_frames,
+        }
+        with open(out_path, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, indent=1)
+        return out_path
+
+    # ------------------------------------------------------------------
+    def _on_zigzag_test_clicked(self):
+        """Start a zig-zag terrain-sweep test.
+
+        Drives the tank in a boustrophedon (lawnmower) pattern across
+        the terrain: forward to the end of a strip, stop, turn 180,
+        shift one strip width, drive back, stop, turn, shift, etc.
+        Records every frame to memory + flags any frame where chassis
+        pitch / roll change rate exceeds a "nasty plane change"
+        threshold so the user can locate problem terrain features on
+        the map after the run.
+
+        Pre-flight gates: same as 1-Turn (Susp + Terrain + tank
+        loaded).  Cancel-mid-run by pressing the button again.
+        """
+        if self._zigzag_active:
+            self._zigzag_finalize(write_json=False, reason='cancelled')
+            return
+        if self.tank_physics is None or not self.meshes:
+            self.log("zig-zag: load a tank first.",
+                     color=(255, 160, 160))
+            return
+        if not self.tank_physics_enabled:
+            self.log("zig-zag: enable Susp first.",
+                     color=(255, 160, 160))
+            return
+        if not (self.show_terrain and self.terrain):
+            self.log("zig-zag: enable Terrain first.",
+                     color=(255, 160, 160))
+            return
+
+        self._zigzag_prev_speed_step  = int(getattr(self, '_speed_step', 0))
+        self._zigzag_prev_auto_circle = bool(getattr(self, '_auto_circle', False))
+
+        # Place the tank at strip 0, facing -Z (toward z_min).
+        tp = self.tank_physics
+        tp.pos[0]    = float(self._zigzag_x_start)
+        tp.pos[2]    = float(self._zigzag_z_max)
+        # Yaw 0 in our convention faces +Z; we want to drive in -Z
+        # direction (visible-front-of-tank is at chassis-local -Z).
+        # Setting yaw_deg = 180 has the chassis facing +Z which is
+        # the OPPOSITE direction.  Setting yaw_deg = 0 faces -Z.
+        # Actually since tp.pos[2] += cyy * cur * dt with cur < 0
+        # for forward and cyy=cos(yaw), at yaw=0: pos[2] += 1 * cur
+        # = decreases (-Z).  So yaw=0 already drives -Z.  Good.
+        tp.yaw_deg   = 0.0
+        tp.pitch_deg = 0.0
+        tp.roll_deg  = 0.0
+        tp.vy        = 0.0
+        # Reset render-pose + integrators so the tank doesn't carry
+        # in pre-test inertia.
+        tp._render_pos_y     = float(tp.pos[1])
+        tp._render_pitch_deg = 0.0
+        tp._render_roll_deg  = 0.0
+        tp._render_vy        = 0.0
+        tp.omega_pitch_dps   = 0.0
+        tp.omega_roll_dps    = 0.0
+        tp.cur_forward_mps   = 0.0
+        tp._smoothed_a_lat_mps2  = 0.0
+        tp._smoothed_a_long_mps2 = 0.0
+
+        self._auto_circle = False
+        self._set_speed_step(1)
+
+        self._zigzag_frames        = []
+        self._zigzag_nasty_events  = []
+        self._zigzag_t_accum_s     = 0.0
+        self._zigzag_phase         = 'driving'
+        self._zigzag_phase_t       = 0.0
+        self._zigzag_strip_idx     = 0
+        self._zigzag_pass_dir      = -1
+        self._zigzag_target_yaw_deg = float(tp.yaw_deg)
+        self._zigzag_drive_command = True
+        self._zigzag_prev_pitch    = 0.0
+        self._zigzag_prev_roll     = 0.0
+        self._zigzag_active        = True
+        if self._zigzag_btn is not None:
+            self._zigzag_btn.active = True
+
+        self.log_clear(status='Zig-Zag Sweep')
+        self.log(
+            f"zig-zag: started.  {self._zigzag_strip_count} strips, "
+            f"{self._zigzag_strip_width:.1f} m wide, "
+            f"Z range [{self._zigzag_z_min:+.1f},{self._zigzag_z_max:+.1f}] m, "
+            f"X start {self._zigzag_x_start:+.1f} m.  speed=1.",
+            color=(180, 220, 255))
+
+    # ------------------------------------------------------------------
+    def _zigzag_step(self, dt):
+        """Per-frame state machine: advance the zig-zag pattern,
+        capture telemetry, and flag pose-spike events.
+
+        Called from `render()` after the physics tick (so chassis_pose
+        and per-wheel state reflect THIS frame's solve).  No-op when
+        the test isn't active.
+        """
+        if not self._zigzag_active or self.tank_physics is None:
+            return
+        tp = self.tank_physics
+        self._zigzag_phase_t   += float(dt)
+        self._zigzag_t_accum_s += float(dt)
+
+        # ---- State machine -----------------------------------------
+        STOP_SETTLE_THRESHOLD = 0.10   # m/s, below this we count as stopped
+        TURN_RATE_DPS         = 90.0   # deg/s during turning phase
+        TURN_DONE_TOL         = 1.0    # deg from target
+
+        if self._zigzag_phase == 'driving':
+            self._zigzag_drive_command = True
+            # Reached end of strip?
+            if (self._zigzag_pass_dir < 0
+                    and tp.pos[2] <= self._zigzag_z_min):
+                self._zigzag_phase   = 'stopping'
+                self._zigzag_phase_t = 0.0
+                self._zigzag_drive_command = False
+                self._set_speed_step(0)
+            elif (self._zigzag_pass_dir > 0
+                    and tp.pos[2] >= self._zigzag_z_max):
+                self._zigzag_phase   = 'stopping'
+                self._zigzag_phase_t = 0.0
+                self._zigzag_drive_command = False
+                self._set_speed_step(0)
+        elif self._zigzag_phase == 'stopping':
+            self._zigzag_drive_command = False
+            cur = float(getattr(self, '_current_forward', 0.0))
+            if abs(cur) < STOP_SETTLE_THRESHOLD:
+                self._zigzag_strip_idx += 1
+                if self._zigzag_strip_idx >= self._zigzag_strip_count:
+                    self._zigzag_phase = 'complete'
+                else:
+                    self._zigzag_target_yaw_deg = (
+                        tp.yaw_deg + 180.0) % 360.0
+                    if self._zigzag_target_yaw_deg > 180.0:
+                        self._zigzag_target_yaw_deg -= 360.0
+                    self._zigzag_phase   = 'turning'
+                    self._zigzag_phase_t = 0.0
+        elif self._zigzag_phase == 'turning':
+            self._zigzag_drive_command = False
+            self._set_speed_step(0)
+            delta = ((self._zigzag_target_yaw_deg - tp.yaw_deg
+                      + 540.0) % 360.0) - 180.0
+            if abs(delta) < TURN_DONE_TOL:
+                tp.yaw_deg = self._zigzag_target_yaw_deg
+                self._zigzag_phase   = 'shifting'
+                self._zigzag_phase_t = 0.0
+            else:
+                step = TURN_RATE_DPS * dt
+                if step > abs(delta): step = abs(delta)
+                tp.yaw_deg += step if delta > 0 else -step
+        elif self._zigzag_phase == 'shifting':
+            # One-frame teleport laterally by strip_width along
+            # chassis-local +X (perpendicular to the new heading).
+            # tp.yaw_deg is the new heading (0 or 180).
+            # +X chassis-local in world after yaw rotation:
+            #   world_x = cos(yaw)*X_local + sin(yaw)*Z_local
+            # For X_local = strip_width, Z_local = 0:
+            yaw_rad = math.radians(tp.yaw_deg)
+            tp.pos[0] += float(
+                self._zigzag_strip_width * math.cos(yaw_rad))
+            tp.pos[2] += float(
+                self._zigzag_strip_width * (-math.sin(yaw_rad)))
+            # Reverse pass direction.
+            self._zigzag_pass_dir *= -1
+            self._set_speed_step(1)
+            self._zigzag_phase   = 'driving'
+            self._zigzag_phase_t = 0.0
+            self._zigzag_drive_command = True
+        elif self._zigzag_phase == 'complete':
+            self._zigzag_finalize(write_json=True, reason='complete')
+            return
+
+        # ---- Per-frame snapshot ------------------------------------
+        # Same wheel + pose data as the 1-Turn recorder, plus phase
+        # info + nasty-event flag.
+        STATE_NAMES = {0: 'NONE', 1: 'CONTACT', 2: 'HANGING', 3: 'OVER_COMP'}
+        wheels_out = []
+        n = len(tp.wheels)
+        chassis_render = np.asarray(tp.chassis_matrix(), dtype=np.float64)
+        if (self.terrain is not None
+                and hasattr(self.terrain, 'sample_heights')):
+            local_h = np.column_stack([
+                tp.wheels[:, 0], tp.wheels[:, 1], tp.wheels[:, 2],
+                np.ones(len(tp.wheels), dtype=np.float64)])
+            world_render_h = (chassis_render @ local_h.T).T
+            terrain_render_y = np.asarray(
+                self.terrain.sample_heights(
+                    world_render_h[:, 0], world_render_h[:, 2]),
+                dtype=np.float64)
+        else:
+            terrain_render_y = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            name = (tp.wheel_bone_names[i]
+                    if i < len(tp.wheel_bone_names) and tp.wheel_bone_names[i]
+                    else None)
+            local = tp.wheels[i]
+            wlw   = (tp.last_wheel_world[i]
+                     if i < len(tp.last_wheel_world)
+                     else (0.0, 0.0, 0.0))
+            ty    = (float(tp.last_terrain_y[i])
+                     if i < len(tp.last_terrain_y) else 0.0)
+            tgt   = (float(tp.last_target_y[i])
+                     if i < len(tp.last_target_y) else 0.0)
+            rry   = (float(tp.last_residual_y[i])
+                     if i < len(tp.last_residual_y) else 0.0)
+            sc    = (int(tp.last_wheel_state[i])
+                     if hasattr(tp, 'last_wheel_state')
+                     and i < len(tp.last_wheel_state)
+                     else 0)
+            local_skinned = np.array(
+                [float(local[0]),
+                 float(local[1]) + rry,
+                 float(local[2]),
+                 1.0], dtype=np.float64)
+            wlw_render = chassis_render @ local_skinned
+            wheels_out.append({
+                'idx':            i,
+                'side':           'L' if i < tp.n_left else 'R',
+                'name':           name,
+                'local_xyz':      [float(local[0]), float(local[1]), float(local[2])],
+                'world_xyz_render': [float(wlw_render[0]),
+                                     float(wlw_render[1]),
+                                     float(wlw_render[2])],
+                'terrain_y_render': float(terrain_render_y[i]),
+                'target_y':       tgt,
+                'residual_y':     rry,
+                'state_code':     sc,
+                'state':          STATE_NAMES.get(sc, '?'),
+            })
+
+        # Pose change rates for nasty-event detection.
+        cur_pitch = float(tp._render_pitch_deg)
+        cur_roll  = float(tp._render_roll_deg)
+        d_pitch_dps = (cur_pitch - self._zigzag_prev_pitch) / max(dt, 1e-3)
+        d_roll_dps  = (cur_roll  - self._zigzag_prev_roll)  / max(dt, 1e-3)
+        self._zigzag_prev_pitch = cur_pitch
+        self._zigzag_prev_roll  = cur_roll
+
+        NASTY_DPS = 100.0    # deg/s threshold for "nasty plane change"
+        is_nasty = (abs(d_pitch_dps) > NASTY_DPS
+                    or abs(d_roll_dps) > NASTY_DPS)
+
+        frame_idx = len(self._zigzag_frames)
+        self._zigzag_frames.append({
+            'frame':          frame_idx,
+            't_s':            float(self._zigzag_t_accum_s),
+            'dt_s':           float(dt),
+            'phase':          self._zigzag_phase,
+            'strip_idx':      self._zigzag_strip_idx,
+            'pass_dir':       self._zigzag_pass_dir,
+            'yaw_deg':        float(tp.yaw_deg),
+            'pitch_deg':      float(tp.pitch_deg),
+            'roll_deg':       float(tp.roll_deg),
+            'pitch_render':   float(tp._render_pitch_deg),
+            'roll_render':    float(tp._render_roll_deg),
+            'pos_x':          float(tp.pos[0]),
+            'pos_y':          float(tp.pos[1]),
+            'pos_z':          float(tp.pos[2]),
+            'pos_y_render':   float(tp._render_pos_y),
+            'd_pitch_dps':    float(d_pitch_dps),
+            'd_roll_dps':     float(d_roll_dps),
+            'is_nasty':       bool(is_nasty),
+            'wheels':         wheels_out,
+        })
+        if is_nasty:
+            self._zigzag_nasty_events.append({
+                'frame':          frame_idx,
+                't_s':            float(self._zigzag_t_accum_s),
+                'phase':          self._zigzag_phase,
+                'strip_idx':      self._zigzag_strip_idx,
+                'pos_x':          float(tp.pos[0]),
+                'pos_y_render':   float(tp._render_pos_y),
+                'pos_z':          float(tp.pos[2]),
+                'pitch_render':   float(tp._render_pitch_deg),
+                'roll_render':    float(tp._render_roll_deg),
+                'd_pitch_dps':    float(d_pitch_dps),
+                'd_roll_dps':     float(d_roll_dps),
+            })
+
+    # ------------------------------------------------------------------
+    def _zigzag_finalize(self, write_json=True, reason='complete'):
+        """Stop the zig-zag run, restore prior speed/auto-circle,
+        and (when `write_json`) save a JSON file under
+        `<project_root>/test_runs/`."""
+        self._auto_circle = bool(self._zigzag_prev_auto_circle)
+        try:
+            self._set_speed_step(self._zigzag_prev_speed_step)
+        except Exception:
+            self._speed_step = self._zigzag_prev_speed_step
+        self._current_forward      = 0.0
+        self._zigzag_drive_command = False
+        if self.tank_physics is not None:
+            self.tank_physics.cur_forward_mps = 0.0
+
+        n_frames = len(self._zigzag_frames)
+        n_nasty  = len(self._zigzag_nasty_events)
+        out_path = None
+        if write_json and n_frames > 0:
+            try:
+                out_path = self._zigzag_save_json(reason=reason)
+            except Exception as exc:
+                self.log(f"zig-zag: save failed: {exc}",
+                         color=(255, 160, 160))
+                import traceback; traceback.print_exc()
+
+        self._zigzag_active        = False
+        self._zigzag_phase         = 'idle'
+        self._zigzag_drive_command = False
+        self._zigzag_frames        = []
+        self._zigzag_nasty_events  = []
+        if self._zigzag_btn is not None:
+            self._zigzag_btn.active = False
+
+        if out_path:
+            self.log(f"zig-zag: {reason} -- {n_frames} frames, "
+                     f"{n_nasty} nasty events -> {out_path}",
+                     color=(180, 220, 255))
+        else:
+            self.log(f"zig-zag: {reason} -- {n_frames} frames, "
+                     f"{n_nasty} nasty events",
+                     color=(180, 220, 255))
+
+    # ------------------------------------------------------------------
+    def _zigzag_save_json(self, reason='complete'):
+        """Write the zig-zag run to test_runs/zigzag_<tank>_<ts>.json."""
+        import os, json
+        from datetime import datetime
+        proj_root = os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
+        out_dir   = os.path.join(proj_root, 'test_runs')
+        os.makedirs(out_dir, exist_ok=True)
+        tank_name = (self._active_set.source_tank_name
+                     if (self._active_set is not None
+                         and self._active_set.source_tank_name)
+                     else 'unknown_tank')
+        ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path  = os.path.join(out_dir, f'zigzag_{tank_name}_{ts}.json')
+
+        tp = self.tank_physics
+        meta = {
+            'schema_version':     1,
+            'kind':               'tank_zigzag_test',
+            'reason':             reason,
+            'tank':               tank_name,
+            'timestamp':          datetime.now().isoformat(timespec='seconds'),
+            'tepy_version':       __import__(
+                'tankExporterPy', fromlist=['__version__']).__version__,
+            'top_speed_kph':      float(getattr(self, '_top_speed_kph', 50.0)),
+            'gravity':            float(tp.gravity),
+            'mass_kg':            float(tp.mass_kg),
+            'radius_m':           float(tp.radius),
+            'min_offset_m':       float(tp.min_offset),
+            'max_offset_m':       float(tp.max_offset),
+            'track_thickness_m':  float(tp.track_thickness),
+            'n_wheels':           int(len(tp.wheels)),
+            'n_left':             int(tp.n_left),
+            'wheel_bone_names':   list(tp.wheel_bone_names),
+            'wheel_local_positions': [
+                [float(w[0]), float(w[1]), float(w[2])]
+                for w in tp.wheels],
+            'pattern': {
+                'strip_count': int(self._zigzag_strip_count),
+                'strip_width_m': float(self._zigzag_strip_width),
+                'z_min_m': float(self._zigzag_z_min),
+                'z_max_m': float(self._zigzag_z_max),
+                'x_start_m': float(self._zigzag_x_start),
+            },
+            'frame_count':        int(len(self._zigzag_frames)),
+            'duration_s':         float(self._zigzag_t_accum_s),
+            'nasty_event_threshold_dps': 100.0,
+            'nasty_event_count':  int(len(self._zigzag_nasty_events)),
+            'nasty_events':       self._zigzag_nasty_events,
+        }
+        with open(out_path, 'w', encoding='utf-8') as fh:
+            json.dump({'meta': meta, 'frames': self._zigzag_frames},
+                      fh, indent=1)
+        return out_path
 
     # ------------------------------------------------------------------
     def _on_picker_hit_change(self, mesh_idx, tri_idx):
@@ -7912,6 +8836,35 @@ class Viewer:
                     _chassis_kwargs['max_offset'] = float(_ci['maxOffset'])
                 if 'renderModelOffset' in _ci:
                     _chassis_kwargs['track_thickness'] = float(_ci['renderModelOffset'])
+                # Total tank mass from the gameplay XML's per-component
+                # <weight> sum.  Drives the inertia-damped pose
+                # integrator: heavier tank -> slower pitch / roll
+                # response (61-tonne T30 cannot pitch from 0 to 89
+                # degrees in 13 ms, regardless of what the plane fit
+                # demands).
+                _mass = float(getattr(self, '_total_weight_kg', 0.0) or 0.0)
+                if _mass > 100.0:
+                    _chassis_kwargs['mass_kg'] = _mass
+                # Per-tank max yaw rate from chassis XML's
+                # <rotationSpeed>.  The field is stored as a string by
+                # `_scalars`; coerce to float here.  Verified unit:
+                # degrees per second (T110E4 = 26 dps; not radians,
+                # which would yield an absurd 1500 dps spin).  Caps
+                # both manual yaw input AND auto-circle yaw rate so
+                # the tank can never out-spin its real chassis.  When
+                # the field is missing or unparseable, the default
+                # baked into the TankPhysics ctor (60 dps) wins, which
+                # was the previous hardcoded value in the drive
+                # handler -- so behaviour for tanks without a parsed
+                # rotationSpeed is unchanged.
+                _rspd = _ci.get('rotationSpeed')
+                if _rspd:
+                    try:
+                        _rspd_f = float(str(_rspd).strip())
+                        if _rspd_f > 0.0:
+                            _chassis_kwargs['max_yaw_rate_dps'] = _rspd_f
+                    except (ValueError, TypeError):
+                        pass
                 self.tank_physics = TankPhysics.from_chassis_meshes(
                     chass, **_chassis_kwargs)
                 # Reset position state on tank reload so old
@@ -8790,6 +9743,26 @@ class Viewer:
                     # F1 is reserved for the help overlay (future).
                     self.wireframe = not self.wireframe
                     self._sync_button_state('wireframe', self.wireframe)
+                elif event.key == K_F3:
+                    # 1-Turn auto-test: same code path as the
+                    # "1-Turn Test" button in the Tools group.
+                    # Drives the tank in a full 360-degree
+                    # auto-circle at speed step 1 (top per-tank
+                    # speed) and saves a frame-by-frame JSON dump
+                    # of chassis pose + per-wheel state to
+                    # test_runs/.  Press again mid-test to cancel.
+                    self._on_turn_test_clicked()
+                elif event.key == K_F4:
+                    # Zig-zag terrain-sweep test (boustrophedon).
+                    # Drives the tank back-and-forth across the
+                    # whole terrain in straight strips, stopping
+                    # + 180-deg turning at each end.  Records
+                    # every frame to test_runs/zigzag_*.json with
+                    # a `nasty_events` list flagging frames where
+                    # chassis pitch/roll change rate exceeded a
+                    # threshold -- locations to inspect on the
+                    # map.  Press again mid-run to cancel.
+                    self._on_zigzag_test_clicked()
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
                 elif event.key == K_o:
@@ -8825,45 +9798,101 @@ class Viewer:
                     # 2026-05-08.
                     if (self.camera_mode == 2
                             and self.tank_physics is not None):
-                        chassis = np.asarray(
-                            self.tank_physics.chassis_matrix(),
-                            dtype=np.float64)
-                        # Use the SAME eye + head-rotated target the
-                        # commander view is actually looking at -- so
-                        # free cam picks up at the current head
-                        # rotation, not the forward-locked default.
-                        # Mirror of _anchored_view_matrix's C2 branch.
-                        head_yaw   = math.radians(self._head_yaw_deg)
-                        head_pitch = math.radians(self._head_pitch_deg)
-                        cy_, sy_ = math.cos(head_yaw),   math.sin(head_yaw)
-                        cp_, sp_ = math.cos(head_pitch), math.sin(head_pitch)
-                        fwd = np.array(
-                            [-cp_ * sy_, sp_, -cp_ * cy_],
-                            dtype=np.float64)
-                        eye_local    = np.array(
-                            [0.0, 1.95, 0.0, 1.0], dtype=np.float64)
-                        target_local = np.array(
-                            [eye_local[0] + 10.0 * fwd[0],
-                             eye_local[1] + 10.0 * fwd[1],
-                             eye_local[2] + 10.0 * fwd[2],
-                             1.0], dtype=np.float64)
-                        eye_world    = (chassis @ eye_local)[:3]
-                        target_world = (chassis @ target_local)[:3]
-                        # offset points from look-at BACK to eye --
-                        # which is exactly the orbit camera's
-                        # eye-relative-to-center vector.
-                        offset = eye_world - target_world
-                        dist   = float(np.linalg.norm(offset))
-                        if dist > 1e-6:
-                            self.camera.center   = (
-                                target_world.astype(np.float32))
-                            self.camera.distance = max(0.5, dist)
-                            self.camera.yaw     = float(np.degrees(
-                                np.arctan2(offset[0], offset[2])))
-                            self.camera.pitch   = float(np.degrees(
-                                np.arctan2(
-                                    offset[1],
-                                    np.hypot(offset[0], offset[2]))))
+                        # NOTE: wrap the entire save-commander-view
+                        # block in try/except.  This runs only on the
+                        # 2 -> 0 hop, which is the 3RD C-press, so
+                        # any latent bug here is silent until the
+                        # third press and then closes the app.  We
+                        # prefer a logged failure + falling through
+                        # to "free cam keeps its previous orbit
+                        # state" over killing the session.  A
+                        # specific instance of this was the
+                        # `bind_model_matrix or model_matrix`
+                        # short-circuit chain below: `or` on a 4x4
+                        # numpy array raises ValueError ("truth
+                        # value of an array ...is ambiguous") because
+                        # Python has to coerce the LHS to bool.  Now
+                        # using explicit `is not None` checks.
+                        try:
+                            chassis = np.asarray(
+                                self.tank_physics.chassis_matrix(),
+                                dtype=np.float64)
+                            # Use the SAME eye + head-rotated target
+                            # the commander view is actually looking
+                            # at -- so free cam picks up at the
+                            # current head rotation, not the
+                            # forward-locked default.  Mirror of
+                            # _anchored_view_matrix's C2 branch.
+                            head_yaw   = math.radians(self._head_yaw_deg)
+                            head_pitch = math.radians(self._head_pitch_deg)
+                            cy_, sy_ = (math.cos(head_yaw),
+                                        math.sin(head_yaw))
+                            cp_, sp_ = (math.cos(head_pitch),
+                                        math.sin(head_pitch))
+                            fwd = np.array(
+                                [-cp_ * sy_, sp_, -cp_ * cy_],
+                                dtype=np.float64)
+                            # Same gun-mount eye lookup as the
+                            # commander branch of
+                            # _anchored_view_matrix -- keep in sync.
+                            EYE_LIFT_M = 0.25
+                            gun_local = None
+                            for _m in self.meshes:
+                                if getattr(_m, 'component', '') != 'gun':
+                                    continue
+                                # Explicit-None path: `or` would call
+                                # bool(ndarray) and explode.
+                                _bm = getattr(_m, 'bind_model_matrix',
+                                              None)
+                                if _bm is None:
+                                    _bm = getattr(_m, 'model_matrix',
+                                                  None)
+                                if _bm is not None:
+                                    gun_local = (
+                                        float(_bm[0, 3]),
+                                        float(_bm[1, 3]),
+                                        float(_bm[2, 3]))
+                                break
+                            if gun_local is not None:
+                                eye_local = np.array(
+                                    [gun_local[0],
+                                     gun_local[1] + EYE_LIFT_M,
+                                     gun_local[2],
+                                     1.0], dtype=np.float64)
+                            else:
+                                eye_local = np.array(
+                                    [0.0, 1.95, 0.0, 1.0],
+                                    dtype=np.float64)
+                            target_local = np.array(
+                                [eye_local[0] + 10.0 * fwd[0],
+                                 eye_local[1] + 10.0 * fwd[1],
+                                 eye_local[2] + 10.0 * fwd[2],
+                                 1.0], dtype=np.float64)
+                            eye_world    = (chassis @ eye_local)[:3]
+                            target_world = (chassis @ target_local)[:3]
+                            # offset points from look-at BACK to eye
+                            # -- which is exactly the orbit camera's
+                            # eye-relative-to-center vector.
+                            offset = eye_world - target_world
+                            dist   = float(np.linalg.norm(offset))
+                            if (dist > 1e-6
+                                    and np.all(np.isfinite(offset))
+                                    and np.all(np.isfinite(target_world))):
+                                self.camera.center   = (
+                                    target_world.astype(np.float32))
+                                self.camera.distance = max(0.5, dist)
+                                self.camera.yaw     = float(np.degrees(
+                                    np.arctan2(offset[0], offset[2])))
+                                self.camera.pitch   = float(np.degrees(
+                                    np.arctan2(
+                                        offset[1],
+                                        np.hypot(offset[0],
+                                                 offset[2]))))
+                        except Exception as _ex:
+                            self.log(
+                                f"commander->orbit save failed: "
+                                f"{type(_ex).__name__}: {_ex}",
+                                color=(255, 180, 120))
                     self.camera_mode = (
                         self.camera_mode + 1) % self._N_CAMERA_MODES
                     # Entering commander mode: reset head rotation to
@@ -9044,13 +10073,17 @@ class Viewer:
             # tank doesn't move until the user picks a speed via
             # keys 1-9.
             move_speed = -self._speed_yards_per_sec()   # m/s, sign flipped
-            yaw_speed  = -60.0  # deg/s, sign flipped (yaw rate is
-                                # speed-step-independent for now;
-                                # could scale with move_speed later
-                                # but turn-in-place has its own feel
-                                # and Professor Coffee can flag if
-                                # it needs a step ladder too)
             tp = self.tank_physics
+            # Per-tank yaw cap.  Pulled from the chassis XML's
+            # <rotationSpeed> at load time (in dps; T110E4 = 26,
+            # M60 ~ 48, T30 ~ 22, default 60 if missing).  Sign
+            # flipped to match TEPY's rendered Z direction, same
+            # reason move_speed is sign-flipped above.  Manual yaw
+            # is INSTANT (no ramp) -- when A/D is held the tank turns
+            # at exactly its chassis's max rate, which already feels
+            # right because tracked vehicles do not spool yaw the
+            # way they spool forward speed.
+            yaw_speed = -float(getattr(tp, 'max_yaw_rate_dps', 60.0))
             yaw = math.radians(tp.yaw_deg)
             cyy, syy = math.cos(yaw), math.sin(yaw)
             moved = False
@@ -9069,7 +10102,8 @@ class Viewer:
             target_forward = 0.0
             if self._auto_circle:
                 target_forward = move_speed
-            elif keys[pygame.K_w] or keys[pygame.K_s]:
+            elif (keys[pygame.K_w] or keys[pygame.K_s]
+                    or self._zigzag_drive_command):
                 # W and S both drive forward (momentary -- release
                 # to stop, same as any other drive key).  S used
                 # to be a cruise toggle but Professor Coffee
@@ -9105,6 +10139,13 @@ class Viewer:
             else:
                 cur += step if delta > 0 else -step
             self._current_forward = cur
+            # Hand the smooth ramped speed to the physics layer
+            # (negated to flip viewer's "forward = negative move_speed
+            # convention" to physics's "forward = +cur_forward_mps").
+            # Used by `_update_lateral_lean` for the centripetal /
+            # squat-dive leans -- much cleaner signal than deriving
+            # speed from chassis position deltas.
+            tp.cur_forward_mps = -float(cur)
 
             # ---- Auto circle drive ---------------------------------
             # When toggled ON via `O`, the tank ignores manual drive
@@ -9119,7 +10160,19 @@ class Viewer:
                 R    = max(0.1, float(self._auto_circle_radius))
                 v    = abs(cur)   # current ramped m/s
                 if v > 1e-6:
+                    # Kinematic yaw rate to hold a circle of radius R
+                    # at speed v: omega = v / R  (rad/s).  Clamped to
+                    # the per-tank chassis cap below so a fast tank
+                    # with a tight radius doesn't spin faster than its
+                    # real <rotationSpeed>.  Effect when clamped: the
+                    # arc widens automatically -- the tank traces a
+                    # larger circle than requested, which is the
+                    # physically correct outcome (real tank can't
+                    # carve a circle smaller than v / max_omega).
                     omega_deg = math.degrees(v / R)
+                    cap = float(getattr(tp, 'max_yaw_rate_dps', 60.0))
+                    if omega_deg > cap:
+                        omega_deg = cap
                     tp.yaw_deg -= omega_deg * dt
                     yaw = math.radians(tp.yaw_deg)
                     cyy, syy = math.cos(yaw), math.sin(yaw)
@@ -9299,6 +10352,34 @@ class Viewer:
                 self.tank_physics.pitch_deg = 0.0
                 self.tank_physics.roll_deg  = 0.0
                 self.tank_physics.vy        = 0.0
+                # Also zero the inertia integrator state so the
+                # render pose lands at world origin matching the
+                # bind-pose mesh render -- otherwise the integrator
+                # would carry stale pre-toggle render pos / omegas
+                # and the rendered chassis would float somewhere
+                # above the actual tank for a few frames after
+                # toggle.
+                self.tank_physics._render_pos_y     = 0.0
+                self.tank_physics._render_pitch_deg = 0.0
+                self.tank_physics._render_roll_deg  = 0.0
+                self.tank_physics._render_vy        = 0.0
+                self.tank_physics.omega_pitch_dps   = 0.0
+                self.tank_physics.omega_roll_dps    = 0.0
+                # Lateral-G / centripetal-lean tracking state -- if
+                # we don't reset, on Susp ON the FIRST frame's
+                # `last_yaw_deg_for_lat` would be stale (e.g. from
+                # before a tank reload), producing a giant phantom
+                # yaw_rate that immediately leans the chassis.
+                self.tank_physics.last_yaw_deg_for_lat      = 0.0
+                self.tank_physics.last_pos_x_for_lat        = 0.0
+                self.tank_physics.last_pos_z_for_lat        = 0.0
+                self.tank_physics._target_lat_lean_roll_deg = 0.0
+                self.tank_physics.last_signed_speed_mps        = 0.0
+                self.tank_physics._target_long_lean_pitch_deg  = 0.0
+                # Drive-layer speed input + EMA smoothers also.
+                self.tank_physics.cur_forward_mps              = 0.0
+                self.tank_physics._smoothed_a_lat_mps2         = 0.0
+                self.tank_physics._smoothed_a_long_mps2        = 0.0
             self.tank_physics_enabled = new_susp
 
         # ---- GPU timer query: begin -------------------------------------
@@ -9405,6 +10486,16 @@ class Viewer:
             import time as _time
             _t_phys0 = _time.perf_counter()
             chassis_pose = self.tank_physics.update(self.terrain, dt)
+            # 1-Turn auto-test recorder: capture this frame's freshly-
+            # computed wheel state + chassis pose BEFORE we apply the
+            # pose to meshes (the recorder doesn't read mesh state,
+            # but ordering it here keeps `last_*_y` arrays at their
+            # post-update values without ambiguity).  No-op when the
+            # test isn't running.
+            if self._turn_test_active:
+                self._turn_test_capture_frame(dt)
+            if self._zigzag_active:
+                self._zigzag_step(dt)
             # Apply chassis pose to every sub-mesh.
             for m in self.meshes:
                 m.model_matrix = (chassis_pose

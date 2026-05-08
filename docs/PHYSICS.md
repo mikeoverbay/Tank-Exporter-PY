@@ -104,6 +104,7 @@ block (descendant search via `.//tag`, NOT direct child):
 | `<groundNodes><group><minOffset>` | `min_offset` | -0.06 | -0.04 |
 | `<groundNodes><group><maxOffset>` | `max_offset` | +0.06 | +0.08 |
 | `<trackThickness>` (preferred) or `<renderModelOffset>` | `track_thickness` | +0.029 | +0.016 |
+| `<rotationSpeed>` (chassis section, dps) | `max_yaw_rate_dps` | ~22 | 26 |
 
 Note: T30's `<renderModelOffset>` is published as `-0.029` in
 the gameplay XML.  The loader takes `abs()` at parse time --
@@ -167,10 +168,10 @@ have NO road-wheel bones at all — they're skinned only to
 |----------|--------|
 | `W`, `S` | Forward (hold).  S used to be cruise toggle; flipped to hold-to-drive at user request. |
 | `Z`, `X` | Backward (hold).  X is duplicate of Z. |
-| `A`, `Q` | Yaw left.  Yaw rate is INSTANT (no ramp) because tanks pivot quickly when stopped. |
+| `A`, `Q` | Yaw left.  Rate = chassis XML `<rotationSpeed>` in dps (T30 ~22, T110E4 26, M60 ~48; 60 default).  No ramp -- tracked vehicles spool yaw fast because both tracks contribute torque immediately. |
 | `D`, `E` | Yaw right. |
 | `0`-`9`  | Speed step.  0 = stopped (default).  1 = full top speed.  9 = creep (0.1 kph).  2-8 linearly interpolated. |
-| `O`      | Toggle auto-circle drive.  Tank ignores manual keys, pulls a steady arc of radius `_auto_circle_radius` at the current ramped speed. |
+| `O`      | Toggle auto-circle drive.  Tank ignores manual keys, pulls a steady arc of radius `_auto_circle_radius` at the current ramped speed.  Yaw rate `omega = v / R` is clamped to `max_yaw_rate_dps`; when a tight radius + high speed exceeds the cap, the tank visibly widens the arc rather than out-spinning its chassis. |
 | `C`      | Cycle camera mode (orbit / chase / commander).  Always starts on chase (1) per recent change. |
 | `F2`     | Wireframe overlay. |
 

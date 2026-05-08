@@ -9,6 +9,153 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Track NURB Phase A1 — track_spline.py module (1.103.0)
+
+Promoted the proven Catmull-Rom + arc-length-resample math from
+`_plot_t30_smooth.py` (root-of-tree probe) into a real package
+module: `tankExporterPy/track_spline.py`.  Public API:
+
+```python
+parse_track_vlocs(text)              # .track XML -> [(name, 4x4)]
+to_chassis_frame(vlocs)              # cm -> m, runtime frame
+centripetal_catmull_rom_closed(P)    # alpha=0.5 closed CR
+resample_uniform(dense, n_pads)      # uniform-arc-length pad transforms
+TrackSplineLoader.from_pkg(pe, path) # both sides at once
+TrackSplineSide                      # per-side container w/ lazy caches
+```
+
+T30 smoke test passes: 17 V_locs / side, total loop length
+15.1261 m, pad spacing 0.1292 m mean / 0.30 mm std across 117
+pads.  Numbers match `docs/TRACK_PHYSICS.md` exactly.  LEFT/RIGHT
+symmetry verified (X = ±1.480 m).
+
+**Coordinate-frame fix.**  The probe negates Y to put top run
+below Y = 0 in its plot; the runtime needs the OPPOSITE
+convention -- raw V_loc Y matches chassis-bone Y directly,
+top run lands at Y = +1.24 m (above the W_L\<i\> wheel hubs at
+Y = +0.448 m, which is geometrically correct: the track wraps
+over the top of the hull above the wheels).
+`to_chassis_frame()` defaults to `flip_y=False` and the docstring
+warns against propagating the probe's plot convention.
+
+**Topology discovery, baked into the doc.**  The 17 V_locs cover
+ONLY the top run + sprocket / idler wraps -- there are NO
+control points along the bottom run (V_loc2 jumps directly to
+V_loc15 across a 6.76 m chord at Y ≈ +0.55).  The bottom run
+will be synthesised at runtime in Phase A3 by inserting
+Track_L\<i\> bone positions (one per road wheel) between V_loc2
+and V_loc15 in arc-length order.  This caught a wrong claim in
+the original `TRACK_PHYSICS.md` Phase-A1 sketch ("bottom-run
+V_locs at Y ≈ 0") -- doc has been corrected.
+
+Phase A2 (bone-binding `{V_loc_i -> bone_name}` map) and Phase A3
+(per-frame V_loc update from chassis bones + Track_L\<i\>
+insertion + CR + resample) are next.  Module is independent of
+viewer + tank_physics so far -- can be exercised standalone.
+
+### Yaw-rate live readout in console panel (1.102.1)
+
+`_dump_bone_angles_to_console` now prints a `yaw rate: X.XX / Y.YY
+dps  (XML <rotationSpeed>)` line directly under `yaw`.  X is
+`abs(tp._last_yaw_rate_dps)` (instantaneous yaw rate from the
+integrator), Y is `tp.max_yaw_rate_dps` (the per-tank cap from the
+chassis XML).  When X reaches within 0.5 dps of Y, a `CAP` flag
+appears at end of line so cap-engagement is obvious without having
+to run the recording analyzer.  Use case: hold A on T110E4 (cap =
+26 dps) -- you see `yaw rate: 26.00 /  26.00 dps  CAP`; switch to
+M60 (cap = 52 dps) and the same key shows `yaw rate: 52.00 / 52.00
+dps  CAP`.  Fast verification that the per-tank cap is wired right.
+
+The static on-screen chassis info panel already showed
+`rotationSpeed` (one of the standard `_INFO_SECTIONS` fields), so
+no additional UI work was needed there -- the cap value is visible
+in the side panel and the realtime rate against it is now in the
+stdout panel.
+
+### Per-tank max yaw rate (1.102.0)
+
+Up to now the manual yaw rate was a hardcoded `60 dps` in
+`viewer.handle_input` and the auto-circle yaw rate was pure
+kinematic `omega = v / R` with no cap.  That meant a 25 m circle at
+50 kph asked the chassis to spin at `13.9 / 25 = 0.556 rad/s = 32
+dps`, which the renderer applied verbatim regardless of what the
+real tank could do.  T110E4's gameplay XML publishes
+`<rotationSpeed>26</rotationSpeed>` in degrees per second; T30 ~22
+dps, M60 ~48 dps.  We were over-spinning every heavy tank.
+
+Wiring (each step kept thin so a future change can swap one piece
+without touching the others):
+
+* `loaders.VehicleXMLLoader.parse_info`: the chassis section's
+  `<rotationSpeed>` was already harvested by `_scalars` into
+  `info['chassis']['rotationSpeed']` as a string.  No loader change
+  needed -- the conversion to float happens at the use site (same
+  pattern as `groupRadius_road` / `minOffset` / `maxOffset`).
+* `tank_physics.TankPhysics.__init__`: new
+  `max_yaw_rate_dps=60.0` ctor arg, stored as `self.max_yaw_rate_dps`.
+  60 dps default preserves the previous behaviour for tanks whose
+  chassis XML doesn't publish the field.
+* `tank_physics.from_chassis_meshes`: forwards the new kwarg to
+  both the real-rig and the T110E4-fallback `cls(...)` call.
+* `viewer.py` chassis-kwargs construction (~line 8836): coerces
+  `_ci.get('rotationSpeed')` to float and adds it to the
+  `from_chassis_meshes` call.  Defensive: skip when missing,
+  unparseable, or non-positive (the 60 dps default in
+  `TankPhysics.__init__` then wins).
+* `viewer.handle_input` drive block: replaced the literal
+  `yaw_speed = -60.0` with `-tp.max_yaw_rate_dps`.  Sign flipped
+  for the same TEPY-Z reason `move_speed` is.
+* `viewer.handle_input` auto-circle block: clamps
+  `omega_deg = math.degrees(v / R)` to `tp.max_yaw_rate_dps`.
+  Effect when a small radius + high speed exceeds the cap: the
+  tank can no longer hold the requested radius and visibly traces
+  a wider arc.  This is the physically correct outcome -- a real
+  T110E4 cannot carve a 25 m circle at 50 kph.
+
+The yaw rate stays INSTANT (no rotational-inertia ramp).  Real
+tracked vehicles spool yaw fast because both tracks contribute
+torque immediately; the visible "tank pivots quickly when stopped"
+behaviour is preserved.  If a future session wants angular
+inertia on the chassis (the v1.93.0 attempt that got reverted),
+the math should integrate `omega_yaw` against a yaw moment of
+inertia rather than re-introducing the contact-classifier
+feedback loop -- see PHYSICS.md "Reverted experiments".
+
+### C-key crash on 3rd press (1.101.0)
+
+Pressing `C` cycles camera mode `0 -> 1 -> 2 -> 0`.  The 3rd press is
+the only one that takes the `2 -> 0` (commander -> orbit) branch, which
+saves commander's current eye + look-at into the orbit camera so free
+cam doesn't yank back to a stale pose.  That save block walked
+`self.meshes` looking for the gun, with:
+
+```python
+_bm = (getattr(_m, 'bind_model_matrix', None)
+       or getattr(_m, 'model_matrix', None))
+```
+
+`bind_model_matrix` is a 4x4 numpy array on every loaded mesh.  Python's
+`or` short-circuit has to evaluate `bool(arr)` on the LHS to pick a
+side, and `bool(ndarray-with-more-than-one-element)` raises
+`ValueError: The truth value of an array with more than one element is
+ambiguous`.  Since this code path only fires on the 3rd `C` press, the
+crash was silent until then -- and looked like "the app closes when I
+press C three times".
+
+Fix in `viewer.py` C-key handler (~line 9767):
+
+* Replaced the `or` chain with explicit `is not None` fallthrough.
+* Wrapped the entire commander -> orbit save block in
+  `try/except Exception`, logging the failure to the on-screen log
+  and falling through (free cam keeps its previous orbit state)
+  rather than killing the session.  This is the right resilience
+  posture for a code path that runs once every three presses --
+  any future regression here would otherwise wait days before
+  surfacing.
+* Added `np.isfinite` guards on `offset` / `target_world` before
+  writing into `self.camera`, so a NaN'd chassis matrix would
+  also fall through cleanly.
+
 ### Tank-physics + camera deep-clean (1.100.0)
 
 Long second session covering wheel-physics correctness, camera UX

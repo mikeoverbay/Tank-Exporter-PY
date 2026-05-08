@@ -33,22 +33,28 @@ spline length, which is the slack budget — not a spring.
 
 ## Coordinate-frame conversion
 
-Source `.track` Collada matrices and `.visual_processed` bone
-transforms are in WoT's DirectX-handed frame; our renderer / physics
-run in OpenGL frame.  At load time everything pulled from these
-sources gets:
+The `.track` Collada matrices land in the SAME chassis-local
+frame as the chassis-mesh vertices (and the bone hierarchy in
+`.visual_processed`).  At load time we apply only a units
+conversion:
 
 ```python
-gl_pos     = (dx_pos[0], -dx_pos[1], -dx_pos[2])
-gl_tangent = (dx_t[0],   -dx_t[1],   -dx_t[2])
+chassis_pos = (raw[0] / 100, raw[1] / 100, raw[2] / 100)   # cm -> m
 ```
 
-The Z-flip reverses handedness, which reverses traversal direction
-along a closed loop, so we also reverse the V_loc array order at
-load so pad index 0 still walks rear → top → front → bottom →
-back-to-rear in GL.  This mirrors the existing rule we apply to
-every other DX-sourced asset (positions / normals / tangents /
-binormals — see `COORDINATE_SYSTEMS.md`).
+**No Y flip, no Z flip.**  Verified on T30: raw V_loc Y values
+land in [+0.52, +1.26] with the top run at Y = +1.24 m sitting
+above the W_L<i> wheel hubs at Y = +0.448 m, which is exactly
+the geometric arrangement (track wraps over the top of the
+hull above the wheels).  The chassis is no longer Z-flipped on
+load (`from_chassis_meshes` has used `flip_z = False` since
+v1.93.2), so we don't need to undo a flip we no longer apply.
+
+The standalone probes (`_plot_t30_*.py`) negate Y in their
+extraction, but that's a PLOT-axis convention for the side-view
+images — they project to YZ with Y-down as the natural image
+axis.  Don't carry that into the runtime; `track_spline.to_chassis_frame()`
+defaults to `flip_y=False` and warns against opting in.
 
 ---
 
@@ -93,15 +99,38 @@ table is in.
 
 ---
 
+## What's in the .track file vs what's NOT
+
+Discovered while wiring Phase A1 (2026-05-08): T30's `left.track`
+contains exactly **17 V_locs covering ONLY the top run + the
+sprocket / idler wraparounds**.  There are NO V_locs along the
+bottom run.  The 17 V_locs trace, in source order:
+
+* `V_loc29 / V_loc30 / V_loc31` — top → front-wrap-down (Y from
+  +1.19 sliding to +0.93 as Z goes -3.15 → -3.50)
+* `V_loc1 / V_loc2`             — front-wrap-bottom (Y +0.71, +0.52)
+* gap → `V_loc15`               — rear-wrap-bottom (Y +0.62 at
+  Z = +3.45) — this is a **6.76 m chord** at Y ≈ +0.55 spanning
+  the entire bottom run with no intermediate control points
+* `V_loc15..19`                 — rear-wrap-up to top (Y +0.62 → +1.26)
+* `V_loc21..27`                 — top run (Y +1.24, evenly Z-spaced)
+
+The bottom run is reconstructed at runtime by **inserting
+Track_L\<i\> bone positions** (one per road wheel) between
+`V_loc2` and `V_loc15` in arc-length order along the loop.
+Each Track_L\<i\> bone sits at `(W_L<i>.x, ground_y, W_L<i>.z)` —
+the wheel's hub X/Z but ground-contact Y, deflecting with
+suspension as the wheel-rest changes.  See Phase A3 below.
+
 ## Why kinematic, not elastic
 
-Each V_loc binds 1:1 to a chassis bone:
+Per-bone V_loc binding (refined version, post-Phase-A1 discovery):
 
-| V_loc neighbourhood | Bound to | Updated each frame from |
-|---------------------|----------|--------------------------|
-| Bottom-run V_locs (Y ≈ 0)         | `Track_L<i>` | road wheel `W_L<i>` settled rest position + suspension delta (already computed by `tank_physics.py`) |
-| Top-run V_locs                    | `Track_VT_L<i>` | linear interp / catenary sag between adjacent return rollers |
-| Drive-sprocket / idler wraparound | `Track_VD_L<i>` | rigid offset from chassis (sprocket / idler centre + radius) |
+| V_loc neighbourhood | Source bone | Updated each frame from |
+|---------------------|-------------|--------------------------|
+| Top-run V_locs                    | `Track_VT_L<i>` | Bind position from `.visual_processed`, optionally sagging slightly between rollers (catenary; future polish) |
+| Drive-sprocket / idler wraparound | `Track_VD_L<i>` | Rigid offset from chassis (sprocket / idler centre + radius) — these don't deflect |
+| **Bottom-run synthetic points**   | `Track_L<i>`    | Inserted between `V_loc2` and `V_loc15`, X/Z from the bind W_L\<i\>, Y = wheel hub Y - radius - track_thickness, after `tank_physics.py` resolves the suspension residual |
 
 When a wheel deflects on a bump → its `Track_L<i>` bone moves →
 the bound V_loc rides it → the centripetal-CR through the V_locs

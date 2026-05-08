@@ -451,12 +451,19 @@ class TankPhysics:
         min_offset, max_offset (float): suspension travel envelope
             in metres (relative to bind-pose).  Negative = rise.
         gravity      (float): m/s^2 downward acceleration when no
-            wheel is on the ground.  9.8 by default.
+            wheel is on the ground.  Default 29.43 m/s^2 = 3x Earth
+            (was 58.92 = 6x).  TEPY's models are visually smaller
+            than the real-world tanks they represent, so a higher-
+            than-Earth gravity scale gives "tank-feel-heavy" fall
+            timing without falls feeling too fast/snappy.  Knob
+            tunable per session via `--gravity` if added later.
     """
 
     def __init__(self, wheels_left, wheels_right,
                  radius=0.33, min_offset=-0.04, max_offset=+0.08,
-                 gravity=58.92, track_thickness=0.016):
+                 gravity=29.43, track_thickness=0.016,
+                 mass_kg=30000.0,
+                 max_yaw_rate_dps=60.0):
         self.wheels = np.asarray(
             list(wheels_left) + list(wheels_right), dtype=np.float64)
         self.n_left  = len(wheels_left)
@@ -537,6 +544,167 @@ class TankPhysics:
         # frame to make the right call.
         self.wheel_bone_names = []
 
+        # ---- Mass + center-of-mass --------------------------------
+        # `mass_kg` is the total tank weight from the gameplay XML's
+        # per-component `<weight>` summed by `VehicleXMLLoader`.
+        # T30 = 61 t; M60 ~ 50 t.  Drives the inertia-damped pose
+        # integrator below: heavier tank -> slower angular response.
+        #
+        # `com_local` is the chassis-local centroid of all wheel
+        # positions -- the simplest CoM placement the user requested
+        # ("center of plane") that doesn't need any extra data.  For
+        # symmetric road-wheel layouts (most tracked tanks) this is
+        # ~(0, ~0.43, 0) -- middle of the wheels, at hub height.
+        # Asymmetric tanks (T30's rear casemate, the gun overhang)
+        # would benefit from a component-weighted CoM later -- this
+        # is the v1 placement, good enough to start the inertia work.
+        self.mass_kg   = float(mass_kg)
+        self.com_local = (self.wheels.mean(axis=0).copy()
+                          if len(self.wheels) > 0
+                          else np.zeros(3, dtype=np.float64))
+
+        # ---- Yaw rate cap (per-tank) ------------------------------
+        # Source: chassis `<rotationSpeed>` from the gameplay XML,
+        # in DEGREES PER SECOND (verified vs T110E4 = 26 dps; turret
+        # `<rotationSpeed>` in the same unit).  Caps both manual yaw
+        # input (A/Q/D/E keys) and auto-circle yaw (omega = v / R) so
+        # the tank can never spin faster than the real chassis would.
+        # Default 60 dps (= the previous hardcoded constant in
+        # viewer.handle_input) when XML doesn't supply one -- that's
+        # roughly an Abrams / E5-class fast hull, a safe cap for any
+        # tank that doesn't publish rotationSpeed.
+        #
+        # Real-tank values from WoT XMLs (dps):
+        #   T30        ~22  (heavy, slow turner)
+        #   T110E4      26  (heavy TD)
+        #   M60         48  (medium)
+        #   AMX-50B     54  (autoloader heavy)
+        # Auto-circle effects: a tight radius (small R) at high
+        # speed demands omega = v / R that can exceed the cap.  When
+        # clamped, the visible arc widens -- a 50 kph tank with a 26
+        # dps cap can't make a 25 m circle; viewer clamps and the
+        # tank traces a wider arc.  This is physically correct.
+        self.max_yaw_rate_dps = float(max_yaw_rate_dps)
+
+        # ---- Inertia-damped pose integrator state -----------------
+        # Pre-2026-05-08 the chassis pose was hard-snapped to the
+        # plane-fit + force-balance result every frame.  That made
+        # the chassis instantly track the contact set's lstsq plane
+        # -- works fine on smooth terrain, fails catastrophically
+        # when terrain features lift most wheels off ground in one
+        # frame: the plane fit through the few remaining contacts
+        # can return a near-vertical normal, and the chassis
+        # instantly snaps to a 89-degree roll (= "tank on its side")
+        # in a single frame.  Witnessed in M60 turn-test data at
+        # frame 737 (auto-circle radius 25 m, top speed 60 kph,
+        # crossing a Perlin-terrain hill peak).
+        #
+        # Fix: treat the solver's output as a TARGET pose; integrate
+        # the ACTUAL chassis pose toward it via a critically-damped
+        # second-order spring.  Mass scales the natural frequency
+        # so heavier tanks respond more slowly -- 61-tonne T30 can
+        # NEVER pitch from 0 to 89 degrees in 13 ms because doing so
+        # requires angular acceleration of ~115,000 deg/s^2 that the
+        # spring will not deliver.
+        #
+        # Why this didn't work in v1.93.0: the contact classifier
+        # AND the iterative-refinement loop were reading the lagged
+        # integrated pose, then refitting the plane through wheels
+        # classified against THAT pose -- positive feedback.  Fix
+        # this time: solver computes target on TARGET locals only,
+        # never reads `self.pitch_deg / roll_deg / pos[1]` while
+        # building the target.  Integrator runs once at the end
+        # with the locked-in target.
+        self.omega_pitch_dps = 0.0    # deg/s, chassis pitch rate
+        self.omega_roll_dps  = 0.0    # deg/s, chassis roll  rate
+        # Render-pose state (lagged behind the solver's target via
+        # the second-order integrator).  `chassis_matrix()` returns
+        # a matrix built from these (the visible chassis) -- the
+        # solver internals use `_chassis_matrix_target()` which
+        # reads `self.pos / pitch_deg / roll_deg` (the target).
+        self._render_pos_y     = 0.0
+        self._render_pitch_deg = 0.0
+        self._render_roll_deg  = 0.0
+        self._render_vy        = 0.0  # m/s, integrator vertical vel
+
+        # ---- Centripetal lean ("kid out a side window") ------------
+        # Each frame we measure yaw rate (degrees/sec) + forward
+        # speed (m/s) from chassis-state deltas, derive lateral
+        # acceleration `a_lat = speed * yaw_rate_rad/s`, and apply
+        # a steady-state lean target = atan(a_lat / g) to the
+        # INTEGRATOR (not the solver) so the contact classifier
+        # never sees this lean -- avoids re-creating the v1.93.0
+        # feedback bug on the roll axis.
+        #
+        # Sign convention (per-axis tested on M60 turn run):
+        #   yaw_rate > 0  -> right turn (chassis-yaw clockwise
+        #                   viewed from above)
+        #   centripetal   -> -X chassis-local (toward turn centre,
+        #                   i.e. tank's left side)
+        #   outward lean  -> +X chassis-local (tank's right side
+        #                   drops) -> roll_deg becomes NEGATIVE
+        #   so target_lean_roll_deg = -atan(a_lat / g) [degrees]
+        #
+        # `lateral_lean_gain` scales this between 0 (rigid -- no
+        # lean) and 1 (full geometric).  Real tanks are stiffer than
+        # cars; 0.5-0.8 typical.  Default 0.7 = noticeable lean
+        # without overdriving the integrator.
+        self.last_yaw_deg_for_lat        = 0.0
+        self.last_pos_x_for_lat          = 0.0
+        self.last_pos_z_for_lat          = 0.0
+        self.lateral_lean_gain           = 0.7
+        self._last_a_lat_mps2            = 0.0   # telemetry
+        self._last_speed_mps             = 0.0   # telemetry
+        self._last_yaw_rate_dps          = 0.0   # telemetry
+        self._target_lat_lean_roll_deg   = 0.0   # integrator offset
+
+        # ---- Longitudinal lean (squat under accel, dive under brake) -
+        # Mirror of the lateral-lean: derive longitudinal accel from
+        # chassis-forward signed speed delta, apply atan(a_long/g)
+        # to the integrator-side PITCH target so the contact
+        # classifier never sees this lean either.
+        #
+        # Sign convention (EMPIRICALLY VERIFIED on the M60 run,
+        # 2026-05-08 -- earlier comments here were wrong):
+        #   pitch_render > 0  =>  nose UP    on screen
+        #   pitch_render < 0  =>  nose DOWN  on screen
+        # so target_pitch_offset = +atan(a_long / g) gives the
+        # right sign: accel forward (a_long>0) -> +offset ->
+        # nose lifts (squat); brake (a_long<0) -> -offset ->
+        # nose dives.  See `_update_lateral_lean` for the actual
+        # formula.
+        #
+        # `longitudinal_lean_gain` 0.5 default -- tank suspension is
+        # stiffer in the longitudinal direction than the lateral
+        # (long arm = full tank length; lateral arm = half track
+        # width).  0.5 reads as "weight transfer" without overshoot.
+        self.last_signed_speed_mps         = 0.0
+        self.longitudinal_lean_gain        = 0.5
+        self._last_a_long_mps2             = 0.0  # telemetry
+        self._last_signed_speed_mps        = 0.0  # telemetry
+        self._target_long_lean_pitch_deg   = 0.0  # integrator offset
+
+        # ---- Smooth-speed input from the drive layer --------------
+        # `cur_forward_mps` is set externally each frame by the
+        # viewer's drive code (the ramped `_current_forward`,
+        # negated to flip viewer's "forward = negative" convention
+        # to physics's "forward = positive +").  Used by
+        # `_update_lateral_lean` instead of deriving speed from
+        # chassis position deltas, which had ~2x per-frame noise
+        # from float-precision jitter + dt jitter (12-27 ms range
+        # in the M60 turn-test recording, t=0..11s).  See the
+        # 2026-05-08 turn-test analysis: 9% of frames had
+        # |a_long|>200 m/s^2 from the position-derived speed
+        # alone; with `cur_forward_mps` the noise floor drops
+        # to single-digit m/s^2.
+        self.cur_forward_mps = 0.0
+        # EMA-smoothed accelerations (alpha = 0.20 -> 5-frame
+        # trailing average at 60 fps) so the atan(a/g) lean
+        # targets don't pump on dt jitter or speed-ramp
+        # discontinuities.
+        self._smoothed_a_lat_mps2  = 0.0
+        self._smoothed_a_long_mps2 = 0.0
+
     # ------------------------------------------------------------------
     @classmethod
     def for_t110e4(cls):
@@ -561,7 +729,9 @@ class TankPhysics:
                             radius=0.33,
                             min_offset=-0.04,
                             max_offset=+0.08,
-                            track_thickness=0.016):
+                            track_thickness=0.016,
+                            mass_kg=30000.0,
+                            max_yaw_rate_dps=60.0):
         """Build a TankPhysics rig by walking already-loaded chassis
         sub-meshes (the `Mesh` objects in `Viewer.meshes` whose
         `component == 'chassis'`).  Discovers wheel groups by
@@ -791,7 +961,9 @@ class TankPhysics:
                        radius=d['radius'],
                        min_offset=d['min_offset'],
                        max_offset=d['max_offset'],
-                       track_thickness=track_thickness)
+                       track_thickness=track_thickness,
+                       mass_kg=mass_kg,
+                       max_yaw_rate_dps=max_yaw_rate_dps)
 
         named_count = sum(1 for n in (names_left + names_right) if n)
         print(f"[tank_physics] extracted rig: {len(wheels_left)}L + "
@@ -803,7 +975,9 @@ class TankPhysics:
                    radius=radius,
                    min_offset=min_offset,
                    max_offset=max_offset,
-                   track_thickness=track_thickness)
+                   track_thickness=track_thickness,
+                   mass_kg=mass_kg,
+                   max_yaw_rate_dps=max_yaw_rate_dps)
         # Stash the parallel name list so `bone_matrix_array` knows
         # which palette entries correspond to wheels we ACTUALLY
         # accepted (drops a tracked tank's WD_ idlers / sprockets
@@ -864,17 +1038,314 @@ class TankPhysics:
 
     # ------------------------------------------------------------------
     def chassis_matrix(self):
-        """Return the current chassis pose as a 4x4 float32 matrix.
+        """Return the chassis pose as a 4x4 float32 matrix in the
+        VISIBLE / RENDERED frame -- this is the inertia-damped pose
+        the integrator drives toward the solver's target.
 
         Matrix composition order: T(pos) * Ry(yaw) * Rx(pitch) * Rz(roll).
         Apply it as: world_pos = chassis_matrix @ mesh.model_matrix @ vert.
+
+        The X / Z translation comes from `self.pos` (driven directly
+        by the user-controlled drive logic).  Y / pitch / roll come
+        from the render-pose fields (`_render_pos_y`,
+        `_render_pitch_deg`, `_render_roll_deg`) which are integrated
+        by `_step_pose_integrator()` toward the solver's target each
+        frame.
+
+        Solver internals use `_chassis_matrix_target()` instead --
+        that one reads `self.pos[1] / pitch_deg / roll_deg` (the
+        target the solver writes) so the contact classifier and
+        iterative refinement work on a SOLVER-CONSISTENT pose, not
+        on a lagged integrator state (which is what produced the
+        v1.93.0 wobble).
         """
-        # Yaw separately because user controls it.
+        ty = mat4_translate(self.pos[0], self._render_pos_y, self.pos[2])
+        ry = self._mat4_rotate_y(math.radians(self.yaw_deg))
+        rx = mat4_rotate_x(math.radians(self._render_pitch_deg))
+        rz = mat4_rotate_z(math.radians(self._render_roll_deg))
+        return (ty @ ry @ rx @ rz).astype(np.float32)
+
+    def _chassis_matrix_target(self):
+        """Return the chassis pose at the SOLVER TARGET (no inertia
+        damping).  Used by the iterative-refinement loop and
+        `_compute_residual_y` so they see the pose that the contact
+        classifier expects, not the lagged integrator state."""
         ty = mat4_translate(self.pos[0], self.pos[1], self.pos[2])
         ry = self._mat4_rotate_y(math.radians(self.yaw_deg))
         rx = mat4_rotate_x(math.radians(self.pitch_deg))
         rz = mat4_rotate_z(math.radians(self.roll_deg))
         return (ty @ ry @ rx @ rz).astype(np.float32)
+
+    def _update_lateral_lean(self, dt):
+        """Estimate inertial accelerations from chassis-state deltas
+        and store the steady-state body-lean offsets:
+
+          * lateral G  -> roll  offset (`_target_lat_lean_roll_deg`)
+          * longitudinal G -> pitch offset (`_target_long_lean_pitch_deg`)
+
+        Both offsets are applied INTEGRATOR-side only -- the solver
+        never sees them, so the contact classifier and plane fit
+        operate purely on terrain-driven targets and the inertial
+        leans don't feed back into the solver.
+
+        Reads:  self.yaw_deg, self.pos[0], self.pos[2], self.gravity,
+                 self.lateral_lean_gain, self.longitudinal_lean_gain,
+                 dt, last_*_for_lat fields, last_signed_speed_mps.
+        Writes: telemetry fields + the two integrator offsets +
+                the persistent last_*_for_lat tracking state.
+        """
+        g = max(self.gravity, 0.1)
+        # Forward speed comes from the drive-layer ramp, NOT from
+        # chassis position deltas.  See `cur_forward_mps` field
+        # docstring: position-derived speed had 2x per-frame noise
+        # (M60 turn-test 2026-05-08), `cur_forward_mps` is the
+        # smooth ramped output of viewer's _current_forward and
+        # is essentially noise-free.
+        signed_speed_mps = float(self.cur_forward_mps)
+
+        # ---- Lateral (roll) lean ----------------------------------
+        # Yaw rate (deg/s).  Wrap-aware so yaw_deg wrapping at
+        # +/-180 doesn't produce a phantom 360 deg/s spike.
+        d_yaw = ((self.yaw_deg - self.last_yaw_deg_for_lat
+                  + 540.0) % 360.0) - 180.0
+        yaw_rate_dps   = d_yaw / max(dt, 1e-3)
+        yaw_rate_rad_s = math.radians(yaw_rate_dps)
+        self.last_yaw_deg_for_lat = float(self.yaw_deg)
+        # Lateral accel: a_lat = forward_speed * yaw_rate_rad.
+        # Sign: yaw_rate > 0 => right turn (chassis-clockwise from
+        # above), centripetal toward LEFT of chassis (-X), body
+        # leans RIGHT (+X drops, roll<0).  Coding
+        # `target_lean = -atan(a/g)` gives that sign automatically.
+        a_lat_raw = signed_speed_mps * yaw_rate_rad_s
+
+        # ---- Longitudinal (pitch) lean ----------------------------
+        # Longitudinal accel = d(signed_speed)/dt.  +ve = accel
+        # forward; -ve = braking or accel reverse.  Body inertia =>
+        # nose lifts on accel, nose dives on brake.
+        a_long_raw = ((signed_speed_mps - self.last_signed_speed_mps)
+                      / max(dt, 1e-3))
+        self.last_signed_speed_mps = signed_speed_mps
+
+        # ---- EMA smoothing ----------------------------------------
+        # 5-frame trailing average (alpha=0.20) so the atan(a/g)
+        # leans don't pump on dt jitter or speed-ramp inflection
+        # points.  `_smoothed_a_*` is what the integrator actually
+        # consumes; raw values still flow into telemetry for the
+        # turn-test JSON so we can see both.
+        ALPHA = 0.20
+        self._smoothed_a_lat_mps2  = (
+            ALPHA * a_lat_raw  + (1.0 - ALPHA) * self._smoothed_a_lat_mps2)
+        self._smoothed_a_long_mps2 = (
+            ALPHA * a_long_raw + (1.0 - ALPHA) * self._smoothed_a_long_mps2)
+
+        # ---- Lean targets (from smoothed accelerations) -----------
+        # Sign rules (verified empirically 2026-05-08):
+        #   pitch_render > 0 = nose UP   (squat under accel)
+        #   pitch_render < 0 = nose DOWN (dive under brake)
+        #   roll_render  bigger absolute = lean OUTWARD on a turn
+        # Coding `-atan(a_lat/g)` and `+atan(a_long/g)` produces
+        # those sign mappings.
+
+        lat_target_raw  = (
+            -math.degrees(math.atan(self._smoothed_a_lat_mps2 / g))
+            * self.lateral_lean_gain)
+        long_target_raw = (
+            +math.degrees(math.atan(self._smoothed_a_long_mps2 / g))
+            * self.longitudinal_lean_gain)
+
+        # Pitch-lean gate based on RENDER-pose wheel compression
+        # (per Coffee 2026-05-08).  The solver's `last_wheel_state`
+        # would seem like the obvious source, but it never sees the
+        # lean (lean is integrator-side only) -- so the solver
+        # classifies wheels purely by terrain compression and
+        # almost never reports OVER_COMP from the lean tilt that's
+        # actually pushing them through the ground.
+        #
+        # Direct check: project each wheel through the CURRENT
+        # render chassis pose (= prior frame's integrator output,
+        # which is the visible chassis pose).  Compare its world Y
+        # to this frame's target Y.  Over-compression = wheel needs
+        # to rise more than `comp_cap` to reach target -- which
+        # means the bone-matrix residual saturates and the visible
+        # wheel sits BELOW ground.
+        #
+        # Gate: if any wheel on the loaded side is over-compressed
+        # in the render pose, suppress further lean toward that
+        # side.  Releases automatically as terrain rolls under the
+        # tank or the integrator decays the lean.
+        if (hasattr(self, 'last_target_y')
+                and len(self.last_target_y) == len(self.wheels)):
+            comp_cap = -self.min_offset
+            local = self.wheels
+            local_h = np.column_stack([
+                local[:, 0], local[:, 1], local[:, 2],
+                np.ones(len(local), dtype=np.float64)])
+            m_render  = self.chassis_matrix()
+            render_y  = (m_render @ local_h.T).T[:, 1]
+            target_y  = np.asarray(self.last_target_y, dtype=np.float64)
+            # delta>0  => wheel needs to compress UP to reach target.
+            # delta>comp_cap => bone matrix saturates -> visible
+            # wheel sits below ground.
+            comp_delta = target_y - render_y
+            is_over    = comp_delta > comp_cap
+
+            local_z  = local[:, 2]
+            is_rear  = local_z > 0.0
+            is_front = local_z < 0.0
+            any_rear_over  = bool((is_over & is_rear).any())
+            any_front_over = bool((is_over & is_front).any())
+            if long_target_raw > 0.0 and any_rear_over:
+                long_target_raw = 0.0
+            if long_target_raw < 0.0 and any_front_over:
+                long_target_raw = 0.0
+            # Stash for telemetry / debugging.
+            self._gate_any_rear_over_render  = any_rear_over
+            self._gate_any_front_over_render = any_front_over
+        else:
+            self._gate_any_rear_over_render  = False
+            self._gate_any_front_over_render = False
+
+        self._target_lat_lean_roll_deg   = lat_target_raw
+        self._target_long_lean_pitch_deg = long_target_raw
+
+        # ---- Telemetry --------------------------------------------
+        # Raw (per-frame, noisy) accels for diagnostic plots; the
+        # smoothed values are what actually drive the leans.
+        self._last_a_lat_mps2        = float(a_lat_raw)
+        self._last_a_long_mps2       = float(a_long_raw)
+        self._last_speed_mps         = float(abs(signed_speed_mps))
+        self._last_signed_speed_mps  = float(signed_speed_mps)
+        self._last_yaw_rate_dps      = float(yaw_rate_dps)
+
+    def _step_pose_integrator(self, dt, terrain=None):
+        """Critically-damped second-order pull of the rendered pose
+        toward the solver's target pose.
+
+        Reads:
+            self.pos[1], self.pitch_deg, self.roll_deg     (target)
+            self._render_pos_y, _render_pitch_deg, _render_roll_deg
+            self._render_vy, omega_pitch_dps, omega_roll_dps
+            self.mass_kg, dt
+
+        Writes:
+            self._render_pos_y, _render_pitch_deg, _render_roll_deg
+            self._render_vy, omega_pitch_dps, omega_roll_dps
+
+        Natural frequency scales with `sqrt(M_REF / M)` so heavier
+        tanks respond more slowly.  Critically damped (zeta = 1) so
+        the pose approaches the target without overshoot.
+
+        Why this matters: pre-integrator, the chassis pose was hard-
+        snapped to the solver's target every frame -- which works
+        fine on smooth terrain but produces catastrophic spikes
+        when terrain features lift most wheels off ground in one
+        frame (M60 turn-test frame 737: solver returned an 89-deg
+        roll target because only 3 wheels were in contact and their
+        plane fit went near-vertical).  With inertia, that 89-deg
+        target only pushes the chassis ~0.5 deg in the one frame
+        before the next frame's solver returns to a sensible
+        target -- the spike is filtered out without ever being
+        rendered.
+        """
+        M_REF = 30000.0
+        # Clamp tiny mass values so sqrt doesn't explode.
+        m = max(self.mass_kg, M_REF * 0.1)
+        mass_scale = math.sqrt(M_REF / m)
+        # Natural frequencies (rad/s).  Tuned for tank body-roll
+        # period ~0.7 s on 60 t (omega_n ~ 9 rad/s).  Y axis is
+        # slightly stiffer because vertical body-bounce is faster
+        # than yaw / pitch (real tank suspension natural freq is
+        # ~1.5 Hz vertical, ~1 Hz body-roll).
+        omegan_p = 9.0  * mass_scale
+        omegan_r = 11.0 * mass_scale
+        omegan_y = 14.0 * mass_scale
+        zeta = 1.0
+        # Roll  target = solver's plane-fit roll  + lateral-lean offset.
+        # Pitch target = solver's plane-fit pitch + longitudinal-lean offset.
+        # Y     target = solver's plane-fit y     (no inertial offset).
+        # Both leans are integrator-side only -- the solver never
+        # writes them into self.roll_deg / self.pitch_deg, so the
+        # contact classifier and plane fit see only the terrain-
+        # driven targets.  Avoids the v1.93.0 feedback trap on
+        # both axes.
+        target_roll_with_lean  = (float(self.roll_deg)
+                                  + float(self._target_lat_lean_roll_deg))
+        target_pitch_with_lean = (float(self.pitch_deg)
+                                  + float(self._target_long_lean_pitch_deg))
+        e_p = target_pitch_with_lean - self._render_pitch_deg
+        e_r = target_roll_with_lean  - self._render_roll_deg
+        e_y = float(self.pos[1])     - self._render_pos_y
+        a_p = (omegan_p * omegan_p * e_p
+               - 2.0 * zeta * omegan_p * self.omega_pitch_dps)
+        a_r = (omegan_r * omegan_r * e_r
+               - 2.0 * zeta * omegan_r * self.omega_roll_dps)
+        a_y = (omegan_y * omegan_y * e_y
+               - 2.0 * zeta * omegan_y * self._render_vy)
+        self.omega_pitch_dps   += a_p * dt
+        self.omega_roll_dps    += a_r * dt
+        self._render_vy        += a_y * dt
+        self._render_pitch_deg += self.omega_pitch_dps * dt
+        self._render_roll_deg  += self.omega_roll_dps  * dt
+        self._render_pos_y     += self._render_vy      * dt
+
+        # Render-side terrain floor (per Coffee 2026-05-08, the
+        # master physics override: "wheel contact can not be
+        # allowed to go below terrain").  Sample the terrain at
+        # each wheel's RENDER-pose XZ (NOT target-pose XZ -- those
+        # differ when chassis pitch / roll differ between solver
+        # and integrator) and lift `_render_pos_y` so no wheel
+        # needs more than `comp_cap` of compression to reach its
+        # render-pose ground sample.
+        #
+        # The TARGET-XZ floor (`last_target_y`-based) was missing
+        # the case where chassis-pose lean / integrator lag put the
+        # actual rendered wheel over a different terrain feature
+        # than the target sampled.  Result was visible 10 cm
+        # penetration spikes during inertial-lean transients.
+        # Render-XZ sampling closes that gap.
+        if terrain is not None and len(self.wheels) > 0:
+            comp_cap = -self.min_offset
+            local = self.wheels
+            local_h = np.column_stack([
+                local[:, 0], local[:, 1], local[:, 2],
+                np.ones(len(local), dtype=np.float64)])
+            # Project wheels through the CURRENT render chassis
+            # pose to get world XZ + rigid render Y.
+            m_render = self.chassis_matrix()
+            world_h  = (m_render @ local_h.T).T
+            wx_r = world_h[:, 0]
+            wy_r = world_h[:, 1]
+            wz_r = world_h[:, 2]
+            # Sample terrain at each wheel's actual render XZ.
+            if hasattr(terrain, 'sample_heights'):
+                ty_r = np.asarray(
+                    terrain.sample_heights(wx_r, wz_r),
+                    dtype=np.float64)
+            elif hasattr(terrain, 'sample_height'):
+                ty_r = np.array(
+                    [float(terrain.sample_height(float(x), float(z)))
+                     for x, z in zip(wx_r, wz_r)],
+                    dtype=np.float64)
+            else:
+                ty_r = np.zeros(len(self.wheels), dtype=np.float64)
+            # Render-XZ wheel-centre target Y (terrain + r + tt).
+            target_y_r = ty_r + self.radius + self.track_thickness
+            # required = target_y_at_render_xz - comp_cap - ly_post_rx
+            # but ly_post_rx is just `wy_r - chassis_y` (since
+            # chassis pos translates uniformly).  So
+            #   required[i] = target_y_r[i] - comp_cap - (wy_r[i] - chassis_y)
+            #             chassis_y_min = target_y_r[i] - comp_cap - wy_r[i] + chassis_y
+            # Equivalent: how much MORE compression than comp_cap
+            # is currently needed?  positive = floor lift required.
+            comp_needed = target_y_r - wy_r       # >0 = wheel below target
+            over        = comp_needed - comp_cap  # >0 = wheel SUNK past comp_cap
+            lift_needed = float(np.max(over))
+            if lift_needed > 0.0:
+                # Lift the chassis just enough so the worst wheel
+                # exactly fits within comp_cap.  Zero vertical vel
+                # so the integrator doesn't push back through.
+                self._render_pos_y += lift_needed
+                self._render_vy     = 0.0
 
     @staticmethod
     def _mat4_rotate_y(rad):
@@ -947,10 +1418,16 @@ class TankPhysics:
             local[:, 0], local[:, 1], local[:, 2],
             np.ones(len(local), dtype=np.float64),
         ])
-        world_h = (self.chassis_matrix() @ local_h.T).T
+        # Use the TARGET pose (not the rendered/integrated pose) so
+        # the contact classifier and plane fit work on a self-
+        # consistent solver state -- not on a lagged integrator
+        # value (that's the v1.93.0 wobble trap).
+        world_h = (self._chassis_matrix_target() @ local_h.T).T
         wx = world_h[:, 0]
+        wy = world_h[:, 1]
         wz = world_h[:, 2]
         self.last_wheel_world[:, 0] = wx
+        self.last_wheel_world[:, 1] = wy
         self.last_wheel_world[:, 2] = wz
 
         # ---- 2. Terrain sample ------------------------------------
@@ -982,7 +1459,7 @@ class TankPhysics:
         # or extend (-ve) from its current rendered position to
         # reach the terrain.  Compare against the suspension
         # envelope to bucket each wheel.
-        m_in = self.chassis_matrix()
+        m_in = self._chassis_matrix_target()
         local_h = np.column_stack([
             local[:, 0], local[:, 1], local[:, 2],
             np.ones(len(local), dtype=np.float64),
@@ -1117,7 +1594,7 @@ class TankPhysics:
             # Test how many wheels would be in their envelope under
             # this pose -- ignore hysteresis (we're testing a
             # candidate, not committing).
-            test_rigid_y = (self.chassis_matrix() @ local_h.T).T[:, 1]
+            test_rigid_y = (self._chassis_matrix_target() @ local_h.T).T[:, 1]
             test_delta   = target_centre - test_rigid_y
             n_test       = int(((test_delta >= ext_cap)
                                 & (test_delta <= comp_cap + comp_cap)
@@ -1139,7 +1616,12 @@ class TankPhysics:
                 self.vy       -= self.gravity * dt
                 self.pos[1]   += self.vy * dt
                 self._apply_terrain_floor(target_centre)
-            self._compute_residual_y(target_centre)
+            # Run the inertia-damped pose integrator + residual
+            # compute against the rendered (integrated) pose, then
+            # return the rendered chassis matrix to the caller.
+            self._update_lateral_lean(dt)
+            self._step_pose_integrator(dt, terrain=terrain)
+            self._compute_residual_y(target_centre, terrain=terrain)
             return self.chassis_matrix()
 
         # We're landed enough that vertical velocity isn't growing.
@@ -1220,7 +1702,12 @@ class TankPhysics:
             # case where the chassis was falling fast and would
             # otherwise slip below the constraint surface.
             self._apply_terrain_floor(target_centre)
-            self._compute_residual_y(target_centre)
+            # Same integrator step as the early-fall return above:
+            # render the lagged chassis pose, compute residuals
+            # against it.
+            self._update_lateral_lean(dt)
+            self._step_pose_integrator(dt, terrain=terrain)
+            self._compute_residual_y(target_centre, terrain=terrain)
             return self.chassis_matrix()
 
         # Constraint snap.  The contact-set hysteresis (added in
@@ -1275,7 +1762,12 @@ class TankPhysics:
         # remain, refit and floor.  Stop when stable.
         prev_n_contact = int((contact_mask | over_mask).sum())
         for _refine in range(3):
-            m_iter = self.chassis_matrix()
+            # TARGET-pose matrix (NOT the render-lagged one) -- the
+            # refinement is solving for the next target, so it must
+            # see the in-progress target the loop has been writing
+            # into self.pos / pitch_deg / roll_deg.  Reading the
+            # render pose here is the v1.93.0 feedback bug.
+            m_iter = self._chassis_matrix_target()
             rigid_y_iter = (m_iter @ local_h.T).T[:, 1]
             delta_iter = target_centre - rigid_y_iter
             # Re-classify with hysteresis against the LATEST
@@ -1365,7 +1857,13 @@ class TankPhysics:
         # OVER_COMP wheels: residual = compression cap (bottomed out).
         # All of this lives in `_compute_residual_y` so the shader
         # path stays one read of `self.last_residual_y`.
-        self._compute_residual_y(target_centre)
+        # Run the inertia-damped pose integrator FIRST so the
+        # rendered pose (used by both _compute_residual_y and the
+        # returned chassis_matrix) reflects this frame's smoothed
+        # position rather than the raw target snap.
+        self._update_lateral_lean(dt)
+        self._step_pose_integrator(dt, terrain=terrain)
+        self._compute_residual_y(target_centre, terrain=terrain)
         return self.chassis_matrix()
 
     # ------------------------------------------------------------------
@@ -1424,7 +1922,7 @@ class TankPhysics:
             self.vy = 0.0
 
     # ------------------------------------------------------------------
-    def _compute_residual_y(self, target_centre):
+    def _compute_residual_y(self, target_centre, terrain=None):
         """Stash per-wheel mesh-local Y residuals into
         `self.last_residual_y`.
 
@@ -1472,6 +1970,32 @@ class TankPhysics:
         ])                                                # (n, 4)
         world = (m @ local_h.T).T                         # (n, 4)
         rigid_world_y = world[:, 1]
+        # `target_centre` was sampled at the SOLVER's target-pose
+        # wheel XZ.  But each wheel's RENDERED XZ may differ
+        # (chassis pitch / roll between target and render).  For
+        # zero penetration in the rendered view we need to
+        # re-sample terrain at each wheel's RENDER XZ and compute
+        # the residual against THAT.  Otherwise the bone matrix
+        # would move the wheel to the target-XZ ground sample,
+        # which is nowhere near where the visible wheel is.
+        # Per Coffee 2026-05-08: master override = wheel-on-ground.
+        if terrain is not None:
+            wx_r = world[:, 0]
+            wz_r = world[:, 2]
+            if hasattr(terrain, 'sample_heights'):
+                ty_r = np.asarray(
+                    terrain.sample_heights(wx_r, wz_r),
+                    dtype=np.float64)
+            elif hasattr(terrain, 'sample_height'):
+                ty_r = np.array(
+                    [float(terrain.sample_height(float(x), float(z)))
+                     for x, z in zip(wx_r, wz_r)],
+                    dtype=np.float64)
+            else:
+                ty_r = None
+            if ty_r is not None:
+                target_centre = ty_r + self.radius + self.track_thickness
+
         # Clean sign: +ve = wheel needs to RISE (UP, compression).
         # The shader-side sign flip is applied inside
         # bone_matrix_array Pass 1, NOT here, so consumers reading
@@ -1489,39 +2013,25 @@ class TankPhysics:
         comp_cap = -self.min_offset
         ext_cap  = -self.max_offset
 
-        # State-aware clamp:
-        #   * CONTACT  -- residual is the post-fit lstsq error,
-        #     should already be small; clamp to envelope as a
-        #     safety net for big tilts where the small-angle
-        #     approximation in `_compute_residual_y` breaks.
-        #   * HANGING  -- terrain too far below; pin to ext_cap so
-        #     the wheel droops to the full extension limit.
-        #     Visually: wheel hangs below the chassis by ~8 cm.
-        #   * OVER_COMP -- terrain too high; pin to comp_cap so the
-        #     wheel sits at the full compression limit (bottomed
-        #     out).  Visually: wheel pushed up into the hull by
-        #     ~4 cm; the chassis itself is the rest of the lift.
-        #   * NONE      -- pre-update default (no terrain ticked yet);
-        #     leave at zero.
-        states = getattr(self, 'last_wheel_state', None)
-        if states is None or len(states) != len(residual):
-            # First-frame fallback before update() ran -- treat
-            # everything as CONTACT and clamp normally.
-            residual = np.clip(residual, ext_cap, comp_cap)
-        else:
-            for i in range(len(residual)):
-                s = int(states[i])
-                if s == WHEEL_STATE_HANGING:
-                    residual[i] = ext_cap
-                elif s == WHEEL_STATE_OVER_COMP:
-                    residual[i] = comp_cap
-                elif s == WHEEL_STATE_CONTACT:
-                    if residual[i] < ext_cap: residual[i] = ext_cap
-                    elif residual[i] > comp_cap: residual[i] = comp_cap
-                else:  # WHEEL_STATE_NONE -- be safe, clamp.
-                    if residual[i] < ext_cap: residual[i] = ext_cap
-                    elif residual[i] > comp_cap: residual[i] = comp_cap
-        self.last_residual_y = residual
+        # Two-rule clamp (per Coffee 2026-05-08, the master physics
+        # override):
+        #
+        #   1. wheel can NEVER be below terrain (no penetration),
+        #   2. wheel can NEVER extend more than `ext_cap` below its
+        #      bind (max droop) or compress more than `comp_cap`
+        #      above (bottomed out into hull).
+        #
+        # The bone-path residual gets its envelope clamp BACK here.
+        # Rule (1) is enforced by the render-side terrain floor in
+        # `_step_pose_integrator`, which raises the rendered chassis
+        # Y so no wheel needs more than `comp_cap` of compression to
+        # reach the ground.  After that floor runs, the unclamped
+        # raw residual would naturally fall in [ext_cap, comp_cap]
+        # for any wheel that's actually contacting terrain; the
+        # clamp here is the safety net for HANGING wheels (residual
+        # would be < ext_cap because terrain is too far below ->
+        # wheel droops fully extended, visible gap to ground).
+        self.last_residual_y = np.clip(residual, ext_cap, comp_cap)
 
         # Asymmetric low-pass filter per-wheel: same compression-
         # fast / extension-slow recipe as the chassis pose, applied
@@ -1588,14 +2098,17 @@ class TankPhysics:
         out = np.tile(np.eye(4, dtype=np.float32), (max_bones, 1, 1))
         if palette is None or self.last_residual_y is None:
             return out
-        # Use the asymmetric-damped residual (real-shock behaviour:
-        # fast on compression, slow on extension) as the source for
-        # bone Y translations.  Falls back to the raw residual when
-        # the smoothed array hasn't been populated yet (first-frame).
-        residual_src = (self.smoothed_residual_y
-                        if hasattr(self, 'smoothed_residual_y')
-                        and len(self.smoothed_residual_y) == len(self.last_residual_y)
-                        else self.last_residual_y)
+        # Use the RAW residual (target - render_rigid_y) directly.
+        # Per Coffee 2026-05-08, wheel-on-ground is the master
+        # override -- the asymmetric "shock-absorber feel"
+        # smoothing (smoothed_residual_y) introduces a 110 ms
+        # extension lag that visibly lets wheels float above /
+        # drive through small terrain bumps.  Raw residual snaps
+        # the wheel to terrain every frame, no lag, no penetration.
+        # `smoothed_residual_y` is still computed below for any
+        # legacy consumer (debug overlays etc.) but is no longer
+        # on the visible-render path.
+        residual_src = self.last_residual_y
 
         # Build a NAME -> wheel-index map from the auto-extract's
         # bookkeeping (`self.wheel_bone_names`).  This is the source
