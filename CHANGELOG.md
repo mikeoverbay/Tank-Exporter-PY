@@ -9,6 +9,451 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Track-physics roadmap committed (1.99.0)
+
+Today opened the rewrite of the track render system.  The current
+"rubber-band" track -- a single welded ribbon mesh
+(`track_LShape12` / `track_RShape12` inside
+`Chassis.primitives_processed`) UV-scrolled to fake motion --
+gets replaced with a **kinematic-bone-driven NURB** with arc-
+length-uniform pad resampling.
+
+This commit lands no engine code changes for tracks yet -- the
+deliverable is the design and the proof.  See the new "Track
+physics roadmap" section at the bottom of `ARCHITECTURE.md` for
+the full plan, phased Phase A (physics + spline) → Phase E
+(export / import).  README's new "Current work" note links
+there.
+
+The probe scripts that proved the pipeline live at the
+experiment-tree root and are not shipped:
+
+* `_plot_t30_track.py`  — overlay of T30 left-track NURB V_loc
+  control points, road wheels W_L*, and the `Track_L*` /
+  `Track_VT_L*` / `Track_VD_L*` bone bend points in YZ side
+  view.  Confirmed Track_L bones sit at Y=0 directly under each
+  wheel (ground-contact anchors), Track_VT at top-run sag
+  points, and Track_VD wraps the drive sprocket / idler.
+* `_plot_t30_segs.py`  — same overlay plus
+  `segmentLength × segmentsCount/2` = 117 pad markers placed at
+  uniform arc-length along the closed V_loc polyline, plus the
+  drive sprocket (`WD_L0`, r=0.339 m from `groupRadius_road`)
+  and idler (`WD_L<MAX>`, r=0.324 m) circles at their true
+  chassis-bone positions.  Confirmed the spline ends wrap
+  exactly around the drive sprocket and idler bones, the pads
+  sit cleanly on the spline path, and the chord polyline
+  length 15.062 m matches the 15.561 m target
+  (117 × 0.133 m) within ~3 %.
+* `_plot_t30_smooth.py`  — closed centripetal Catmull-Rom
+  (α=0.5) through the 17 V_locs + cumulative arc-length
+  resample at uniform arc steps.  Solves the chord-vs-target
+  gap.
+
+Spline-fit numbers on T30 (centripetal CR vs alternatives):
+
+| Curve | Length | Δ vs 117 × 0.133 |
+|-------|-------:|-----------------:|
+| Chord polyline                              | 15.062 m | -0.499 m (-3.21 %) |
+| Uniform CR (α = 0)                          | 16.558 m | +0.997 m (+6.40 %) |
+| **Centripetal CR (α = 0.5)**                | **15.126 m** | **-0.435 m (-2.79 %)** |
+| Target = `segmentsCount × segmentLength / 2` | 15.561 m | — |
+
+Uniform CR overshoots the sprocket / idler bends and produces
+self-intersecting loops; centripetal CR (α=0.5) passes through
+every V_loc with no overshoot.  Resampled pad spacing on T30:
+mean 0.1292 m, **std 0.3 mm** across all 117 pads -- machine-
+precision uniform once the cumulative-arc-length table is in.
+
+The 2.79 % shortfall is the **track slack budget**: pad rest-
+length sum naturally exceeds the rigid spline path, exactly
+the deformation reserve the in-game runtime burns to let the
+track sag on the top run / hug curves on the bottom.  No
+spring physics needed for visuals; springiness emerges from
+CR interpolation across bone-driven V_locs.
+
+Why kinematic-bone-driven and not spring-mass / per-pad rigid
+chain: every chassis already ships the bone scaffold the
+runtime deforms with -- `Track_L<i>` under each road wheel for
+ground contact, `Track_VT_L<i>` for top-run sag,
+`Track_VD_L<i>` for sprocket / idler wraparound.  Bind each
+V_loc 1:1 to its bone, let physics drive the bones (we already
+settle wheel Y under gravity in `tank_physics.py`), let
+centripetal CR smooth-interpolate the V_locs each frame.
+Deterministic, replay-stable, ~17 V_loc updates / side per
+frame instead of 117 RBs + 117 hinges + a solver.
+
+DX → GL frame conversion at load time (mirroring the existing
+"Coordinate space" rule):
+
+```python
+gl_pos     = (dx_pos[0], -dx_pos[1], -dx_pos[2])
+gl_tangent = (dx_t[0],   -dx_t[1],   -dx_t[2])
+# Z-flip reverses traversal direction along the closed loop, so
+# also reverse the V_loc array order so pad index 0 still walks
+# rear → top → front → bottom → rear in GL.
+```
+
+Files: `ARCHITECTURE.md` (new "Track physics roadmap" section
+at end, ~190 lines), `README.md` (new "Current work" note near
+the top, links to the roadmap).
+
+### Per-tank chassis params + total weight from gameplay XML (1.98.0)
+
+* **`VehicleXMLLoader.parse_info` now extracts** the
+  selected-chassis-specific physics inputs:
+  * `groupRadius_road` -- main road wheel radius from
+    `<wheelGroups>` (the wheelGroup whose names match
+    `^W_[LR]\d+$`).  T30 = 0.345 m; T110E4 = 0.330 m.
+  * `minOffset` / `maxOffset` -- suspension envelope from
+    the first `<groundNodes><group>` block.  T30 =
+    (-0.06, +0.06); T110E4 = (-0.04, +0.08).
+  * `renderModelOffset` -- track thickness, prefers
+    `<trackThickness>` over the legacy nested
+    `<renderModelOffset>` path.  T30 = -0.029; T110E4 =
+    +0.016.
+  All three blocks are nested DEEP inside the chassis
+  hierarchy (`<tracks><trackPair><trackDebris>
+  <physicalParams>`), so the parse uses descendant-search
+  (`.//tag`) instead of direct-child lookup.
+* **Total tank weight** = sum of every component's
+  `<weight>` (hull + chassis + turret + gun + engine +
+  radio + fueltank).  Surfaced as `info['total_weight_kg']`
+  and logged in the in-app console at load.  T30 = 61.0 t;
+  T110E4 ~ 65 t.
+* **TankPhysics now consumes the per-tank values** at
+  load.  Previously every tank used the T110E4 defaults
+  (radius 0.33, envelope -0.04 / +0.08, track thickness
+  0.016); now each tank gets its real numbers from the
+  XML.  Falls through to the defaults when the field is
+  missing (rare; some modded tanks drop the blocks).
+* **Vehicle XML parsed ONCE per load**.  Was being parsed
+  twice (early for nothing + late for the info panel);
+  now early-parsed and the result reused.
+
+### Startup window size: 1024 x 576 (banner aspect, math fixed) (1.97.7)
+
+* Recomputed: banner is 1672 x 941 (aspect ~1.778).
+  `1024 * 941 / 1672` rounds to 576.  Banner now fits the
+  startup window pixel-for-pixel.
+
+### Startup window size: 1024 x 433 (fits banner aspect) (1.97.6)
+
+* Tightened startup window to 1024 x 433 to fit the splash
+  banner's wider-than-tall aspect.  Was 1024 x 768; banner
+  had visible empty padding above / below.
+
+### Startup window size: 1024 x 768 (was splash image dims) (1.97.5)
+
+* Initial window opens at 1024 x 768.  Was sized to the splash
+  image dims (1672 x 941) which felt big at launch.  Splash
+  image still fills the client area as a textured quad --
+  it auto-scales.  Maximise / fullscreen state remembers the
+  pre-maximise dims for F11 SW_RESTORE.
+
+### F11: explicit client-rect poll forces immediate render reshape (1.97.4)
+
+* After `_toggle_fullscreen` calls `SW_MAXIMIZE` / `SW_RESTORE`,
+  we now explicitly call `GetClientRect` to read the new content-
+  area dims and call `_on_resize` directly.  Belt-and-braces for
+  the case where the WM_SIZE -> SDL_WINDOWEVENT -> pygame
+  VIDEORESIZE chain hadn't pumped yet on the same frame.
+* The OS chrome (title bar / resize border) handles its own
+  drawing -- we just pass the maximize / restore command along
+  via `ShowWindow` and the OS does the rest.  GL viewport fills
+  the client rect (chrome NOT included, which is correct).
+
+### Borderless toggle: simpler 2-bit mask (chrome restore now sticks) (1.97.3)
+
+* The aggressive "WS_OVERLAPPEDWINDOW <-> WS_POPUP swap" in the
+  borderless toggle was conflicting with SDL2's own window-state
+  bookkeeping on the restore path.  Splash chrome flipped off
+  fine, but the OFF call didn't visibly bring the chrome back
+  even though SetWindowLong returned success.
+* Replaced with a simple two-bit mask: only toggle WS_CAPTION
+  (title bar) and WS_THICKFRAME (resize border).  Leave
+  WS_SYSMENU / WS_MINIMIZEBOX / WS_MAXIMIZEBOX / WS_VISIBLE /
+  WS_POPUP alone -- SDL set them up at window creation and
+  doesn't expect us to mess with them.
+
+### Look-at crosshair: drawn AFTER tank meshes (no more occlusion) (1.97.2)
+
+* Bug: the depth-test-off look-at crosshair was being drawn
+  BEFORE the tank mesh pass, so the tank rendered ON TOP of
+  the crosshair pixels.  Result: the crosshair was hidden
+  behind the hull even with depth test disabled (the disable
+  applied to the crosshair draw, but the later tank draw
+  overwrote those pixels with depth-test-on geometry).
+* Fix: move the crosshair draw to AFTER every tank-mesh /
+  wireframe / picker pass, just before the UI render.  Now
+  the crosshair composites on top of the rendered tank with
+  depth test off, staying visible whenever the wheel button
+  is held.
+
+### Splash teardown: restore window chrome at end of preload, not at run() (1.97.1)
+
+* Bug: title bar / resize frame / min-max-close buttons were
+  not visible after the splash teardown on Windows.  Restoring
+  the chrome in `run()` (immediately before `SW_MAXIMIZE`) raced
+  the WM message queue -- the WM_NCCALCSIZE + WM_NCPAINT
+  triggered by the style flip hadn't drained before the
+  maximise asked the OS to fill the screen, so the maximise
+  took effect on a popup-style window and the chrome was lost.
+* Fix: do the chrome restore at the END of `__init__`, after
+  every preload step (PkgExtractor, IBL, ItemList rebuild,
+  etc.) is done.  Splash stays visible while __init__ runs;
+  the chrome flip processes through the message loop with
+  a `pygame.event.pump()` while the splash is still on
+  screen, and by the time `run()` does splash cleanup +
+  `_go_maximized()`, the window already has its chrome
+  intact and the maximise keeps it.
+
+### Skinning: drive sprocket + idler partial-follow nearest road wheel (1.97.0)
+
+* New pass 3 in `bone_matrix_array`: scan the palette for
+  `WD_<side>\d+` bones, identify the lowest-numeric-index
+  per side (drive sprocket, rear) and the highest (idler,
+  front).  Drive sprocket inherits 50 % of the rearmost
+  road wheel's residual; idler inherits 50 % of the
+  frontmost road wheel's residual.
+* Fixes the visible tear / kink in the track ribbon's
+  wraparound section near the front tensioner on tanks
+  like A14_T30 (16 wheels, very tight Z-spacing between
+  the front-most road wheel and the idler).  The 50 %
+  weight is enough to blend the seam without making the
+  idler visibly bob with every wheel deflection.
+* The track-ribbon mesh's existing per-vertex `iii / ww`
+  blend between adjacent bones now smoothly interpolates
+  through the WD_ partial-follow region, since the GPU
+  skinning shader does the weighted-bone-matrix sum
+  automatically.
+
+### Look-at: Shift requires middle-mouse + crosshair always visible (1.96.4)
+
+* **Look-at crosshair (pink XYZ lines) draws with depth-test
+  disabled.**  Stays visible even when buried inside geometry
+  or behind terrain.  GL state is restored immediately after
+  so the suspension overlay (next pass) behaves correctly.
+* **Shift + middle-mouse for Y-lift, not Shift alone.**  Was:
+  any Shift-held mouse drag would lift / drop the look-at on
+  Y -- accidental Shift during keyboard typing yanked the
+  camera upward whenever the mouse happened to move.  Now:
+  shift is a modifier on the middle-button drag.  Middle
+  alone = XZ pan (unchanged); Shift + middle = Y lift.
+* Crosshair visibility tied to the middle button only --
+  Shift alone no longer flashes the lines.
+
+### Physics-timer overlay: moved out of the left info panel (1.96.3)
+
+* The grass-green `physics: X.XX ms` readout was at window-x=10
+  which fell INSIDE the left info / tree panel (280 px wide).
+  Moved to `x = INFO_PANEL_W + 10` so it lands in the actual
+  3D scene area, where the user can see it without the info
+  panel covering it on a typical tank load.
+
+### Bug: top speed was 3.6x too high (units were already kph) (1.96.2)
+
+* `VehicleXMLLoader.parse_info` was multiplying
+  `<speedLimits><forward>` by 3.6 on the assumption the value
+  was in m/s.  It's actually in **kph** -- verified against
+  A14_T30 (`<forward>35</forward>` → in-game top 35 kph,
+  not 126).  T30 was reporting 126 kph (35 * 3.6); now
+  reports 35 kph.
+* Removed the conversion -- pass-through value as kph.
+  Affects `_top_speed_kph` everywhere downstream: speed-step
+  selector, auto-circle, cruise, ramped accel/decel, all
+  scale to the corrected value automatically.
+
+### Splash teardown: ensure window comes back fully visible (1.96.1)
+
+* Added `SWP_SHOWWINDOW` flag to the `SetWindowPos` call that
+  restores the window chrome after splash, plus an explicit
+  `ShowWindow(SW_SHOW)` afterward.  Some drivers leave the
+  window in "style changed but not redrawn" state after a
+  bare `SetWindowLong`, which manifested as a partially-
+  invisible / chromed window after the splash teardown.
+  Belt-and-braces both signals so the window comes back
+  fully visible regardless of driver behaviour.
+
+### Tank-math timer overlay (1.96.0)
+
+* New grass-green readout in the upper-left of the main
+  window: `physics: X.XX ms`.  Times the full tank-math step
+  (`tank_physics.update()` + per-mesh model-matrix recompose)
+  with `time.perf_counter`, smoothed via 5-frame exponential
+  trail (alpha=0.20) so the value doesn't flicker.
+* Drawn AFTER the UI overlay so it sits on top of any panels
+  / tree.  Cached text texture rebuilds only when the
+  formatted string changes (every 0.01 ms step), so per-frame
+  cost is one quad draw + a dict lookup.
+* Visible only when Susp is engaged (no tank physics = no
+  number to show).
+
+### Splash: window client area sized to splash image (1.95.5)
+
+* Peek the splash image dimensions before `set_mode` so the
+  initial window client area matches the image exactly.
+  Splash fills the window with no letterbox / padding -- the
+  borderless splash window now reads as a clean freestanding
+  image (1672 x 941 for the current `tepy_banner.png`).
+* After splash teardown the maximise path takes the window
+  to full-screen as before, so the splash-fit sizing only
+  governs the startup view.
+
+### Drive: X is a backup-key alias for Z (1.95.4)
+
+* X now drives backward, same as Z.  Same finger-position
+  argument as W / S sharing forward duty -- different
+  reach, same effect.
+
+### Splash: window chrome hidden while splash is showing (1.95.3)
+
+* Title bar / resize frame / min-max-close buttons are
+  HIDDEN during the startup splash and restored when the
+  real UI takes over.  Splash now reads as a clean
+  freestanding image instead of a frosted-window image.
+* Implementation: Win32 `SetWindowLong(GWL_STYLE, WS_POPUP)`
+  + `SetWindowPos(SWP_FRAMECHANGED)` -- mutates the window-
+  style bitmask in place so the GL context survives (the
+  pygame `NOFRAME` flag would have required a `set_mode`
+  re-create, which destroys textures + VBOs).  Restored to
+  `WS_OVERLAPPEDWINDOW` when `run()` calls
+  `_set_window_borderless(False)` right before the maximise.
+* No-op on non-Windows.
+
+### Drive: S is hold-to-go (no toggle) (1.95.2)
+
+* S used to be a cruise toggle (press once to start, again to
+  stop).  Now S is momentary like W -- hold to drive forward,
+  release to stop.  W and S do the same thing; pick whichever
+  finger position feels right.
+* Removed `_auto_forward` state and the cruise / auto-circle
+  mutex.
+
+### Drive: default speed step is now 8 (~5 kph) (1.95.1)
+
+* `_speed_step` initial value changed from 0 to 8.  Tank moves
+  at a slow-readable pace the moment the user hits W on a fresh
+  session, instead of feeling inert until they tap a number key.
+  Step 8 maps to ~5 kph at the 50 kph default cap; rescales to
+  whatever the per-tank XML max says when a tank loads.
+
+### Drive: accel + decel ramp on forward / backward (1.95.0)
+
+* Tank no longer snaps to full step speed on W press or stops
+  dead on release.  Instead ramps `_current_forward` toward
+  the target speed:
+  * **`DRIVE_ACCEL = 5.0 m/s^2`** -- spool-up (tank accelerates
+    to step-1 max in ~2 seconds at default values).
+  * **`DRIVE_DECEL = 10.0 m/s^2`** -- braking + direction
+    reversal.  2x accel so slowing / reversing feels
+    responsive, matching real tank handling where the
+    transmission can brake harder than the engine pushes.
+* Auto-circle now uses the same ramped `_current_forward` --
+  the circle starts tight and spirals out as the tank spools
+  up, then settles to the target radius.
+* Yaw rate (A / D / Q / E) stays instant -- tanks pivot
+  briskly and the ramp on yaw felt sluggish in testing.
+* Step changes (0-9) work mid-drive: pressing 5 while
+  cruising at step 3 ramps DOWN smoothly to the new target
+  speed via the decel rate.
+
+### Debug checkbox: gates were reading the previous frame's value (1.94.5)
+
+* **Bug**: turning the Debug checkbox ON didn't bring up the
+  per-wheel terrain markers OR the wheel red/green highlight.
+* **Cause**: the `_debug_cb -> self._debug` mirror was running
+  near the END of `render()`, after every gate that consumed
+  `self._debug` had already evaluated.  Result: gates checked
+  the PREVIOUS frame's `_debug` value -- toggled on the same
+  frame the checkbox flipped, the markers were one frame
+  behind; in the worst case (single-frame state changes from
+  other code paths) they never lit up at all.
+* **Fix**: moved the mirror to the TOP of `render()` so every
+  downstream gate reads the current-frame state.  Susp checkbox
+  -> `tank_physics_enabled` mirror moved alongside for the
+  same reason.
+
+* **Drive-controls log on Susp toggle** updated to match the
+  new WASD layout (was still printing "arrow keys").
+
+### Particles: per-frame chassis-pose tracker no longer breaks spawn timing (1.94.4)
+
+* **Bug**: one of two engine-exhaust smoke emitters appeared
+  dead while the other spawned normally; fire never animated
+  coherently when the chassis-pose tracker was active.
+* **Cause**: `Viewer._update_emitters_for_chassis_pose` called
+  `set_emitters(...)` every frame to refresh world positions.
+  `ParticleSystem.set_emitters` resets `_spawn_accum = 0.0` --
+  intentional on tank load, catastrophic per-frame at typical
+  spawn rates (15-30 emitters/sec, 2 HPs, 60 fps): the per-
+  frame contribution to `_spawn_accum` is < 1.0, so `floor()`
+  is always 0, so nothing spawns until a frame happens to
+  cross 1.0 alone.  Worse, the random per-frame jitter made
+  one emitter "win" the race and the other "lose".  Same
+  shape on the fire side: `AnimatedBillboard.set_emitters`
+  re-rolls all per-layer RNG phases on every call, so a per-
+  frame call meant the flipbook never advanced coherently.
+* **Fix**: new `update_emitter_positions(emitter_list)` on both
+  `ParticleSystem` and `AnimatedBillboard`.  Refreshes pos /
+  fwd in place without touching `_spawn_accum` or RNG state.
+  Falls back to `set_emitters` if the emitter count changed
+  (tank reload).  `_update_emitters_for_chassis_pose` now
+  uses the new method.
+* Result: both exhaust emitters spawn smoothly and stay glued
+  to the HP positions as the tank drives, fire animation
+  advances frame-by-frame as designed.
+
+### Drive: A/D now turn the chassis (no strafe) (1.94.3)
+
+* A turns the chassis left (CCW), D turns right (CW) -- standard
+  tank-tiller behaviour.  Was strafe in v1.94.0; tanks don't
+  strafe.  Q / E remain bound as legacy yaw aliases.
+* Hold W + A to drive in a curving left arc, just like a real
+  tank.
+
+### Drive: backup key swapped X -> Z (1.94.2)
+
+* Backup key moved from X to Z.  Z sits directly under A on QWERTY
+  (home-row reach without moving the hand), and is the more common
+  "back when S is taken" binding in older PC games.
+
+### Sticky camera + speed; hull bbox gated by Debug (1.94.1)
+
+* **Hull bounding box** -- now gated by the Debug checkbox (was
+  always-on with Susp).  Off when Debug is off.
+* **Speed step persists across tank loads.**  Was being reset to 0
+  on every load_vehicle; now sticks.  Speed magnitude rescales
+  automatically to the new tank's `_top_speed_kph`.
+* **Camera state persists across tank loads.**  `fit_to_bounds`
+  fires only once per session (the first load); subsequent loads
+  keep the camera's yaw / pitch / distance, AND the camera_mode
+  (chase / commander / orbit) sticks too.  R key still does an
+  explicit reset + re-fit.
+* **Debug-toggle no longer affects chase / commander cameras.**
+  The cam paths in `_anchored_view_matrix` are independent of
+  `_debug`; what was making them feel "disabled" was the
+  always-on hull bbox cluttering the chase view + the markers
+  appearing/disappearing as Debug toggled.  Both are now
+  consistently Debug-gated, the camera mode itself is stable.
+
+### Drive controls: WASDX standard handles + S = cruise + F2 = wireframe (1.94.0)
+
+* **Wireframe key moved from `W` to `F2`.**  W is now reserved
+  for forward drive in the new tank-handles layout.  F1 is
+  reserved for a future help overlay.
+* **Tank-handles layout (WASD-style)**:
+  * `W` -- forward drive
+  * `X` -- backward drive
+  * `A` -- strafe left
+  * `D` -- strafe right
+  * `Q / E` -- yaw left / right (unchanged)
+  * `S` -- cruise toggle.  Tank rolls forward at the current
+    speed step (1-9) without holding `W`.  Press `S` again to
+    stop.  Mutually exclusive with `O` (auto-circle).
+* **Arrow keys removed from drive controls.**  They were the
+  legacy bindings; replaced by WASD/X.
+* **Help / docs** updated in README_TANK_VIEWER.md to match.
+
 ### Revert: mass-inertia angular integrator removed (1.93.2)
 
 * **Backed out the v1.93.0 mass-inertia layer.**  Tank was making

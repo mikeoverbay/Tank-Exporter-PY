@@ -9,6 +9,34 @@ them with PBR + IBL lighting, and round-trips back out as
 
 ---
 
+## Current work — track physics rewrite (2026-05-08)
+
+The current track render is a static "rubber-band" ribbon (the
+welded `track_LShape12` / `track_RShape12` mesh inside
+`Chassis.primitives_processed`, UV-scrolled to fake motion).  It
+doesn't deform with wheel deflection, has no per-pad geometry,
+and can't round-trip as a real animatable track.
+
+In progress: replacing it with a **kinematic-bone-driven NURB**
+that resamples to per-pad transforms at uniform arc length, with
+each `V_loc` control point bound 1:1 to a chassis bone
+(`Track_L*` under wheels, `Track_VT_L*` on the top run,
+`Track_VD_L*` on sprocket / idler).  Physics already settles
+each road wheel's Y under gravity — the spline rides those.
+
+See **`ARCHITECTURE.md` → "Track physics roadmap"** for the full
+plan, the centripetal-Catmull-Rom fit numbers
+(15.126 m vs 15.561 m target on T30, std 0.3 mm pad spacing
+across 117 pads), the DX→GL frame-conversion rule, and the
+phased work order (Phase A spline + physics → Phase E export /
+import).
+
+The rubber-band path will be parked behind a `--legacy-tracks`
+flag, not deleted, so we keep an A/B fallback while coverage is
+verified.
+
+---
+
 ## Capabilities
 
 ### Read & render

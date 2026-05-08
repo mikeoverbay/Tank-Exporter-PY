@@ -1608,4 +1608,56 @@ class TankPhysics:
             out[pi]      = np.eye(4, dtype=np.float32)
             out[pi, 1, 3] = ry
 
+        # Pass 3: drive sprocket + idler partial follow.
+        # Without this, the track ribbon's wraparound section near
+        # the front idler / rear drive sprocket stays put while
+        # the road-wheel-side track segments deflect -- producing
+        # a visible tear / kink at the seam (worst on tanks like
+        # T30 with tight road-wheel spacing right next to the
+        # tensioner).
+        #
+        # Recipe: scan the palette for `WD_<side>\d+(_BlendBone)?`
+        # bones, identify which side they belong to + their
+        # numeric index.  The LOWEST index per side is the drive
+        # sprocket (rear); the HIGHEST is the idler (front).
+        # Drive sprocket inherits 50% of the rearmost road
+        # wheel's residual; idler inherits 50% of the frontmost
+        # road wheel's residual.  50% gets the seam to blend
+        # without making the wraparound visibly bob.
+        WD_RX = re.compile(r'^WD_([LR])(\d+)(?:_BlendBone)?$')
+        per_side_wd = {'L': [], 'R': []}   # (palette_idx, numeric_idx)
+        for pi, name in enumerate(palette):
+            if pi >= max_bones or not name:
+                continue
+            m = WD_RX.match(name)
+            if m:
+                per_side_wd[m.group(1)].append((pi, int(m.group(2))))
+
+        # Index into self.wheels for rearmost / frontmost on each side.
+        # `wheels_left` is sorted rear-to-front; same for right.
+        SEAM_FOLLOW_FRACTION = 0.5
+        rear_left   = 0                    if self.n_left  > 0 else None
+        front_left  = self.n_left - 1      if self.n_left  > 0 else None
+        rear_right  = self.n_left          if (len(self.wheels) - self.n_left) > 0 else None
+        front_right = len(self.wheels) - 1 if (len(self.wheels) - self.n_left) > 0 else None
+
+        for side, wd_list in per_side_wd.items():
+            if not wd_list:
+                continue
+            wd_list.sort(key=lambda t: t[1])     # ascending by numeric index
+            drive_palette_idx = wd_list[0][0]    # WD_<side>0 = drive sprocket
+            idler_palette_idx = wd_list[-1][0]   # highest-N = idler
+            rear_wheel_idx  = rear_left  if side == 'L' else rear_right
+            front_wheel_idx = front_left if side == 'L' else front_right
+            if rear_wheel_idx is not None:
+                ry = (float(residual_src[rear_wheel_idx])
+                      * SEAM_FOLLOW_FRACTION)
+                out[drive_palette_idx]       = np.eye(4, dtype=np.float32)
+                out[drive_palette_idx, 1, 3] = ry
+            if front_wheel_idx is not None:
+                ry = (float(residual_src[front_wheel_idx])
+                      * SEAM_FOLLOW_FRACTION)
+                out[idler_palette_idx]       = np.eye(4, dtype=np.float32)
+                out[idler_palette_idx, 1, 3] = ry
+
         return out

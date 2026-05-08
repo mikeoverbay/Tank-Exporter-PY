@@ -81,17 +81,21 @@ python tankExporterPy.py "C:\path\A14_T30.xml"
 | **Middle-click drag** | Pan camera |
 | **Scroll wheel** | Zoom in / out (or scroll the tree when the cursor is over it) |
 | **Left-click (tree)** | Expand a nation, or open the load dialog for a tank |
-| **W** | Toggle wireframe |
+| **F2** | Toggle wireframe |
 | **N** | Toggle normal map |
 | **R** | Reset camera to fit the loaded mesh |
 | **C** | Cycle camera mode: orbit / driver-side chase / commander-POV |
 | **H** | Toggle wheel-state highlight (red contact / green hanging; gated by Debug) |
-| **O** | Toggle auto-circle drive (tank pulls a steady arc at current speed step) |
+| **O** | Toggle auto-circle drive (steady arc at current speed step) |
+| **W / S** | Drive forward (hold) |
+| **Z / X** | Drive backward (hold) |
+| **A / D** | Turn the chassis left (CCW) / right (CW) |
+| **Q / E** | Legacy yaw aliases (same effect as A / D) |
 | **0..9** | Speed step: `0` = stopped, `1` = per-tank max kph from gameplay XML, `9` = creep (0.5 kph) |
-| **Arrow keys** | Drive the tank (when Susp is enabled and auto-circle is off) |
-| **Q / E** | Yaw the chassis left / right |
 | **Shift + drag** | Lift / drop the look-at point |
 | **ESC** | Quit |
+
+(F1 is reserved for the help overlay.)
 
 The top bar's **Light** and **Ambient** sliders scale direct + IBL
 specular and the flat ambient fill respectively.  **NMap** / **AO**

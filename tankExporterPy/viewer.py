@@ -30,6 +30,7 @@ import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
+                            K_a, K_d, K_s, K_x, K_z, K_F2,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -450,8 +451,13 @@ class Viewer:
         pygame.init()
         pygame.font.init()
 
-        self.width  = 1280
-        self.height = 720
+        # Startup window size: 1024 x 576.  Aspect-matched to
+        # the current splash banner (1672 x 941, ratio ~1.778).
+        # `1024 * 941 / 1672` rounds to 576, so the banner fits
+        # the window pixel-for-pixel without stretch or padding.
+        # After splash teardown, `_go_maximized` takes over.
+        self.width  = 1024
+        self.height = 576
 
         # ---- Windows taskbar identity ----------------------------------
         # By default Windows lumps every script run by `python.exe`
@@ -586,6 +592,10 @@ class Viewer:
                                      welcome_text=_welcome)
                 self.splash.render()
                 pygame.display.flip()
+                # Hide the OS window chrome while the splash is up.
+                # Restored just before the maximised main window
+                # comes online (in `run()`).
+                self._set_window_borderless(True)
         except Exception as exc:
             print(f"[viewer] splash skipped: {exc}")
             self.splash = None
@@ -972,7 +982,15 @@ class Viewer:
         # units assumes 1 unit = 1 yard (TEPY's terrain scale -- the
         # heightmap's quad is 256 yards on a side).
         self._top_speed_kph    = 50.0    # default; overridden per load
-        self._speed_step       = 0       # 0..9, 0 = stopped
+        self._speed_step       = 8       # 0..9, 0 = stopped, 9 = 0.5 kph creep
+                                          # Default 8 = a slow drive feel
+                                          # (~5 kph at the 50 kph default
+                                          # cap) so the tank moves at a
+                                          # readable pace the moment
+                                          # the user hits W on a fresh
+                                          # session.  0 was the old
+                                          # default and made the tank
+                                          # feel inert at startup.
         # Contact-wheel red highlight toggle.  Mirrors `tank_physics
         # _enabled` by default so the moment Susp goes on, the four
         # corner wheels light up red -- making it visually obvious
@@ -1003,6 +1021,15 @@ class Viewer:
         # arc around the heightmap centre.
         self._auto_circle        = False
         self._auto_circle_radius = 25.0   # metres
+
+        # Current forward velocity (m/s, signed in the render-Z
+        # convention -- negative = visible forward).  Ramped each
+        # frame toward the target speed using `_DRIVE_ACCEL` /
+        # `_DRIVE_DECEL`, so the tank spools up and brakes
+        # smoothly instead of snapping to step speed.  Persists
+        # across pause / cruise toggles so re-engaging picks up
+        # where the inertia left off.
+        self._current_forward    = 0.0
         # Scene units are METRES (chassis primitives + gameplay XML
         # both use metres).  Earlier yard-conversion was off by ~9%.
         # 1 kph = 1000 / 3600 m/s = 0.2778 m/s = 0.2778 units/s.
@@ -1408,6 +1435,29 @@ class Viewer:
             self._ensure_itemlist()
         except Exception as exc:
             self.log_error(f"ItemList auto-rebuild failed: {exc}")
+
+        # End-of-preload: restore the OS window chrome (title bar
+        # + resize frame + min/max/close).  Was being done in run()
+        # AFTER splash cleanup, but on Windows that left the chrome
+        # restoration RACING the SW_MAXIMIZE call -- the WM
+        # SetWindowPos / WM_NCCALCSIZE messages hadn't drained
+        # before we asked the OS to maximise, so the maximise
+        # took effect on a popup-style window and the chrome
+        # never came back visibly.
+        #
+        # Doing the chrome restore at the end of __init__ gives
+        # the message loop several ms to process the style change
+        # while the splash is still on screen.  Splash teardown
+        # in run() then sees an already-chromed window and the
+        # subsequent SW_MAXIMIZE keeps the chrome.
+        try:
+            self._set_window_borderless(False)
+            # Pump pending WM messages so the WM_NCCALCSIZE +
+            # WM_NCPAINT triggered by the style change can
+            # process before we transition out of __init__.
+            pygame.event.pump()
+        except Exception as exc:
+            print(f"[viewer] end-of-preload chrome restore failed: {exc}")
 
     # ------------------------------------------------------------------
     # Per-group smoke / fire settings helpers
@@ -3813,6 +3863,91 @@ class Viewer:
                 print(f'[viewer] bone-angle console dump failed: {exc}')
                 self._dump_console_warned = True
 
+    def _render_physics_timer_overlay(self, width, height):
+        """Draw a grass-green "physics: X.XX ms" readout at the
+        upper-left of the main window.
+
+        Reads `self._physics_ms` (smoothed in `render()` after the
+        physics tick).  Caches the rendered text texture keyed on
+        the formatted string -- only rebuilds when the displayed
+        value rounds to a different `0.01 ms` step, so the per-
+        frame cost is one quad draw plus a dict lookup.
+
+        Uses the existing UI shader path -- bind, set u_color to
+        grass-green, draw the alpha-mask text texture as a quad in
+        UI / pixel coordinates.
+        """
+        if not pygame.font.get_init():
+            return
+        ui = self.ui
+        if ui is None or not hasattr(ui, 'shader'):
+            return
+        text = f"physics:{self._physics_ms:6.2f} ms"
+        cache = getattr(self, '_physics_overlay_cache', None)
+        if cache is None or cache[0] != text:
+            # Build / rebuild the text texture.  Lazy-init the
+            # cached pygame.font on first call -- size 18 reads
+            # comfortably at typical render scales.
+            font = getattr(self, '_physics_overlay_font', None)
+            if font is None:
+                try:
+                    font = pygame.font.SysFont('Consolas', 18, bold=True)
+                except Exception:
+                    font = pygame.font.Font(None, 18)
+                self._physics_overlay_font = font
+            surf = font.render(text, True, (255, 255, 255))
+            data = pygame.image.tostring(surf, 'RGBA', False)
+            tw, th = surf.get_width(), surf.get_height()
+            # Free the previous texture if we had one cached.
+            if cache is not None:
+                try:
+                    glDeleteTextures([cache[1]])
+                except Exception:
+                    pass
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tid)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0,
+                          GL_RGBA, GL_UNSIGNED_BYTE, data)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            self._physics_overlay_cache = (text, tid, tw, th)
+            cache = self._physics_overlay_cache
+
+        _, tid, tw, th = cache
+        # Draw via the UI shader's text-mask path.  Same recipe as
+        # `ui._draw_tex` but with an explicit grass-green tint
+        # (mode-1 fragment multiplies texture alpha by u_color).
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        ui.shader.use()
+        ui.shader.set_mat4('projection', ui._ortho(width, height))
+        glBindVertexArray(ui.quad_vao)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        ui.shader.set_int('u_tex', 0)
+        ui.shader.set_int('u_use_tex', 1)
+        # Grass green (RGB 90 / 200 / 80, alpha 1.0).  Reads cleanly
+        # against the dark scene background and against bright
+        # sky-coloured sand areas without going neon.
+        ui.shader.set_vec4('u_color', 0.35, 0.78, 0.31, 1.0)
+        # Position 10 px into the SCENE area (right of the
+        # info / tree panel) -- earlier (10, 8) put the overlay
+        # at the global window upper-left, which is inside the
+        # left info panel and got hidden by panel chrome on
+        # higher tank loads.  `INFO_PANEL_W` is the canonical
+        # left-panel width.
+        overlay_x = self.INFO_PANEL_W + 10
+        overlay_y = 8
+        ui._draw_quad(overlay_x, overlay_y, tw, th)
+        ui.shader.set_int('u_use_tex', 0)
+        glBindVertexArray(0)
+
     def _build_hull_box_local(self):
         """Build the chassis-local AABB of every component=='hull'
         mesh.  Cached as `self._hull_box_local` (np.ndarray of shape
@@ -4095,14 +4230,22 @@ class Viewer:
         fr = _xform(getattr(self, '_fire_points',    None) or [])
 
         # Re-publish to whichever particle systems are alive on this
-        # session.  `set_emitters` is cheap (just rewraps the list);
-        # it's safe to call every frame.
+        # session.  Use `update_emitter_positions` (per-frame in-
+        # place position refresh) instead of `set_emitters` (full
+        # reset) -- the latter zeroes the spawn accumulator and
+        # re-rolls the billboard RNG phases every frame, which
+        # caused the "one smoke spawns, the other doesn't" bug
+        # at typical spawn rates (the fractional accumulator
+        # below 1.0 was being thrown away every frame, so floor()
+        # was always 0).  `update_emitter_positions` falls back
+        # to `set_emitters` automatically when the emitter count
+        # changes (tank reload).
         if getattr(self, 'smoke_particles', None) is not None:
-            self.smoke_particles.set_emitters(ex)
+            self.smoke_particles.update_emitter_positions(ex)
         if getattr(self, 'fire_smoke_particles', None) is not None:
-            self.fire_smoke_particles.set_emitters(fr)
+            self.fire_smoke_particles.update_emitter_positions(fr)
         if getattr(self, 'fire_billboards', None) is not None:
-            self.fire_billboards.set_emitters(fr)
+            self.fire_billboards.update_emitter_positions(fr)
 
         # Refresh the cyan exhaust-direction debug lines too --
         # they're built from hp['pos'] + hp['fwd'] * 0.5, so the
@@ -6860,12 +7003,18 @@ class Viewer:
 
             print("\n" + "=" * 80)
 
-            # Fit camera and remember bbox for 'R' reset
+            # Fit camera and remember bbox for 'R' reset.  Only
+            # fit-to-bounds on the FIRST load this session -- after
+            # that the camera state (orbit yaw / pitch / distance,
+            # plus camera_mode for chase / commander) sticks across
+            # tank reloads.  Press R for an explicit reset.
             all_pos  = np.concatenate(all_positions, axis=0)
             bbox_min = np.min(all_pos, axis=0)
             bbox_max = np.max(all_pos, axis=0)
             self._scene_bbox = (bbox_min, bbox_max)
-            self.camera.fit_to_bounds(bbox_min, bbox_max)
+            if not getattr(self, '_camera_fit_once', False):
+                self.camera.fit_to_bounds(bbox_min, bbox_max)
+                self._camera_fit_once = True
 
             # Minimum zoom = 5 % of mesh radius (prevents camera entering mesh)
             mesh_radius = float(np.linalg.norm((bbox_max - bbox_min) / 2.0))
@@ -7603,6 +7752,24 @@ class Viewer:
             # one (paths matter).
             self._stash_extract_paths()
 
+            # Parse the vehicle gameplay XML EARLY so the chassis
+            # block (suspension envelope + road-wheel radius +
+            # render-model-offset) is available BEFORE the
+            # `from_chassis_meshes` call below.  Re-used by the
+            # info-panel build later (we cache on
+            # `_pending_chassis_info` + the active set's tank_info
+            # so the parse only happens once per load).
+            self._pending_chassis_info = None
+            try:
+                _info_early = VehicleXMLLoader.parse_info(
+                    xml_path, self._pkg_extractor)
+                self._active_set.tank_info = _info_early
+                self._pending_chassis_info = (
+                    (_info_early or {}).get('chassis') or {})
+            except Exception as exc:
+                print(f"[viewer] early info parse failed: {exc}")
+                _info_early = None
+
             # Auto-extract the wheel rig from the freshly-loaded
             # chassis sub-meshes so tank physics works on ANY tank
             # rather than just T110E4.  Heuristic: group every
@@ -7616,7 +7783,28 @@ class Viewer:
                 from .tank_physics import TankPhysics
                 chass = [m for m in self.meshes
                          if getattr(m, 'component', '') == 'chassis']
-                self.tank_physics = TankPhysics.from_chassis_meshes(chass)
+                # Per-tank physics inputs, parsed from the SELECTED
+                # chassis's gameplay XML (`info['chassis']` block).
+                # Falls through to TankPhysics ctor defaults when
+                # the field is missing (rare; some modded tanks
+                # drop the wheelGroups / groundNodes blocks).
+                # Only the BEST chassis gets parsed in
+                # `VehicleXMLLoader.parse_info`; if the user ever
+                # loads a non-top chassis variant, we'd need a
+                # per-load chassis-name resolver -- TODO.
+                _chassis_kwargs = {}
+                _ci = (getattr(self, '_pending_chassis_info', None)
+                       or {})
+                if 'groupRadius_road' in _ci:
+                    _chassis_kwargs['radius'] = float(_ci['groupRadius_road'])
+                if 'minOffset' in _ci:
+                    _chassis_kwargs['min_offset'] = float(_ci['minOffset'])
+                if 'maxOffset' in _ci:
+                    _chassis_kwargs['max_offset'] = float(_ci['maxOffset'])
+                if 'renderModelOffset' in _ci:
+                    _chassis_kwargs['track_thickness'] = float(_ci['renderModelOffset'])
+                self.tank_physics = TankPhysics.from_chassis_meshes(
+                    chass, **_chassis_kwargs)
                 # Reset position state on tank reload so old
                 # positions don't carry over.
                 self.tank_physics.pos[:]   = 0.0
@@ -7630,6 +7818,18 @@ class Viewer:
                 # Re-arm the drive-key hint so the next time Susp
                 # is toggled on the controls get re-printed.
                 self._drive_keys_seen = False
+                # Print the wired chassis params for the new tank.
+                if _chassis_kwargs:
+                    parts = []
+                    if 'radius' in _chassis_kwargs:
+                        parts.append(f"r={_chassis_kwargs['radius']:.3f}")
+                    if 'min_offset' in _chassis_kwargs:
+                        parts.append(f"min={_chassis_kwargs['min_offset']:+.3f}")
+                    if 'max_offset' in _chassis_kwargs:
+                        parts.append(f"max={_chassis_kwargs['max_offset']:+.3f}")
+                    if 'track_thickness' in _chassis_kwargs:
+                        parts.append(f"track={_chassis_kwargs['track_thickness']:.3f}")
+                    print(f"  chassis params from XML: {', '.join(parts)}")
             except Exception as exc:
                 print(f"[viewer] tank-physics auto-extract failed: {exc}")
             er = self._active_set.extract_variant_dir
@@ -7642,7 +7842,12 @@ class Viewer:
             bbox_min = np.min(all_pos, axis=0)
             bbox_max = np.max(all_pos, axis=0)
             self._scene_bbox = (bbox_min, bbox_max)
-            self.camera.fit_to_bounds(bbox_min, bbox_max)
+            # Same camera-stickiness rule as load_mesh -- fit only
+            # on the first load this session.  R key explicitly
+            # resets + re-fits when the user wants it.
+            if not getattr(self, '_camera_fit_once', False):
+                self.camera.fit_to_bounds(bbox_min, bbox_max)
+                self._camera_fit_once = True
 
             mesh_radius = float(np.linalg.norm((bbox_max - bbox_min) / 2.0))
             self._min_zoom_distance = max(0.05, mesh_radius * 0.05)
@@ -7687,27 +7892,45 @@ class Viewer:
             # flip back to this PKG view can rebuild the panel without
             # re-parsing the XML.
             try:
-                info = VehicleXMLLoader.parse_info(xml_path,
-                                                   self._pkg_extractor)
-                self._active_set.tank_info = info
+                # Reuse the EARLY parse from above (skip the second
+                # parse).  If the early parse failed (`_info_early`
+                # is None), fall back to a fresh parse here.
+                info = _info_early
+                if info is None:
+                    info = VehicleXMLLoader.parse_info(
+                        xml_path, self._pkg_extractor)
+                    self._active_set.tank_info = info
                 self._build_info_panel(info)
                 # Pull the per-tank max forward speed for the drive
                 # speed-step controller.  Vehicle XMLs carry this as
-                # `<speedLimits><forward>` in m/s; the loader has
-                # already converted to kph.  Default 50 kph if the
-                # XML didn't carry the block (rare).
+                # `<speedLimits><forward>` in kph already; loader
+                # passes it through unchanged.  Default 50 kph if
+                # the XML didn't carry the block (rare).
                 fwd_kph = ((info.get('speed') or {}).get('forward_kph')
                            or 50.0)
                 self._top_speed_kph = float(fwd_kph)
-                # Reset speed step on tank reload so the new tank
-                # starts stopped (the previous tank's selected step
-                # would otherwise carry over silently and the user
-                # might find the new tank moving with no key press).
-                self._speed_step    = 0
+                # Speed step persists across loads now (was being
+                # reset to 0 here).  If you had cruise on at step
+                # 5 and load a new tank, the new tank inherits the
+                # step + cruise state.  Speed magnitude rescales
+                # automatically to the new tank's `_top_speed_kph`
+                # via `_kph_for_step`.
                 self.log(
                     f"top speed: {self._top_speed_kph:.1f} kph  "
                     f"(use 1-9 to drive, 0 to stop)",
                     color=(180, 220, 255))
+                # Total tank weight = sum of every component's
+                # `<weight>` (hull + chassis + turret + gun + engine
+                # + radio + fueltank).  Surface to the in-app
+                # console; cached on `_total_weight_kg` for the
+                # mass-inertia model when we wire it back in.
+                total_kg = float(info.get('total_weight_kg', 0.0) or 0.0)
+                self._total_weight_kg = total_kg
+                if total_kg > 0:
+                    self.log(
+                        f"total tank weight: {total_kg / 1000.0:.1f} t  "
+                        f"({total_kg:.0f} kg)",
+                        color=(180, 220, 255))
             except Exception as exc:
                 print(f"[viewer] info-panel build failed: {exc}")
 
@@ -8451,11 +8674,12 @@ class Viewer:
                     # fullscreen.  Standard convention across
                     # most desktop GL apps.
                     self._toggle_fullscreen()
-                elif event.key == K_w:
+                elif event.key == K_F2:
+                    # Wireframe toggle.  Was W until v1.94 -- moved
+                    # to F2 because W is now the forward-drive key
+                    # in the new WASD-style tank-handles scheme.
+                    # F1 is reserved for the help overlay (future).
                     self.wireframe = not self.wireframe
-                    # Don't call glPolygonMode here -- the next render
-                    # pass owns the overlay-vs-solid switch.  The W key
-                    # just flips the flag.
                     self._sync_button_state('wireframe', self.wireframe)
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
@@ -8463,7 +8687,9 @@ class Viewer:
                     # Toggle auto-circle drive.  Tank pulls a steady
                     # arc of radius `_auto_circle_radius` at the
                     # current speed-step kph; yaw rate auto-derived
-                    # to face the tangent.
+                    # to face the tangent.  Mutually exclusive with
+                    # cruise (S) -- toggling either turns the other
+                    # off.
                     self._auto_circle = not self._auto_circle
                     self.log(f"auto-circle: "
                              f"{'on' if self._auto_circle else 'off'}  "
@@ -8593,7 +8819,12 @@ class Viewer:
         # orbit doesn't move the look-at, so it doesn't trigger
         # the cue.
         shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-        self._show_lookat_lines = bool(shift_held or btns[1])
+        # Crosshair shows whenever the user is moving the look-at
+        # point: middle-mouse-button (XZ pan or, with Shift, Y
+        # lift).  Shift alone no longer triggers anything visible
+        # -- it's now a modifier on the middle-button drag, not a
+        # standalone mode.
+        self._show_lookat_lines = bool(btns[1])
 
         # Tank-driving keys: arrow keys move the tank around the
         # terrain (XZ only -- physics handles Y / pitch / roll).
@@ -8632,63 +8863,90 @@ class Viewer:
             cyy, syy = math.cos(yaw), math.sin(yaw)
             moved = False
 
+            # ---- Decide TARGET forward speed -------------------------
+            # `move_speed` is already negated for TEPY's render-Z
+            # convention (so `pos[2] += cyy * move_speed * dt` moves
+            # the tank in its visible-forward direction).  We compute
+            # a TARGET signed velocity for the current input set, then
+            # ramp `self._current_forward` toward it using accel /
+            # decel rates -- so W press doesn't snap to full speed,
+            # release doesn't stop instantly.
+            #
+            # Auto-circle, cruise, and W all want forward (full step).
+            # Z wants backward (negate).  No keys = decel toward 0.
+            target_forward = 0.0
+            if self._auto_circle:
+                target_forward = move_speed
+            elif keys[pygame.K_w] or keys[pygame.K_s]:
+                # W and S both drive forward (momentary -- release
+                # to stop, same as any other drive key).  S used
+                # to be a cruise toggle but Professor Coffee
+                # preferred straight hold-to-go behaviour.
+                target_forward = move_speed
+            elif keys[pygame.K_z] or keys[pygame.K_x]:
+                # Z and X both drive backward (hold).  X is the
+                # duplicate added at Professor Coffee's request --
+                # different finger position, same effect.
+                target_forward = -move_speed
+
+            # ---- Ramp toward target ----------------------------------
+            # ACCEL: tank spools up to step speed in ~2 seconds at
+            #   default values -- a real heavy tank takes longer but
+            #   3-5 m/s^2 reads as snappy-but-not-instant on screen.
+            # DECEL: ~2x ACCEL so braking + direction reversal feel
+            #   responsive (real tanks can brake harder than they
+            #   accelerate; matches tank handling intuition).
+            DRIVE_ACCEL = 5.0    # m/s^2, spool-up
+            DRIVE_DECEL = 10.0   # m/s^2, braking + reversal
+            cur   = float(self._current_forward)
+            delta = target_forward - cur
+            # Same direction AND target larger in magnitude = accel.
+            # Opposite direction OR target smaller in magnitude = decel.
+            if (target_forward * cur >= 0.0
+                    and abs(target_forward) > abs(cur)):
+                rate = DRIVE_ACCEL
+            else:
+                rate = DRIVE_DECEL
+            step = rate * dt
+            if abs(delta) <= step:
+                cur = target_forward
+            else:
+                cur += step if delta > 0 else -step
+            self._current_forward = cur
+
             # ---- Auto circle drive ---------------------------------
-            # When toggled ON via `O`, the tank ignores arrow / Q /
-            # E keys and instead pulls a steady arc of radius
-            # `_auto_circle_radius` at the current speed-step kph.
+            # When toggled ON via `O`, the tank ignores manual drive
+            # keys and instead pulls a steady arc of radius
+            # `_auto_circle_radius` at the current ramped speed.
             # Yaw rate omega = v / R is exactly what's needed to
             # keep the chassis facing along the circle's tangent
-            # at every point (small-angle / kinematic).  Sign of
-            # `move_speed` is already negated for TEPY's render-Z
-            # convention; matching the yaw_speed sign here keeps
-            # the tank pointing in its travel direction.
+            # at every point.  Using `cur` (ramped) instead of
+            # `move_speed` (instant target) means the circle starts
+            # tight and spirals out as the tank accelerates.
             if self._auto_circle:
                 R    = max(0.1, float(self._auto_circle_radius))
-                v    = abs(move_speed)   # absolute m/s
+                v    = abs(cur)   # current ramped m/s
                 if v > 1e-6:
                     omega_deg = math.degrees(v / R)
-                    # Same sign convention as Q/E: negate so the
-                    # tank turns in the same world direction the
-                    # arrow keys would push it forward.
                     tp.yaw_deg -= omega_deg * dt
                     yaw = math.radians(tp.yaw_deg)
                     cyy, syy = math.cos(yaw), math.sin(yaw)
-                    # Forward motion at the new heading -- same
-                    # math the K_UP branch uses, just unconditional.
-                    tp.pos[0] += syy * move_speed * dt
-                    tp.pos[2] += cyy * move_speed * dt
-                    moved = True
-                # Skip the manual-drive keys when auto-drive is on
-                # so the user can't accidentally double up.
-                # (`continue` would also skip the diagnostic; just
-                # let the if/elif chain below short-circuit.)
             elif not self._auto_circle:
-                # Manual drive keys -- only consulted when auto-
-                # circle is off.  Multiple keys can be held at
-                # once (forward + strafe = diagonal), so each
-                # branch is its own independent if.
-                if keys[pygame.K_UP]:
-                    tp.pos[0] += syy * move_speed * dt
-                    tp.pos[2] += cyy * move_speed * dt
-                    moved = True
-                if keys[pygame.K_DOWN]:
-                    tp.pos[0] -= syy * move_speed * dt
-                    tp.pos[2] -= cyy * move_speed * dt
-                    moved = True
-                if keys[pygame.K_LEFT]:
-                    tp.pos[0] -= cyy * move_speed * dt
-                    tp.pos[2] += syy * move_speed * dt
-                    moved = True
-                if keys[pygame.K_RIGHT]:
-                    tp.pos[0] += cyy * move_speed * dt
-                    tp.pos[2] -= syy * move_speed * dt
-                    moved = True
-                if keys[pygame.K_q]:
+                # Manual yaw input.  Yaw rate is INSTANT (no ramp)
+                # because tanks pivot quickly when stopped and
+                # ramping the yaw was distracting in testing.
+                if keys[pygame.K_a] or keys[pygame.K_q]:
                     tp.yaw_deg -= yaw_speed * dt
                     moved = True
-                if keys[pygame.K_e]:
+                if keys[pygame.K_d] or keys[pygame.K_e]:
                     tp.yaw_deg += yaw_speed * dt
                     moved = True
+
+            # ---- Apply ramped forward velocity to position ---------
+            if abs(cur) > 1e-6:
+                tp.pos[0] += syy * cur * dt
+                tp.pos[2] += cyy * cur * dt
+                moved = True
             # One-shot diagnostic so we can tell whether the issue
             # is "keys not detected at all" (focus) vs "detected
             # but tank not visibly responding".  Logged once per
@@ -8705,13 +8963,14 @@ class Viewer:
             dx = mouse_pos[0] - self.mouse_last[0]
             dy = mouse_pos[1] - self.mouse_last[1]
 
-            # Shift held -> lift / drop the look-at point on the
-            # world Y axis.  Suspends the regular orbit / pan so
-            # the modifier mode is unambiguous: drag up = rise,
-            # drag down = sink.  Speed scales with camera distance
-            # (same convention the pan uses) so the response feels
-            # constant regardless of zoom.
-            if shift_held and (dx or dy):
+            # Shift + MIDDLE-MOUSE -> lift / drop the look-at point
+            # on the world Y axis.  Shift alone no longer triggers
+            # anything (was previously a standalone Y-lift mode);
+            # now it's a modifier on the middle-button drag.  This
+            # prevents an accidental Shift held during keyboard
+            # typing from yanking the camera upward as the cursor
+            # moves.
+            if shift_held and btns[1] and (dx or dy):
                 # Half the pan-XZ speed so the Y lift feels deliberate
                 # and lands precisely instead of overshooting.  The
                 # 0.10 factor (vs the pan's 0.20) is the only knob --
@@ -8771,6 +9030,21 @@ class Viewer:
             self.splash.render()
             pygame.display.flip()
             return
+
+        # Mirror the Debug + Susp checkboxes into the master flags
+        # at the TOP of render() so every gate downstream reads
+        # the CURRENT-frame state.  Was being mirrored at the
+        # bottom of render(), which left every debug-overlay
+        # gate reading the previous frame's value -- visible as
+        # "Debug checkbox shows no markers / no wheel colors"
+        # when the toggle and the gate disagree by one frame
+        # (worst case: gate never sees the True transition
+        # because some other code path changes the checkbox
+        # state mid-frame).
+        if self._debug_cb is not None:
+            self._debug = bool(self._debug_cb.checked)
+        if self._suspension_cb is not None:
+            self.tank_physics_enabled = bool(self._suspension_cb.checked)
 
         # ---- GPU timer query: begin -------------------------------------
         # Lazy-create the two-query pool the first time we render the
@@ -8860,11 +9134,25 @@ class Viewer:
             # Clamp to a reasonable minimum so a paused / single-step
             # frame doesn't make the physics solver jitter.
             dt = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
+            # Time the full tank-math step (physics update + per-mesh
+            # model-matrix recompose) so the user can see the
+            # physics cost in real time on the grass-green overlay
+            # in the upper-left corner.  Uses perf_counter for
+            # microsecond resolution; smoothed lightly so the
+            # readout is stable.
+            import time as _time
+            _t_phys0 = _time.perf_counter()
             chassis_pose = self.tank_physics.update(self.terrain, dt)
             # Apply chassis pose to every sub-mesh.
             for m in self.meshes:
                 m.model_matrix = (chassis_pose
                                    @ m.bind_model_matrix).astype(np.float32)
+            _phys_ms = (_time.perf_counter() - _t_phys0) * 1000.0
+            # Exponential smoothing so the overlay value doesn't
+            # flicker every frame.  Alpha 0.20 ~= 5-frame trailing
+            # average at 60 fps.
+            prev_ms = getattr(self, '_physics_ms', 0.0)
+            self._physics_ms = 0.20 * _phys_ms + 0.80 * prev_ms
 
             # Particle hardpoints (engine smoke + fire) live in
             # bind-pose world coords -- they were captured at load
@@ -8949,25 +9237,13 @@ class Viewer:
         if self.show_axes:
             self.axes.render(self.color_shader, view, proj)
 
-        # Look-at crosshair: pale-pink lines spanning 10 units total
-        # along each world axis (X / Y / Z), centred on
-        # camera.center.  Only drawn while the user is actively
-        # moving the look-at point -- gated by the
-        # `_show_lookat_lines` flag set in `handle_input` (Shift
-        # held OR middle-mouse-button held).  No depth test so the
-        # lines stay visible regardless of where the geometry is.
-        if self._show_lookat_lines:
-            cx, cy_, cz = (float(self.camera.center[0]),
-                           float(self.camera.center[1]),
-                           float(self.camera.center[2]))
-            H = 5.0   # half-length per axis -> 10 units total
-            PINK = (1.0, 0.75, 0.85)
-            self.lookat_lines.update([
-                ((cx - H, cy_, cz), (cx + H, cy_, cz), PINK),  # X
-                ((cx, cy_ - H, cz), (cx, cy_ + H, cz), PINK),  # Y (up in GL)
-                ((cx, cy_, cz - H), (cx, cy_, cz + H), PINK),  # Z
-            ])
-            self.lookat_lines.render(self.color_shader, view, proj)
+        # Look-at crosshair was drawn here pre-1.97.2 -- BEFORE
+        # the tank mesh pass below -- which meant the tank
+        # rendered ON TOP of the crosshair, so the depth-test-
+        # disabled crosshair was still hidden behind the hull.
+        # Moved to AFTER the mesh passes (just before the UI
+        # render) so it draws on top of the rendered tank
+        # without being overwritten.
 
         # Tank physics overlay: per-wheel ground / wheel-centre
         # markers + yellow suspension lines.  Gated by the master
@@ -9055,7 +9331,8 @@ class Viewer:
         # space, transformed by chassis_pose each frame so the box
         # rides with the chassis.  Useful for sizing / collision-
         # debug; doesn't constrain the physics.
-        if (self.meshes and self.tank_physics_enabled
+        if (self._debug
+                and self.meshes and self.tank_physics_enabled
                 and self.tank_physics is not None):
             if not hasattr(self, '_hull_box_local') or self._hull_box_local is None:
                 self._build_hull_box_local()
@@ -9458,8 +9735,11 @@ class Viewer:
             # back off so re-enabling reprints.
             if new_susp and not self._suspension_test:
                 self.log("Susp ON -- drive controls:", color=(180, 220, 255))
-                self.log("  arrow keys = move along heading", color=(160, 200, 230))
-                self.log("  Q / E      = yaw left / right",   color=(160, 200, 230))
+                self.log("  W / Z      = forward / backward",  color=(160, 200, 230))
+                self.log("  A / D      = turn left / right",   color=(160, 200, 230))
+                self.log("  S          = cruise toggle",       color=(160, 200, 230))
+                self.log("  O          = auto-circle",         color=(160, 200, 230))
+                self.log("  0..9       = speed step",          color=(160, 200, 230))
             self._suspension_test     = new_susp
             self.tank_physics_enabled = new_susp
 
@@ -9594,10 +9874,41 @@ class Viewer:
             self.picker.draw_overlay(view, proj,
                                       _theme.c1(), _theme.c2())
 
+        # Look-at crosshair: pale-pink lines spanning 10 units along
+        # each world axis (X / Y / Z), centred on `camera.center`.
+        # Drawn HERE -- after every tank-mesh / wireframe / picker
+        # pass -- so the tank doesn't overdraw it.  Depth-test off
+        # while drawing so the lines stay visible even when the
+        # camera is buried inside the tank or behind terrain;
+        # restore depth state afterward for the UI / overlay
+        # passes that follow.  Visibility gated by
+        # `_show_lookat_lines` (mouse wheel button held).
+        if self._show_lookat_lines:
+            cx, cy_, cz = (float(self.camera.center[0]),
+                           float(self.camera.center[1]),
+                           float(self.camera.center[2]))
+            H = 5.0   # half-length per axis -> 10 units total
+            PINK = (1.0, 0.75, 0.85)
+            self.lookat_lines.update([
+                ((cx - H, cy_, cz), (cx + H, cy_, cz), PINK),  # X
+                ((cx, cy_ - H, cz), (cx, cy_ + H, cz), PINK),  # Y (up in GL)
+                ((cx, cy_, cz - H), (cx, cy_, cz + H), PINK),  # Z
+            ])
+            glDisable(GL_DEPTH_TEST)
+            self.lookat_lines.render(self.color_shader, view, proj)
+            glEnable(GL_DEPTH_TEST)
+
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
         glViewport(0, 0, self.width, self.height)
         self.ui.render(self.width, self.height)
+
+        # Physics-timer readout in the upper-left, grass-green text.
+        # Drawn AFTER the UI so it sits on top of the scene + any
+        # tree / panel that would otherwise overlap.  Smoothed
+        # value from `_physics_ms` (5-frame trailing average).
+        if self.tank_physics_enabled and self.tank_physics is not None:
+            self._render_physics_timer_overlay(self.width, self.height)
 
         # ---- GPU timer query: end + read previous frame ------------------
         # Close THIS frame's timer query first (everything queued
@@ -9707,6 +10018,85 @@ class Viewer:
     # Main loop
     # ------------------------------------------------------------------
 
+    def _set_window_borderless(self, borderless):
+        """Toggle the OS window's title-bar / chrome / resize-frame
+        without recreating the pygame display surface.
+
+        Pygame's `NOFRAME` flag can't be flipped after `set_mode()`
+        without destroying + recreating the window -- which on an
+        OpenGL surface drops the GL context and trashes every
+        uploaded texture / VBO.  This Win32 path mutates the
+        window-style bitmask directly (`SetWindowLong` +
+        `SetWindowPos(SWP_FRAMECHANGED)`), so the same HWND keeps
+        its GL context.
+
+        No-op on non-Windows (the borderless splash is a Windows
+        cosmetic; SDL on Mac / Linux respects `pygame.NOFRAME`
+        only at creation time anyway).
+        """
+        if os.name != 'nt':
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            wm_info = pygame.display.get_wm_info()
+            hwnd = wm_info.get('window') if wm_info else None
+            if not hwnd:
+                return
+            GWL_STYLE             = -16
+            WS_OVERLAPPEDWINDOW   = 0x00CF0000   # caption + sysmenu + min/max + thick frame
+            WS_POPUP              = 0x80000000
+            WS_VISIBLE            = 0x10000000
+            SWP_NOMOVE            = 0x0002
+            SWP_NOSIZE            = 0x0001
+            SWP_NOZORDER          = 0x0004
+            SWP_FRAMECHANGED      = 0x0020
+            # 64-bit-safe getter; falls back to the 32-bit variant
+            # for the (rare) 32-bit Python build.
+            GetWindowLong = (user32.GetWindowLongPtrW
+                             if hasattr(user32, 'GetWindowLongPtrW')
+                             else user32.GetWindowLongW)
+            SetWindowLong = (user32.SetWindowLongPtrW
+                             if hasattr(user32, 'SetWindowLongPtrW')
+                             else user32.SetWindowLongW)
+            # Simple two-bit toggle: only mask WS_CAPTION (title
+            # bar) and WS_THICKFRAME (resize border).  Don't touch
+            # WS_SYSMENU / WS_MINIMIZEBOX / WS_MAXIMIZEBOX / WS_VISIBLE
+            # / WS_POPUP -- SDL set those up at window creation and
+            # the previous "swap WS_OVERLAPPEDWINDOW for WS_POPUP"
+            # approach was conflicting with SDL2's own bookkeeping
+            # on the restore path, leaving the window chromeless
+            # even after a successful SetWindowLong.
+            WS_CAPTION    = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            current = GetWindowLong(hwnd, GWL_STYLE)
+            if borderless:
+                new_style = current & ~(WS_CAPTION | WS_THICKFRAME)
+            else:
+                new_style = current |  (WS_CAPTION | WS_THICKFRAME)
+            if new_style == current:
+                return   # nothing to do, save the SetWindowPos roundtrip
+            SetWindowLong(hwnd, GWL_STYLE, new_style)
+            # Add SWP_SHOWWINDOW on the restore path -- some
+            # drivers leave the window in a "style changed but
+            # not redrawn" state after SetWindowLong unless we
+            # explicitly poke it back into the visible set.
+            # SWP_DRAWFRAME = SWP_FRAMECHANGED already; combine
+            # with SWP_SHOWWINDOW to be belt-and-braces.
+            SWP_SHOWWINDOW = 0x0040
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                | SWP_FRAMECHANGED | SWP_SHOWWINDOW)
+            # Belt-and-braces: ShowWindow(SW_SHOW) makes sure the
+            # window is in the visible state regardless of what
+            # the previous style transition left it as.  Idempotent
+            # if already visible.
+            SW_SHOW = 5
+            user32.ShowWindow(hwnd, SW_SHOW)
+        except Exception as exc:
+            print(f"[viewer] borderless toggle failed: {exc}")
+
     def _go_maximized(self):
         """Maximise the pygame window so it fills the screen but
         keeps its title bar / taskbar / chrome.
@@ -9776,11 +10166,42 @@ class Viewer:
         conventional fullscreen-toggle key, but the underlying
         action is OS-window maximise (chrome preserved) -- see
         `_go_maximized` for the rationale.
+
+        After the ShowWindow call, explicitly poll the new client
+        rect from Win32 and feed it into `_on_resize` so the GL
+        viewport + side panels reshape THIS frame instead of
+        waiting on the next pygame event tick.  Belt-and-braces
+        for the case where the WM_SIZE / SDL_WINDOWEVENT_SIZE_
+        CHANGED / pygame VIDEORESIZE chain has any extra latency.
         """
         if getattr(self, '_is_fullscreen', False):
             self._go_windowed()
         else:
             self._go_maximized()
+        # Immediately reshape the GL viewport + UI to the new
+        # client size.  The chrome (title bar / resize border) is
+        # NOT counted -- GetClientRect returns just the content
+        # area, which is what `glViewport` and `_on_resize` want.
+        if os.name == 'nt':
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                wm_info = pygame.display.get_wm_info()
+                hwnd = wm_info.get('window') if wm_info else None
+                if hwnd:
+                    class _RECT(ctypes.Structure):
+                        _fields_ = [('left',   ctypes.c_long),
+                                    ('top',    ctypes.c_long),
+                                    ('right',  ctypes.c_long),
+                                    ('bottom', ctypes.c_long)]
+                    rc = _RECT()
+                    if user32.GetClientRect(hwnd, ctypes.byref(rc)):
+                        new_w = max(1, rc.right - rc.left)
+                        new_h = max(1, rc.bottom - rc.top)
+                        if (new_w, new_h) != (self.width, self.height):
+                            self._on_resize(new_w, new_h)
+            except Exception as exc:
+                print(f"[viewer] post-F11 resize failed: {exc}")
 
     def _set_borderless(self, borderless):
         """Toggle the OS title-bar / resize-border on the pygame
@@ -9844,6 +10265,12 @@ class Viewer:
             except Exception as exc:
                 print(f"[viewer] splash cleanup: {exc}")
             self.splash = None
+        # Window chrome was already restored at the END of __init__
+        # (after preload).  Doing it here was racing the SW_MAXIMIZE
+        # below -- the WM_NCCALCSIZE message hadn't drained, so the
+        # maximise took effect on a borderless popup and the chrome
+        # never came back.  See the end-of-preload block in __init__
+        # for the correct restore site.
         # Maximise the window for the main viewing experience.
         # Splash rendered in the original 1280x720 client area so
         # it stayed centred in a known viewport; now that init is

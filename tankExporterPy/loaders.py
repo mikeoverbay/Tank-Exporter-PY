@@ -2849,12 +2849,14 @@ class VehicleXMLLoader:
             'fueltank': {},
         }
 
-        # Speed limits (m/s in the source XML).  WoT vehicle XMLs have
-        # `<speedLimits><forward>` / `<backward>`; we surface both as
-        # `forward_kph` / `backward_kph` so the runtime drive code can
-        # pick `forward_kph` as "step 1 = top speed".  Falls back to
-        # an empty dict when the element is absent (rare; modded /
-        # premium tanks occasionally drop the block).
+        # Speed limits.  WoT vehicle XMLs store `<speedLimits>
+        # <forward>` / `<backward>` directly in KPH (despite a
+        # widespread assumption that they're m/s -- verified
+        # against A14_T30 which carries `<forward>35</forward>`
+        # and reports 35 kph in-game, not 126 kph).  We pass the
+        # values through unchanged.  Falls back to an empty dict
+        # when the element is absent (rare; modded / premium
+        # tanks occasionally drop the block).
         sl_el = root.find('speedLimits')
         if sl_el is not None:
             speed = {}
@@ -2862,12 +2864,12 @@ class VehicleXMLLoader:
             bwd_t = sl_el.findtext('backward')
             try:
                 if fwd_t:
-                    speed['forward_kph'] = float(fwd_t.strip()) * 3.6
+                    speed['forward_kph'] = float(fwd_t.strip())
             except ValueError:
                 pass
             try:
                 if bwd_t:
-                    speed['backward_kph'] = float(bwd_t.strip()) * 3.6
+                    speed['backward_kph'] = float(bwd_t.strip())
             except ValueError:
                 pass
             info['speed'] = speed
@@ -2884,6 +2886,84 @@ class VehicleXMLLoader:
                 'rotationSpeed', 'brakeForce', 'maxClimbAngle',
                 'terrainResistance', 'repairTime',
             })
+
+            # ---- Suspension envelope (TankPhysics input) -------
+            # `<groundNodes>` carries one or more `<group>` blocks
+            # with `<minOffset>` / `<maxOffset>` per group.  In
+            # practice every tank uses the SAME envelope across
+            # left / right groups, so we just grab the first
+            # group's values and treat them as the chassis-wide
+            # envelope.  groundNodes is nested deep inside
+            # `<tracks><trackPair><trackDebris><physicalParams>`
+            # on most tanks, hence the descendant-search.
+            gn_el = best_chassis.find('.//groundNodes')
+            if gn_el is not None:
+                first_group = gn_el.find('group')
+                if first_group is not None:
+                    mn = first_group.findtext('minOffset')
+                    mx = first_group.findtext('maxOffset')
+                    try:
+                        if mn:
+                            info['chassis']['minOffset'] = float(mn.strip())
+                    except ValueError:
+                        pass
+                    try:
+                        if mx:
+                            info['chassis']['maxOffset'] = float(mx.strip())
+                    except ValueError:
+                        pass
+
+            # ---- Main road wheel radius (TankPhysics input) ----
+            # `<wheelGroups>` has one block per "kind of wheel"
+            # (drive sprocket, idler, road wheels, return rollers).
+            # Same deep-nesting story as groundNodes -- usually
+            # under `<tracks><trackPair><trackDebris>
+            # <physicalParams>`.  We want the ROAD WHEEL radius:
+            # the group whose `<wheelName>` entries match
+            # `W_<L|R>\d+` (the standard tracked-tank rig naming).
+            # Fallback: whichever wheelGroup has the most
+            # wheelName entries.
+            wg_el = best_chassis.find('.//wheelGroups')
+            if wg_el is not None:
+                best_radius = None
+                best_count  = -1
+                for wg in wg_el.findall('wheelGroup'):
+                    names = [n.text.strip() for n in wg.findall('wheelName')
+                             if n.text]
+                    if not names:
+                        continue
+                    rad_t = wg.findtext('groupRadius')
+                    try:
+                        rad = float(rad_t.strip()) if rad_t else None
+                    except ValueError:
+                        rad = None
+                    if rad is None:
+                        continue
+                    # Prefer groups whose names look like W_<L|R><i>.
+                    is_road = all(re.match(r'^W_[LR]\d+$', n) for n in names)
+                    score   = (len(names) * 2) if is_road else len(names)
+                    if score > best_count:
+                        best_count  = score
+                        best_radius = rad
+                if best_radius is not None:
+                    info['chassis']['groupRadius_road'] = best_radius
+
+            # ---- Track thickness (TankPhysics input) -----------
+            # Two source fields, in order of preference:
+            #   1. `<trackThickness>` -- direct child of newer
+            #      chassis variants (T30_2 etc.); explicit value.
+            #   2. `<renderModelOffset>` deep inside
+            #      `<tracks><trackPair><trackDebris>
+            #      <physicalParams>` -- legacy older naming.
+            # First-found wins; we deep-search for both.
+            for fld in ('trackThickness', 'renderModelOffset'):
+                el = best_chassis.find('.//' + fld)
+                if el is not None and el.text:
+                    try:
+                        info['chassis']['renderModelOffset'] = float(el.text.strip())
+                        break
+                    except ValueError:
+                        pass
 
         # ---- Best turret + top gun -------------------------------------
         turrets_el = root.find('turrets0')
@@ -2935,6 +3015,29 @@ class VehicleXMLLoader:
             root, 'fuelTanks', 'fuelTanks.xml', nation, pkg_extractor,
             keep={'userString', 'level', 'price', 'weight',
                   'maxHealth', 'repairCost'})
+
+        # ---- Total tank weight (kg) ------------------------------
+        # Sum every component's `<weight>` (hull / chassis / turret
+        # / gun / engine / radio / fueltank) for the SELECTED
+        # variant of each.  Each component's own dict already
+        # carries `weight` from `_scalars` keep-list above; this
+        # is just the aggregation.  Surfaced as
+        # `info['total_weight_kg']` for the info panel + the
+        # tank-physics mass-inertia model when we wire it back in.
+        # Ammo + crew + commander hatch trinkets are NOT in the
+        # XML, so this is the dry vehicle mass; close enough for
+        # mass-distribution math.
+        total_kg = 0.0
+        for comp_key in ('hull', 'chassis', 'turret', 'gun',
+                         'engine', 'radio', 'fueltank'):
+            comp = info.get(comp_key) or {}
+            wt   = comp.get('weight')
+            if wt:
+                try:
+                    total_kg += float(str(wt).strip())
+                except ValueError:
+                    pass
+        info['total_weight_kg'] = total_kg
 
         return info
 

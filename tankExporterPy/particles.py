@@ -245,6 +245,37 @@ class ParticleSystem:
         self._emitter_index = 0
 
     # ------------------------------------------------------------------
+    def update_emitter_positions(self, emitter_list):
+        """Refresh emitter pos / fwd in place WITHOUT resetting the
+        spawn accumulator or round-robin index.
+
+        Why this exists: `set_emitters` is the canonical "new
+        scene / new tank" entry point and resets `_spawn_accum =
+        0.0`.  That's correct on tank load.  But the chassis-pose
+        follow-the-tank code (`Viewer._update_emitters_for_chassis_
+        pose`) calls into the particle system every frame to
+        refresh world positions -- using `set_emitters` there
+        meant the spawn accumulator got zeroed every frame, so
+        the fractional remainder that bridges multiple frames
+        was thrown away.  Result: at typical spawn rates (15-30
+        emitters/sec, 2 HPs, 60 fps) the per-frame contribution
+        is < 1.0, so `floor(accum)` was always 0 -- particles
+        spawned sparsely or not at all.  Different frame jitter
+        on each emitter made one look "alive" while the other
+        looked dead.
+
+        Falls back to `set_emitters` if the count changed (e.g.
+        tank reload added / removed an HP) -- in that case we
+        DO want a clean reset.
+        """
+        if len(emitter_list) != len(self.emitters):
+            self.set_emitters(emitter_list)
+            return
+        for em, e in zip(self.emitters, emitter_list):
+            em['pos'] = np.asarray(e['pos'], dtype=np.float32)
+            em['fwd'] = np.asarray(e['fwd'], dtype=np.float32)
+
+    # ------------------------------------------------------------------
     def reset(self):
         """Kill every alive particle immediately."""
         self.alive[:]      = False
@@ -612,6 +643,36 @@ class AnimatedBillboard:
         self.emitters = []
 
     # ------------------------------------------------------------------
+    def update_emitter_positions(self, emitter_list):
+        """Refresh per-emitter pos in place WITHOUT re-rolling the
+        per-layer RNG phases.
+
+        Same purpose as `ParticleSystem.update_emitter_positions`:
+        the per-frame chassis-pose tracker calls into the
+        billboard system to refresh world coordinates, but the
+        full `set_emitters` path RNG-rolls a fresh phase for
+        every internal layer on every call.  Calling that per
+        frame meant the flipbook never advanced coherently --
+        each frame restarted the animation at a random point.
+
+        Each input emitter expanded to `layers_per_emitter`
+        internal billboards (matching the layout in
+        `set_emitters`).  We update those internal billboards'
+        positions in lockstep -- N input emitters * K layers
+        each maps to indices `[i*K : (i+1)*K]` in the internal
+        list.  Falls back to `set_emitters` if the count or
+        layer geometry has changed.
+        """
+        n_layers = max(1, int(self.layers_per_emitter))
+        if len(self.emitters) != len(emitter_list) * n_layers:
+            self.set_emitters(emitter_list)
+            return
+        for i, e in enumerate(emitter_list):
+            pos = np.asarray(e['pos'], dtype=np.float32)
+            for k in range(n_layers):
+                self.emitters[i * n_layers + k]['pos'] = pos
+
+    # ------------------------------------------------------------------
     def update(self, dt):
         """Advance each layer's normalised phase ∈ [0, 1).
 
@@ -671,17 +732,10 @@ class AnimatedBillboard:
         for i, em in enumerate(self.emitters):
             age = em['phase'] * L
             verts[i, :, 0:3] = em['pos']
-            # Centered offsets: emitter pos sits at the centroid of
-            # the flame quad.  Earlier revisions used
-            # `_CORNER_OFFSETS_BOTTOM` (bottom-center anchoring) so
-            # the flame would visibly rise out of the hull -- but
-            # WoT's HP_Fire hardpoints are authored at the centroid
-            # of where the artist wanted the flame to appear, so
-            # bottom-anchoring shifted every flame upward by
-            # `size * 0.5`.  Recenter to land squarely on the
-            # hardpoint and let the artist's HP_Fire placement be
-            # the source of truth for vertical position.
-            verts[i, :, 3:5] = _CORNER_OFFSETS
+            # Bottom-anchored offsets: emitter pos = bottom-center of
+            # the flame quad rather than its centroid.  See
+            # _CORNER_OFFSETS_BOTTOM for why.
+            verts[i, :, 3:5] = _CORNER_OFFSETS_BOTTOM
             verts[i, :, 5:7] = (_CORNER_UVS_MIRROR_X
                                 if em.get('flip_x') else _CORNER_UVS)
             verts[i, :, 7]   = age
