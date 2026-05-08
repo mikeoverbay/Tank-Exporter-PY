@@ -9,6 +9,838 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Revert: mass-inertia angular integrator removed (1.93.2)
+
+* **Backed out the v1.93.0 mass-inertia layer.**  Tank was making
+  wild jumps -- the second-order integrator interacted badly with
+  the iterative-refinement loop's repeated `chassis_matrix()`
+  calls (each iteration uses `self.pitch_deg/roll_deg`, but
+  those were the LAGGED values during integration, not the
+  target ones).  Refinement saw stale poses, classified wheels
+  wrong, plane fit jumped to wild new targets, integrator
+  chased them -- positive feedback loop.
+* Behaviour reverts to the pre-1.93.0 snap-to-plane chassis pose.
+  Per-wheel residual damping (asymmetric `smoothed_residual_y`)
+  stays.
+* Mass-inertia is the right idea but needs to be done OUTSIDE
+  the iterative refinement loop -- compute the converged target
+  once, then ramp the chassis toward it across frames.  Saved
+  for a future attempt.
+
+### Debug checkbox now gates wheel highlight + terrain markers (1.93.1)
+
+* **Wheel red/green/over-comp highlight** -- gated by Debug.
+  When Debug is unchecked, the shader's `u_contact_mode` stays
+  at 0 and the wheels render with normal PBR.  H key still
+  toggles `_highlight_contacts` independently in case you want
+  the highlight off even when Debug is on.
+
+* **Per-wheel terrain markers (pink stars, cyan, yellow,
+  blue X)** -- gated by Debug AND Susp.  The chassis still
+  responds to terrain via the per-wheel suspension solve
+  regardless of Debug state; we just don't draw the markers
+  when Debug is off.
+
+### Mass-inertia: angular acceleration on chassis pitch / roll (1.93.0)
+
+* **No more instant-snap pitch / roll.**  The chassis pose now
+  evolves under a critically-damped second-order system:
+  ```
+  alpha = -K * (current - target) - D * omega
+  omega += alpha * dt
+  current += omega * dt
+  ```
+  with the plane-fit value as the target.  Result: realistic
+  angular acceleration -- the chassis ramps toward the target
+  pitch / roll instead of jumping.
+* **Hard caps**:
+  * MAX_OMEGA = 90 deg/sec (chassis can't rotate faster than
+    a real tank's pitching limit even if the contact set
+    changes wildly between frames).
+  * MAX_ALPHA = 720 deg/sec^2 (acceleration cap).
+* **Tuning**: omega_n = 4 rad/s natural frequency settles a
+  step input in ~250 ms.  Critical damping = no overshoot.
+  Constants live on `TankPhysics._ANG_*` class attrs.
+* **Verified**: 20 cm step under one wheel produces a smooth
+  ramp from 0 deg to target with peak omega around 4 deg/sec
+  (well under the 90 cap), no oscillation, monotonic decay
+  toward steady state.
+
+### Auto circle drive (`O` toggles) (1.92.0)
+
+* **`O` toggles auto-circle drive.**  When ON, the tank ignores
+  arrow / Q / E keys and instead pulls a steady circular arc:
+  * Radius `_auto_circle_radius` = 25 m (tunable in code).
+  * Linear speed comes from the current speed step (1-9).
+  * Yaw rate `omega = v / R` -- exactly the value that keeps
+    the chassis facing the tangent at every point on the circle
+    (kinematic, no slip).
+  * Sign convention matches arrow keys' forward direction so
+    the tank pulls a smooth left turn at the right linear
+    speed regardless of how the user changes step.
+* Manual keys re-engage when `O` is toggled off.  Combine with
+  the chase / commander cameras to watch the chassis tilt
+  cleanly as the tank pulls a steady arc on the heightmap.
+
+### Cam 2 (chase): free camera with locked look-at on driver (1.91.4)
+
+* **Mode 1 chase camera reworked**: camera position is now the
+  ORBIT camera (mouse-driven, user can spin / pan / zoom freely),
+  but the look-at point is LOCKED to a driver-position in
+  chassis-local space `(+0.7, +0.6, -2.0)` and transformed by
+  `chassis_pose` each frame.  Result: you can fly the camera
+  anywhere, but it always points at the driver side of the tank
+  even as the tank turns / pitches / rolls.
+
+### Smoke emitters: snapshot bind_pos at load (no transform race) (1.91.3)
+
+* **Explicit `bind_pos` / `bind_fwd` snapshot at the end of
+  `load_vehicle`** for every exhaust + fire hardpoint.  The
+  v1.83.2 lazy snapshot inside `_update_emitters_for_chassis_pose`
+  worked in the common case but had a subtle race: any code path
+  that touched `hp['pos']` between load and the first physics tick
+  would corrupt the snapshot.  Doing it explicitly at load time
+  makes `bind_pos` authoritative regardless of what runs in
+  between.
+
+* **Console dump of every exhaust HP at load** so we can spot a
+  rogue hardpoint at a glance.  Prints name, component, bind
+  pos, bind fwd -- if one HP shows a position wildly off from
+  the others, that's likely the smoke-framing-bug culprit.
+
+### Camera 2 (chase): rotated 90 deg in Y to side-view (1.91.2)
+
+* **Chase camera moved from behind to right-side**: eye now
+  at chassis-local `(+6.0, +2.6, -1.4)` looking at
+  `(-3, +0.5, 0)`.  Same magnitude, just rotated 90 deg about
+  the chassis Y axis -- camera sits off the tank's right side
+  with a 3/4 view of the hull profile.
+
+### Drive speed: hard cap at per-tank XML max + metre conversion (1.91.1)
+
+* **`_kph_for_step` clamps to `_top_speed_kph`** as a hard cap.
+  No number-key step can produce a speed above the per-tank
+  `<speedLimits><forward>` value from the gameplay XML.  Step 1
+  hits the cap exactly; steps 2-9 interpolate downward.
+
+* **Conversion switched from yards/sec to metres/sec.**  The
+  scene units are metres (chassis primitives + gameplay XML
+  both use metres), so the previous yard-conversion was off
+  by ~9% (tank moved faster than the displayed kph would
+  suggest).  Now `kph * (1000 / 3600)` straight to units/sec.
+
+* **In-app log adds the cap value** so the user can see at a
+  glance what each step is bounded by:
+  `speed: step 1/9  =  35.00 kph  (9.722 m/s)  [cap 35.0 kph]`.
+
+* **Backwards-compat alias** `_speed_yards_per_sec` is kept
+  pointing at the new metre-based calc; older comment lines
+  that still reference yds/s aren't lying about the math, just
+  about the unit name.
+
+### Three-cam mode (orbit / chase / commander) + `C` toggle (1.91.0)
+
+* **`C` cycles cameras**:
+  * **Mode 0 -- orbit** (default): existing trackball / mouse
+    camera.  Free-fly around the whole scene.
+  * **Mode 1 -- chase (driver side)**: camera anchored to
+    chassis-local `(+1.4, +2.6, +6.0)` looking at
+    `(0, +0.5, -3)`.  Sits behind + above + on the driver-side
+    of the tank, follows pitch / roll / yaw via
+    `chassis_matrix()` so the view rolls with the tank.
+  * **Mode 2 -- commander (turret POV)**: camera anchored to
+    chassis-local `(0, +1.95, 0)` looking forward along
+    chassis-local `-Z`.  Hides turret + gun meshes (in main +
+    wireframe + normals passes) so the user gets a clear
+    view-out from inside the turret.
+
+* **Camera follows tank tilt + heading.**  Modes 1 + 2
+  multiply chassis-local eye / target / up vectors through
+  `chassis_matrix()` (translation + yaw + pitch + roll), so
+  the anchored cameras always sit in the same chassis-relative
+  spot regardless of how the tank is oriented.
+
+* **Mode label printed to in-app console** on each `C` press
+  (`camera: chase (driver side)` etc.).
+
+### Force-balance pos_y wired into runtime physics (1.90.0)
+
+* **Force-balance Newton iteration** (proven in
+  `cust_tools/test_force_balance.py`) now drives the chassis
+  `pos_y` calculation in `update()`.  Replaces the geometric
+  `mean(target) - mean(local_y)` snap with a vertical
+  equilibrium solve: chassis weight pushes wheels into the
+  ground until summed spring forces match.  Each wheel acts
+  as a unit-stiffness spring; bottomed-out wheels deliver
+  their max force; the terrain floor + iterative refinement
+  catch any residual constraint violations downstream.
+
+* **Lstsq plane fit kept for angles.**  Pitch / roll come
+  from the same chassis-local-frame plane fit as before.
+  The force-weighted-fit experiment (also in the test file)
+  produced over-aggressive tilts and weight collapse on
+  edge cases; lstsq is the proven choice for now.  The
+  weighted variant stays available in `test_force_balance.py`
+  for future iteration.
+
+* **Visible result**: a flat-ground tank now sits ~2 cm
+  LOWER than before -- each wheel compresses to its rest
+  load.  Slope angles unchanged (still -1.146 deg on a 2%
+  slope at any yaw).
+
+### Live console + hull bbox overlay (1.89.0)
+
+* **Live per-bone console dump.**  When tank-physics is active,
+  every render frame clears the terminal (ANSI cursor-home +
+  clear-screen) and reprints the chassis pose + every wheel's
+  state.  Slows the render loop noticeably -- one cls + one
+  print per wheel per frame -- but the user explicitly asked
+  for non-stop updates and accepted the cost.  Output:
+  ```
+  TEPY tank-physics live state
+  ================================
+  pos     : (+0.000, -0.040, +0.000) m
+  yaw     : +0.000 deg
+  pitch   : +0.000 deg
+  roll    : +0.000 deg
+  vy      : +0.000 m/s
+
+   #  bone                     state    resid_y  susp_arm_deg  target_y  terrain
+   0  W_L0_BlendBone           CONTACT  -0.0000        -0.00   +0.330    +0.000
+   1  W_L1_BlendBone           CONTACT  +0.0012        +0.21   +0.330    +0.000
+   ...
+  ```
+  Per-wheel data: bone name, state (CONTACT/HANGING/OVER/NONE),
+  residual Y in metres, approximate suspension-arm rotation in
+  degrees (residual / arm_length), target wheel-centre Y, and
+  terrain Y.
+
+* **Hull bounding-box overlay.**  Builds an orange wireframe
+  AABB around every `component=='hull'` mesh on tank load
+  (cached as `_hull_box_local`); transformed by `chassis_pose`
+  per frame so the box rides with the tank as it pitches /
+  rolls / yaws.  Useful for visual sizing + future collision
+  / fit-check work.  Bbox is in CHASSIS-LOCAL space so the
+  pivot-rotation behaviour matches the rendered geometry.
+
+### Suspension overlay: blue X at per-wheel hit location (1.88.4)
+
+* **Blue X marker** drawn at each wheel's physics-computed hit
+  location: `(last_wheel_world[i].xz, last_terrain_y[i])`.
+  Same position as the pink star but rendered as a diagonal
+  cross 1 mm above the ground plane so it reads as a distinct
+  marker for visual diagnosis -- sits on top of the pink star
+  and lets you confirm at a glance that the physics's computed
+  hit location matches what's directly under the rendered
+  wheel.
+
+### Physics: full-pose wheel XZ + track thickness back to 16 mm (1.88.3)
+
+* **Wheel terrain-sampling XZ now uses full chassis pose**
+  (translation + yaw + pitch + roll), not yaw-only.  Pitch /
+  roll shift each wheel's world XZ by a few cm on tilted ground
+  -- enough to put the terrain sample meaningfully off the
+  rendered wheel.  Visible as the pink-star contact markers
+  drifting away from the actual wheel positions on uneven
+  terrain (bug Professor Coffee flagged).  All three downstream
+  consumers (terrain sampling, classifier rigid_y, plane-fit
+  XZ) now agree on the same per-wheel world position.
+
+* **Track thickness reverted to 16 mm** (the literal
+  `<renderModelOffset>` from the gameplay XML).  60 mm was
+  overcompensating -- on flat ground it lifted the chassis
+  6 cm too high so red CONTACT wheels visibly hovered above
+  the sand.  16 mm matches the in-game value and lands the
+  track outer face on the terrain without lifting the wheel
+  hubs off where they should be.
+
+### Physics: track thickness bumped to 60 mm for visible ground gap (1.88.2)
+
+* **Default `track_thickness` raised from 30 mm to 60 mm.**  The
+  literal value from T110E4's gameplay XML
+  (`<tracks><trackPair><trackDebris><physicalParams>
+  <renderModelOffset>0.016214</renderModelOffset>`) is 1.6 cm,
+  which reads as essentially zero at TEPY's render scale.  60 mm
+  gives a visible-yet-realistic gap between the track outer face
+  and the wheel hub.
+
+* The track-thickness field IS in the per-tank def file (the user
+  reminder); per-tank parse can override the default later when
+  we hook the chassis-XML walker.  For now the empirical 60 mm
+  default does the job for any tank loaded.
+
+### Physics: track thickness lifts wheels above terrain (1.88.1)
+
+* **`track_thickness` (default 30 mm)** added to TankPhysics ctor.
+  Bug: the wheel-CENTRE target was just `terrain_y + radius`,
+  putting the wheel BOTTOM exactly at terrain level.  The track
+  ribbon is BELOW the wheel bottom (wheel rolls on the inner
+  surface of the track, outer surface contacts ground), so with
+  the old target the rendered track sank into the sand by its
+  full thickness.  Now: `target = terrain_y + radius +
+  track_thickness`, lifting the wheel hub by the track height
+  so the OUTER face of the track is what rests on the terrain.
+  3 cm is a typical modern-tank value; per-tank tuning would
+  come from `<track>` gameplay XML data (not yet parsed).
+
+* **Verified**: flat-ground settled chassis now sits at
+  pos_y = -0.04 m (was -0.07 m).  Visible difference: track
+  texture no longer pokes into the sand.
+
+### Physics: priority + emergency-fit refinement (1.88.0)
+
+* **Iterative refinement after the snap pose** -- up to 3
+  passes per frame.  Each pass: re-classify wheels with the
+  current pose (hysteresis-aware), and if the contact set
+  shrunk to a different shape AND >= 3 wheels remain in
+  contact, refit the plane through the new set.  This is the
+  PBD-flavoured "process most-stressed constraints first"
+  loop the user asked for: the most-compressed wheel sets the
+  floor (already implicit in the `max()` of `_apply_terrain_
+  floor`), then refit picks up the post-floor contact set
+  cleanly so pitch / roll match the post-lift truth.
+
+* **Emergency plane-fit when stuck in gravity branch.**  Was:
+  if `n_contact < 3`, gravity-drop the chassis.  Problem: a
+  tank that was tilted on a spike and then drove off ended up
+  with the classifier marking most wheels HANGING (because
+  the stale tilt put their `rigid_y` outside the envelope
+  with hysteresis preventing recovery), leaving the chassis
+  stuck above the ground.  Now: when classified `n_contact <
+  3`, run a TENTATIVE plane fit through ALL wheels (no
+  hysteresis), then count how many wheels would be inside
+  their envelope under that pose.  If `>= 3`, commit the
+  emergency fit -- the system was stuck.  If `< 3`, restore
+  the previous pose and do gravity-fall (genuine free-fall).
+
+* **No more pitch / roll decay during gravity branch.**  An
+  earlier attempt scaled `pitch *= 0.95` per frame to
+  unwind stale tilts, but it eroded LEGITIMATE tilt while a
+  tank was still on a spike (the spike-on test ended up
+  flat-and-floating after ~80 frames).  Replaced with the
+  emergency-fit-and-test approach above, which preserves
+  legitimate tilt indefinitely while still recovering from
+  stale tilts in one frame.
+
+* **Verified**: 30 cm spike under one wheel produces a
+  stable -4.29 deg pitch + roll tilt that holds for 20+
+  frames with no drift.  Spike removal returns the chassis
+  to flat (-0.07 m, 0 deg) in one frame.
+
+### Physics: hard terrain floor (no wheel below the surface) (1.87.0)
+
+* **New constraint** `_apply_terrain_floor`: enforces that no
+  wheel CENTRE can sit more than `comp_cap` (= +0.04 m default)
+  below its terrain target.  In other words: a wheel can compress
+  up to its full suspension travel into the hull, but the wheel
+  bottom can never punch through the ground.
+
+* **Wired into all three update paths**: the gravity-drop branch
+  (n_contact < 3), the FALL_THRESHOLD branch (chassis chasing a
+  fast-falling target), and the snap branch (post-plane-fit).
+  Each one sets pos[1], then calls `_apply_terrain_floor` to
+  raise pos[1] if any wheel would otherwise punch through.
+
+* **The "broken-axle / chassis-on-dirt" case** falls out of this
+  naturally: when terrain spikes higher than `comp_cap` under
+  one wheel, that wheel bottoms out at the compression cap and
+  the chassis ITSELF rides up on the wheel.  Verified: with a
+  30 cm terrain spike under the rear-left wheel (against a 4 cm
+  compression cap), the chassis lifts from -0.07 m to +0.043 m
+  and tilts -4.29 deg pitch + roll, with NO wheel intersecting
+  terrain.  Stable, no oscillation.
+
+* **Vertical velocity resets to zero whenever the floor catches
+  the chassis** -- can't fall further if a wheel is already
+  bottomed out.
+
+### Physics: 6g gravity (1.86.6)
+
+* Bumped to 6 * real = 58.92 m/s2.  3g still felt slow at the
+  scale we're rendering at; 6g brings the cliff-jump fall closer
+  to the "tank disappears" Hollywood-cut feel.
+
+### Physics: 3g gravity drama factor for visible fall speed (1.86.5)
+
+* **Gravity bumped from real-world 9.82 to 3*real = 29.46 m/s2.**
+  Real gravity at TEPY's scale (1 unit = 1 yard, terrain quad =
+  256 yards) covers ~5 yards in the first second of free fall --
+  a tank disappearing off a cliff falls only ~2% of the visible
+  terrain in that second.  Reads as sluggish on screen.  Standard
+  game-feel trick (Half-Life uses ~18x real, GTA ~2x).  3x is
+  the lowest multiplier where the fall reads as "weighty drop"
+  without hitting cartoon territory; tune `gravity=` in the
+  `TankPhysics(...)` ctor or the `for_t110e4` factory if it
+  feels off.
+
+### Physics: 9.82 m/s2 gravity + snap chassis pose (1.86.4)
+
+* **Real-world gravity 9.82 m/s2** (was 9.80).
+
+* **Dropped the asymmetric chassis-pose damping.**  Hysteresis on
+  the contact set (1.86.2) already kills the contact-set flapping
+  that was the root cause of oscillation.  The asymmetric alpha
+  layer on top was a band-aid that made the tank feel like it was
+  floating sluggishly toward equilibrium instead of snapping onto
+  its wheels.  Now: chassis pose snaps directly to plane-fit
+  output once the contact set is determined.
+
+* **Per-wheel residual damping kept** because that drives the
+  shader bone-deflection animation, which benefits from a few
+  frames of visual smoothing without affecting the physics solve.
+
+* **Verified**: bump test shows pitch / roll spike on the bump
+  frame, gone next frame, no oscillation.  Slope-settle test
+  still produces correct final pose (-1.146 deg pitch on the
+  2% slope at all yaw values).
+
+### Suspension: asymmetric shock damping (fast comp, slow ext) (1.86.3)
+
+* **Real-world shock absorber asymmetry.**  Replaced the
+  symmetric `ALPHA = 0.35` low-pass filter with an asymmetric
+  pair:
+  * `ALPHA_COMP = 0.50` -- applied when the chassis is rising
+    OR pitch / roll magnitude is shrinking (chassis levelling
+    out).  Compression direction = wheel pushed UP into the
+    hull.  Fast.
+  * `ALPHA_EXT  = 0.15` -- applied when the chassis is
+    sinking OR pitch / roll magnitude is growing.  Extension
+    direction = wheel dropping below the hull.  Slow.
+  Mirrors the racing-suspension recipe "rebound damping >
+  compression damping" -- the wheel reacts fast to a bump
+  (compression) but rebounds slow afterward so it stays
+  planted on the ground (extension).
+
+* **Per-wheel asymmetric damping** on the residual that drives
+  the shader bone Y translation.  New
+  `self.smoothed_residual_y` array is the asymmetric-blended
+  version of `last_residual_y`; `bone_matrix_array` consumes
+  it.  `last_residual_y` keeps the raw lstsq output for
+  diagnostics + the offline test scripts.
+
+* **Side effect: oscillation actually dies now.**  The previous
+  symmetric filter still left small pitch / roll ringing
+  because both halves of each cycle had the same time
+  constant.  With ALPHA_EXT < ALPHA_COMP, the slow-extension
+  half of each cycle accumulates less than the fast-compression
+  half clears -- residual oscillations naturally damp out.
+  Verified: a 5 cm transient bump under the rear-left wheel
+  produces a roll spike that fades to zero in ~10 frames with
+  ZERO sign flips (purely monotonic decay).
+
+### Suspension: hysteresis + low-pass damping kills roll oscillation (1.86.2)
+
+* **Bug**: tank stuck oscillating in roll on uneven terrain.  The
+  cause: a borderline wheel flapping between CONTACT and HANGING
+  every frame, dragging the plane fit's pitch / roll with it,
+  driving the chassis_matrix to wobble at the visible-render
+  scale.
+
+* **Fix 1 -- contact-set hysteresis.**  Sticky classifier:
+  * A CONTACT wheel only switches to HANGING / OVER_COMP when
+    its delta clears the envelope by more than `HYST` (= 2 cm).
+  * A HANGING wheel only switches back to CONTACT when its
+    delta is at least `HYST` ABOVE the extension cap.
+  * A OVER_COMP wheel only switches back when its delta is at
+    least `HYST` BELOW the compression cap.
+  This kills the per-frame contact-set flap at the source.
+
+* **Fix 2 -- low-pass filter on chassis pose.**  The post-
+  classification "snap to plane fit" path was setting
+  `pos_y / pitch / roll` directly to the lstsq output, so any
+  remaining single-frame perturbation (e.g. a transient bump
+  under one wheel) propagated at full amplitude.  Replaced
+  with `new = ALPHA * raw + (1 - ALPHA) * old` where
+  `ALPHA = 0.35` (response settles in ~6 frames at 60 fps).
+  The combined effect: a single-frame 5 cm terrain bump under
+  one wheel now produces a roll spike that decays MONOTONICALLY
+  to zero over ~14 frames -- no overshoot, no oscillation.
+
+* **Verified** on the slope test from 1.86.1 (still settles to
+  -1.146 deg pitch at all yaw values; just takes ~6 frames
+  longer to reach steady-state, which is invisible in
+  practice).
+
+### Plane fit in chassis-local frame so yaw is honoured (1.86.1)
+
+* **Bug**: a tank turning across a slope tilted the WRONG way --
+  visible as the chassis "rolling" when it should "pitch", or
+  vice-versa, depending on heading.
+
+* **Cause**: the lstsq plane fit ran against WORLD XZ wheel
+  positions, returning a WORLD-frame normal -> world-frame
+  pitch / roll.  These got applied as `Rx(pitch) @ Rz(roll)`
+  inside `chassis_matrix()` BEFORE the `Ry(yaw)` rotation, i.e.
+  around CHASSIS-LOCAL X / Z axes.  At yaw = 90 deg, world-X
+  has rotated to chassis-local-Z, so what should have been a
+  pitch came out as a roll on the rendered tank.
+
+* **Fix**: feed `fit_plane` the chassis-LOCAL XZ (`local[:, 0]`
+  / `local[:, 2]` -- the bind-pose coordinates already stored
+  rotation-free) plus the world Y target (Y is yaw-invariant).
+  The lstsq solves `target_y_world = a*local_x + b*local_z + c`
+  and the resulting normal is in chassis-local frame, so
+  `normal_to_pitch_roll` produces chassis-local pitch / roll
+  ready for `Ry(yaw) @ Rx(pitch) @ Rz(roll)` to render
+  correctly at any heading.
+
+* **Verified** on a 2% slope in world +Z:
+  * yaw =   0 -> pitch -1.146, roll  0.000
+  * yaw =  90 -> pitch  0.000, roll -1.146  (slope is now sideways)
+  * yaw = 180 -> pitch +1.146, roll  0.000  (sign flipped -- front faces other way)
+
+### Per-wheel contact classification + red/green highlight (1.86.0)
+
+* **Contact-aware suspension model.**  Each wheel is now classified
+  per frame as one of:
+  * `CONTACT`     -- touching ground inside the suspension envelope.
+  * `HANGING`     -- terrain too far below; droops at extension cap.
+  * `OVER_COMP`   -- terrain too high; bottomed-out at compression cap.
+  * `NONE`        -- pre-update default.
+
+  Classification is done by comparing the per-wheel terrain target
+  Y against the rigid pose's Y at that wheel using the CURRENT
+  chassis pose (not the v1.83 "flat guess"), against the engine-
+  XML envelope `(min_offset, max_offset)`.
+
+* **Plane fit through CONTACT wheels only.**  Was: every wheel
+  whose flat-guess delta cleared the lower envelope joined the
+  lstsq fit.  Now: only wheels actually classified CONTACT or
+  OVER_COMP contribute.  HANGING wheels can't bear weight, so
+  they don't bias the tilt -- the previous behaviour had a tank
+  driving off a cliff dragging its nose down because the in-air
+  front wheels were still pulling the lstsq solve toward where
+  they "would have" landed.
+
+* **Iterative settling.**  When fewer than 3 wheels are in
+  contact, the chassis falls under gravity.  Next frame, more
+  wheels reach the ground and the plane fit re-asserts.  No
+  spring-damper, no oscillation -- the kinematic settling
+  converges in 2-4 frames after a contact set change.
+
+* **State-aware residual clamp.**  `_compute_residual_y` now
+  honours per-wheel state:
+  * CONTACT  -- residual = lstsq fit error, clamped to envelope.
+  * HANGING  -- residual = extension cap (full droop visually).
+  * OVER_COMP -- residual = compression cap (bottomed into hull).
+  * NONE     -- envelope clamp only.
+
+* **Shader highlight: red for contact, green for hanging.**
+  Replaced the v1.85 four-int `u_contact_bones` with a 64-int
+  `u_wheel_state[]` array indexed by palette-index.  Each chassis
+  sub-mesh maps `tank_physics.wheel_bone_names[i]` to its OWN
+  palette slot and writes the per-wheel state code there.
+  Fragment shader picks colour from the propagated `flat in int
+  v_wheel_state`:
+  * `1 / 3` (CONTACT / OVER_COMP) -> mix toward red
+  * `2`     (HANGING)             -> mix toward green
+  60 / 40 mix preserves shading + texture detail.
+
+* **Test on a synthetic cliff edge** (4 wheels on solid ground
+  at z>0, 4 in a -3 m chasm at z<0): all 4 in-chasm wheels
+  classified HANGING with residual -0.08 (extension cap), all 4
+  on-ground wheels CONTACT, chassis settled to expected Y.
+
+### Drive: bump key-9 creep speed to 0.5 kph (1.85.2)
+
+* **Step 9 = 0.5 kph** instead of 0.1.  0.1 felt unresponsive
+  when nudging one wheel onto a divot for the suspension test.
+  Linear ramp from step 1 (top speed) to step 9 (0.5 kph) is
+  preserved; steps 2-8 shift proportionally.
+
+### Wheel-highlight: scan all 4 iii slots for dominant bone (1.85.1)
+
+* **Bug**: only one wheel painted red instead of four, and the
+  one that did paint was sometimes a non-road wheel (idler /
+  drive sprocket).  Cause: the v1.85.0 shader took `iii.x` as
+  "the dominant bone slot", but the WoT vertex format does NOT
+  guarantee descending-weight ordering.  For verts where the
+  writer put the bone in slot 1, 2, or 3, `iii.x` pointed at a
+  pad slot (typically `byte 0` = `palette[0]` = V_BlendBone or
+  some unrelated bone) and the membership check missed.
+
+* **Fix**: vertex shader now finds the highest-weight slot via
+  four compares on `ww`, then reads `iii` at that slot.  Mirrors
+  the CPU-side `int(bi[v][int(np.argmax(bw[v]))])` recipe used
+  in `from_chassis_meshes`.  Also gates the contact check on
+  `dom_w > 0.0` so a vert with all-zero weights (degenerate
+  pad) doesn't accidentally pick up bone 0's matrix.
+
+### Contact-wheel red highlight in mesh shader (1.85.0)
+
+* **Four corner wheels paint red** when Susp + the highlight
+  toggle (default ON) are both active.  Visual answer to "which
+  wheels is the plane fit anchoring on".  Toggle with `H`.
+
+* **`mesh.vert`** now declares `flat out int v_is_contact` plus
+  two new uniforms: `int u_contact_mode` (0 = off, 1 = mix red
+  in fragment) and `int u_contact_bones[4]` (palette indices,
+  pre-divided-by-3, with `-1` for unused slots).  Each vertex
+  checks if its dominant `iii.x / 3` matches any of the four;
+  flat-out the result.  Wheel meshes are 1-bone-bound so the
+  flat / provoking-vertex interpolation is exactly the "all 3
+  verts of this face match the contact set" check requested.
+
+* **`mesh.frag`** mixes the final colour 60 / 40 toward red
+  when `v_is_contact == 1`.  Detail + texture + lighting all
+  show through (the goal is to identify wheels, not paint over
+  them).
+
+* **`TankPhysics.corner_wheel_indices()` /
+  `corner_wheel_bone_names()`** identify the 4 corners
+  (rear-left / front-left / rear-right / front-right) from the
+  rear-to-front-sorted `wheels[]` array.  Tanks with < 4 wheels
+  total return < 4 entries; the shader handles missing slots via
+  the `-1` sentinel.
+
+* **`Viewer._upload_skinning`** resolves each corner bone NAME
+  to a per-mesh palette index (one mesh's chassis renderSet
+  declares the bones in different order than the next; turret /
+  hull / track-ribbon meshes don't carry the wheel bones at all
+  and end up with all -1).  Uploads via the new
+  `ShaderProgram.set_int_array` (mirrored on `ImportedShader`)
+  in one `glUniform1iv` call -- per-element location lookups
+  past index 0 are implementation-defined.
+
+* **`H` key** toggles `_highlight_contacts`.  Independent of
+  Susp so the user can keep the physics rig running while
+  turning the visual aid on / off.
+
+### Drive speed: stepped 0-9 selector tied to per-tank top speed (1.84.0)
+
+* **Keys 1-9 + 0 set drive speed.**  `0` = stopped (default on tank
+  reload).  `1` = current tank's max forward speed in kph.  `9` =
+  0.1 kph (creep).  `2..8` linearly interpolate between 1 and 9.
+  Bound on the number row only; numpad untouched so future zoom /
+  camera shortcuts can claim it.
+
+* **Per-tank top speed parsed from gameplay XML.**
+  `VehicleXMLLoader.parse_info` now reads `<speedLimits>`
+  `<forward>` / `<backward>` (source values are m/s; converted to
+  kph via × 3.6) and surfaces them under `info['speed']`.  The
+  viewer pulls `forward_kph` on each load and stashes it as
+  `_top_speed_kph`; falls back to 50 kph when the block is absent.
+
+* **Scene-unit conversion: 1 unit = 1 yard.**  TEPY's terrain quad
+  is 256 yards on a side, so the drive code converts kph -> yds/s
+  via `(1000 / 3600) * (1 / 0.9144)` = 0.30378.  The arrow-key
+  drive logic now reads `_speed_yards_per_sec()` instead of the
+  hardcoded `-5.0 m/s` it used at the v1.81.0 first cut.
+
+* **In-app feedback.**  Each speed change writes a coloured line
+  to the console (`speed: step 5/9 = 25.05 kph (7.610 yds/s)`),
+  and tank load prints a one-shot reminder of the new top speed
+  + the 1-9 / 0 controls.  Re-arms the `_drive_keys_seen`
+  diagnostic so changing speed mid-drive prints a fresh tank-pos
+  trace on the next arrow-key press.
+
+* **Yaw rate unchanged.**  Q / E still rotate at the original
+  fixed 60 deg/s.  Could later be tied to the speed step too,
+  but turn-in-place has its own feel and Professor Coffee can
+  flag if it ever needs the same step ladder.
+
+### Wheel deflection: sign flip + suspension envelope clamp (1.83.3)
+
+* **Per-wheel residual sign flipped.**  Empirical: the un-flipped
+  residual translated geometry the WRONG way (terrain rising under
+  a wheel pushed the wheel mesh DOWN instead of compressing it
+  UP into the hull).  `_compute_residual_y` now negates the
+  `target - rigid` delta so the convention is "+ residual = wheel
+  pushed UP" everywhere downstream.
+
+* **Suspension envelope clamp.**  Per the gameplay XML's
+  `<groundNodes>` `(minOffset, maxOffset)` (default `(-0.04, +0.08)`):
+  * Compression cap (wheel rises into hull) =  `-min_offset` =  +0.04 m
+  * Extension cap   (wheel drops below hull) =  `-max_offset` =  -0.08 m
+  Anything beyond either bound is clamped at the source.  A wheel
+  that would otherwise punch through the chassis when terrain
+  spikes high, or stretch infinitely into a chasm when terrain
+  drops, instead bottoms-out at the respective limit.  Free-fall
+  of the whole chassis past the envelope is still handled by the
+  existing `FALL_THRESHOLD` path in `update()`.
+
+### Particle hardpoints follow chassis pose (1.83.2)
+
+* **Smoke + fire emitters now ride the tank.**  Engine exhaust
+  + fire spawn hardpoints (`HP_engineExhaust_*`, `HP_Fire_*`,
+  `HP_Track_Exhaus_*`, ...) were captured at load time as bind-
+  pose world coords.  After the tank-physics pipeline started
+  wrapping every per-mesh transform in a `chassis_pose`
+  (translation + yaw + plane-fit pitch / roll), the hardpoints
+  stayed pinned at their bind-pose world locations -- so the
+  smoke plume kept emitting from the spot the tank started at
+  while the tank drove away.
+
+* **New `Viewer._update_emitters_for_chassis_pose(pose)`** runs
+  once per frame right after the physics tick.  Lazily snapshots
+  each hardpoint's `bind_pos` / `bind_fwd` (one-time per load),
+  then transforms them through the current `chassis_pose`
+  (full 4x4 for position, rotation 3x3 only for direction) and
+  re-publishes the resulting list to `smoke_particles`,
+  `fire_smoke_particles`, and `fire_billboards` via
+  `set_emitters`.  Also rebuilds the cyan exhaust-direction
+  debug lines from the transformed values so the HP marker
+  overlay stays glued to the tank too.
+
+* **Cost**: O(n_hardpoints) per frame.  Typical tank carries
+  4-8 exhaust + 2-4 fire hardpoints; the matmul + dict-build
+  is microsecond-scale.
+
+* **Restore-to-bind path**: when physics is OFF (terrain
+  toggled off, Susp checkbox unchecked), the same routine is
+  called with an identity matrix so the emitters snap back to
+  bind pose.  Without this, the last-transformed values would
+  linger after physics was disabled.
+
+### Skinning: idlers / drive sprockets stay rigid (1.83.1)
+
+* **`bone_matrix_array` now consults `wheel_bone_names`** -- the
+  list of bone names that actually got accepted as road wheels
+  during `from_chassis_meshes` -- instead of re-running the
+  `_wheel_side_from_name` regex.  The regex returns a side for
+  every `WD_<L|R>\d+_BlendBone` (because the Hotchkiss EBR's
+  WD_ bones ARE real road wheels), so skinning was deflecting
+  tracked-tank idlers, drive sprockets, and return rollers --
+  which had been correctly rejected by the Y-band post-pass
+  during extract but then re-admitted at draw time.
+
+* **`from_chassis_meshes` records per-wheel bone names.**  Each
+  accepted wheel now carries its source bone name through the
+  Y-band post-pass + sort + side-split.  The names land on
+  `inst.wheel_bone_names` after construction; the bone-matrix
+  builder uses them as the source of truth for "this bone gets
+  a residual."
+
+### GPU skinning: per-wheel deflection drives chassis + track geometry (1.83.0)
+
+* **New skinning path in `mesh.vert`.**  Two new vertex attributes
+  (location 5 `uvec4 iii`, location 6 `vec4 ww`) plus a 64-slot
+  `mat4 u_bones[]` uniform array and an `int u_skinned` toggle.
+  When `u_skinned == 1` the shader resolves the SC_UBYTE4_REVERSE_
+  PADDED bone byte stream into a weighted sum of bone matrices --
+  the same shape every Bigworld game uses.  Position, normal,
+  tangent, binormal all skin so normal-mapped surfaces stay
+  lit correctly on deflected geometry.  When `u_skinned == 0`
+  the path collapses to identity, so non-skinned meshes (hull /
+  turret / gun, every imported FBX) draw exactly as before.
+
+* **`Mesh.build_vao` uploads bone bytes + weights** when both
+  `bone_indices` and `bone_weights` are populated (every chassis
+  + track ribbon mesh on a skinned WoT tank).  Bone bytes go
+  through `glVertexAttribIPointer` so they arrive as `uvec4`
+  in the shader -- no implicit normalisation, no float-cast
+  surprises.  Source data is padded to width 4 if the format
+  carried fewer slots; the all-zero pad is silently ignored by
+  the weighted sum.
+
+* **`TankPhysics.bone_matrix_array(palette)`** builds the
+  per-frame matrix array.  Each entry is mostly identity; the
+  road-wheel bones (matched against the palette via
+  `_wheel_side_from_name`) get a translation in mesh-local Y by
+  the wheel's residual -- the difference between the rigid
+  plane fit's Y and the actual terrain target Y.  Track-segment
+  bones (`Track_<L|R><i>_BlendBone`) inherit the matrix of
+  their companion road wheel (`W_<L|R><i>_BlendBone`) so the
+  track stays glued to the wheel as it deflects.  V_BlendBone
+  + WD_ + everything else stays identity.
+
+* **Per-wheel residual stashed each frame.**  After the rigid
+  pose is set, `update()` calls `_compute_residual_y()` which
+  subtracts the rigid pose's Y at each wheel from the terrain
+  target Y.  By construction these are the lstsq fit residuals
+  -- on flat ground they're near zero (no skinning visible);
+  on bumpy ground (one wheel in a divot) they approach the
+  divot depth and the skinning wraps the geometry around the
+  terrain.
+
+* **`Viewer.render` uploads bones once per skinned mesh.**  New
+  `_upload_skinning(mesh)` closure handles both the main pass
+  and the wireframe overlay.  Non-skinned meshes set
+  `u_skinned = 0` and never touch the bones array.
+
+* **`ShaderProgram.set_mat4_array`** uploads `mat4[N]` uniforms
+  with the same `transpose=GL_TRUE` orientation the per-matrix
+  helper uses, so per-bone matrices and the model / view /
+  projection uniforms agree on row vs column major.
+
+* **Picker, overlay, normals, and imported-mesh shaders
+  unchanged.**  Each one binds its own vertex shader; the new
+  attribs are silently ignored by shaders that don't declare
+  them at the same layout locations.  Same for `u_bones` /
+  `u_skinned` -- not declared, not consulted.
+
+### Tank physics: bone palettes + WD_ wheel acceptance + Y-band cleanup (1.82.0)
+
+* **Plumb `bone_palette` through `Mesh`.**  New
+  `VisualLoader.parse_renderset_bones(visual_file)` returns
+  `{primitive_group_name: [bone_name, ...]}` in declaration order
+  -- the canonical mapping from raw `iii` byte / 3 to bone name.
+  `Viewer.load_vehicle` now calls it once per chassis and attaches
+  the result as `mesh.bone_palette` on every Mesh built from the
+  group.  Was already on the dump-track-skinning script side; this
+  closes the loop on the runtime side.
+
+* **Wheel auto-extract was broken on every non-T110E4 tank.**  Two
+  bugs together: (1) the v1.81.0 runtime path never received the
+  bone palette, so the name-based filter was never exercised --
+  every tank fell into the heuristic-only path; (2) the heuristic
+  was too loose (vert count >= 50, dy / dz <= 1.0) and accepted
+  Track_*_BlendBone groups (52-88 verts, dy ~ 0.14-0.20) as fake
+  wheels.  Result: T92 came out with 21 "wheels" per side at three
+  different Y bands (real road wheels + track-bottom segments +
+  chassis-side track plates).  Plane fit through that mess
+  produced garbage tilt, so every tank LOOKED like it was using
+  the T110E4 hardcoded rig because the auto-extract was either
+  failing or emitting bad data.
+
+* **Tightened name-based filter.**  Three accepted patterns now,
+  documented in `_WHEEL_NAME_PATTERNS`:
+  * `W_<L|R>\d+_BlendBone` -- standard tracked-tank rig (T110E4,
+    T92, Bourrasque, Object 268/4).
+  * `W_F_<L|R>_BlendBone` -- wheeled-rig front pair (Lynx-style
+    naming convention).
+  * `W_R\d+_<L|R>_BlendBone` -- wheeled-rig back axles.
+  * `WD_<L|R>\d+_BlendBone` -- ambiguous (decorative on tracked,
+    real wheel on Hotchkiss EBR); accepted IFF post-name shape +
+    cy band check confirms it's a road wheel.
+
+* **Tightened heuristic shape check.**  `_looks_like_wheel`:
+  vert count >= 100, dy + dz both in [0.30, 1.50] m, cy <= 0.80 m.
+  Bumped the dy / dz upper bound from 1.0 m to 1.5 m to admit
+  Hotchkiss EBR's 1.21 m road wheels; bumped the cy threshold
+  from 0.55 to 0.80 to admit EBR wheels (cy = 0.619) without
+  admitting tracked drive sprockets / idlers / return rollers
+  (cy >= 0.85 across every tracked tank we sampled).
+
+* **Y-band post-pass.**  After the per-bone collection, drop any
+  wheel whose cy is more than 15 cm above the LOWEST accepted
+  wheel on the same side.  Catches the Bourrasque case (real
+  road wheels at cy = 0.395, drive sprocket at cy = 0.749, idler
+  at cy = 0.627 -- all three pass name + shape but only the road
+  wheels are real contact points).  No-op on rigs where every
+  wheel sits at the same Y (Hotchkiss EBR -- all at 0.619).
+
+* **Aggregate verts by bone NAME across all chassis sub-meshes.**
+  A primitive group split by `_split_into_submeshes` into N Mesh
+  objects (one per material) was previously being seen N times
+  by `from_chassis_meshes`, producing duplicated wheel positions
+  if a wheel's verts straddled multiple sub-meshes.  Now we
+  bucket every chassis vert into a single dict keyed by bone
+  name (or by `__byte_<idx>__<mesh.name>` when no palette is
+  available), then compute one centroid per bucket.
+
+* **Verified on four reference tanks**, palette-based and
+  heuristic-only paths producing identical results:
+  T110E4 = 6L+6R @ cy 0.425, T92 = 7L+7R @ 0.396,
+  Bourrasque = 7L+7R @ 0.395, Hotchkiss EBR = 3L+3R @ 0.619.
+
+* **New diagnostic tool `cust_tools/test_wheel_extract.py`.**
+  Loads a chassis offline, dumps the per-bone group breakdown
+  with the SAME filter logic the runtime uses (imports
+  `_wheel_side_from_name` and `_looks_like_wheel`), and prints
+  the resulting wheel rig.  Use it to verify any future tank's
+  rig before launching the GUI.
+
 ### Tank physics: any-tank auto-extract + sign fixes (1.81.0)
 
 * **Auto-extract wheel rig from any chassis.**  New

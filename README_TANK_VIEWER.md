@@ -17,6 +17,10 @@ sourced from the WoT install and Tank Exporter's tank list.
 ✓ **Interactive camera** — right-click orbit, middle-click pan, scroll-wheel zoom
 ✓ **2-D overlay** — toggle bar for Grid / Axes / Light / Skybox / Wireframe, sliders for Light & Ambient, NMap / AO check-boxes
 ✓ **Persistent config** — CLI overrides for `--pkg-dir` / `--res-mods` / `--lookup-xml` are saved to `tankExporterPy.json`
+✓ **Per-wheel suspension physics** — auto-extracts the wheel rig from any tank's chassis bones, samples terrain Y under each wheel, classifies each as CONTACT / HANGING / OVER_COMP with hysteresis, plane-fits the chassis tilt through contacting wheels, force-balances chassis Y so each wheel rests at its rest compression, and propagates per-wheel residuals through GPU skinning so the track + wheel geometry deforms with the terrain.  Toggle via the **Susp** checkbox.
+✓ **Three camera modes** — orbit (default, mouse-driven), driver-side chase (free orbit but locked look-at on the driver position, anchored to chassis pose), commander POV (turret-base view forward, hides turret + gun for clear visibility).  Cycle with **C**.
+✓ **Stepped drive speed** — keys `0..9` select speed.  `1` is hard-capped at the per-tank `<speedLimits><forward>` value from the gameplay XML; `9` is creep (0.5 kph); `0` is stopped.  Arrow keys drive, Q/E yaw.  Press **O** for hands-free auto-circle drive (steady 25 m radius arc at the current step).
+✓ **Debug overlay** — pink stars at each wheel's terrain contact point, cyan stars at the wheel-centre target, yellow suspension shafts, blue X at the physics-computed hit location, red/green wheel-color highlight (CONTACT vs HANGING), orange hull bounding box, live per-bone state dump to the launching terminal.  All gated by the **Debug** checkbox.
 
 ## Requirements
 
@@ -80,6 +84,13 @@ python tankExporterPy.py "C:\path\A14_T30.xml"
 | **W** | Toggle wireframe |
 | **N** | Toggle normal map |
 | **R** | Reset camera to fit the loaded mesh |
+| **C** | Cycle camera mode: orbit / driver-side chase / commander-POV |
+| **H** | Toggle wheel-state highlight (red contact / green hanging; gated by Debug) |
+| **O** | Toggle auto-circle drive (tank pulls a steady arc at current speed step) |
+| **0..9** | Speed step: `0` = stopped, `1` = per-tank max kph from gameplay XML, `9` = creep (0.5 kph) |
+| **Arrow keys** | Drive the tank (when Susp is enabled and auto-circle is off) |
+| **Q / E** | Yaw the chassis left / right |
+| **Shift + drag** | Lift / drop the look-at point |
 | **ESC** | Quit |
 
 The top bar's **Light** and **Ambient** sliders scale direct + IBL

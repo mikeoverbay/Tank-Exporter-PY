@@ -1293,6 +1293,91 @@ class VisualLoader:
     )
 
     @staticmethod
+    def parse_renderset_bones(visual_file):
+        """Return a dict ``{primitive_group_name: [bone_name, ...]}`` for a
+        .visual_processed file.
+
+        Each ``<renderSet>`` block in a skinned visual file lists the bone
+        palette for ONE geometry as a sequence of ``<node>`` children, in
+        declaration order.  The .primitives_processed vertex stream stores
+        per-vertex bone references as raw bytes in the SC_UBYTE4_REVERSE_
+        PADDED convention; ``byte // 3`` is the index INTO this palette
+        list (because the GLSL skinning shader binds bones to a
+        ``vec4 bones[N*3]`` uniform, so each bone occupies 3 entries).
+
+        We need this palette downstream to turn raw bone bytes into
+        bone NAMES so the tank-physics auto-extract can filter to actual
+        road wheels (``W_<L|R><i>_BlendBone``) instead of stuff that
+        happens to look wheel-shaped (``Track_<L|R><i>_BlendBone``,
+        ``WD_<L|R><i>_BlendBone``, ...).
+
+        Args:
+            visual_file (str): absolute path to a .visual_processed
+                file (BWXML or plain XML; both supported).
+
+        Returns:
+            dict[str, list[str]]: maps a .primitives_processed group
+            base name (the prefix before ``.indices`` / ``.vertices``)
+            to its bone palette in declaration order.  Empty dict when
+            the file is missing or carries no skinned renderSets.
+        """
+        if not os.path.exists(visual_file):
+            return {}
+        with open(visual_file, 'rb') as f:
+            raw = f.read()
+
+        xml_root = None
+        try:
+            if is_bwxml(raw):
+                xml_root = ET.fromstring(decode_bwxml(raw))
+            else:
+                xml_root = ET.fromstring(
+                    raw.decode('utf-8', errors='replace'))
+        except Exception:
+            return {}
+
+        out = {}
+        for rs in xml_root.findall('.//renderSet'):
+            geom = rs.find('geometry')
+            if geom is None:
+                continue
+            # Resolve the primitive group base name from <primitive>
+            # (preferred -- matches what parse_textures uses) or
+            # <vertices> (fallback).  Either suffix-strip lands on
+            # the same key, but only one is guaranteed to exist
+            # depending on the authoring tool's version.
+            prim_el = geom.find('primitive')
+            verts_el = geom.find('vertices')
+            group_name = None
+            if prim_el is not None and prim_el.text:
+                pt = prim_el.text.strip()
+                if pt.endswith('.indices'):
+                    group_name = pt[:-len('.indices')]
+                elif pt:
+                    group_name = pt
+            if not group_name and verts_el is not None and verts_el.text:
+                vt = verts_el.text.strip()
+                if vt.endswith('.vertices'):
+                    group_name = vt[:-len('.vertices')]
+                elif vt:
+                    group_name = vt
+            if not group_name:
+                continue
+
+            # Already captured this group's palette via an earlier
+            # renderSet -- skip duplicates.
+            if group_name in out:
+                continue
+
+            nodes = []
+            for ch in rs.findall('node'):
+                if ch.text and ch.text.strip():
+                    nodes.append(ch.text.strip())
+            if nodes:
+                out[group_name] = nodes
+        return out
+
+    @staticmethod
     def find_exhaust_nodes(visual_path):
         """Open a .visual_processed file and return its exhaust / fire /
         smoke hardpoints.
@@ -2763,6 +2848,31 @@ class VehicleXMLLoader:
             'radio':    {},
             'fueltank': {},
         }
+
+        # Speed limits (m/s in the source XML).  WoT vehicle XMLs have
+        # `<speedLimits><forward>` / `<backward>`; we surface both as
+        # `forward_kph` / `backward_kph` so the runtime drive code can
+        # pick `forward_kph` as "step 1 = top speed".  Falls back to
+        # an empty dict when the element is absent (rare; modded /
+        # premium tanks occasionally drop the block).
+        sl_el = root.find('speedLimits')
+        if sl_el is not None:
+            speed = {}
+            fwd_t = sl_el.findtext('forward')
+            bwd_t = sl_el.findtext('backward')
+            try:
+                if fwd_t:
+                    speed['forward_kph'] = float(fwd_t.strip()) * 3.6
+            except ValueError:
+                pass
+            try:
+                if bwd_t:
+                    speed['backward_kph'] = float(bwd_t.strip()) * 3.6
+            except ValueError:
+                pass
+            info['speed'] = speed
+        else:
+            info['speed'] = {}
 
         # ---- Best chassis (last child) ---------------------------------
         chassis_el = root.find('chassis')

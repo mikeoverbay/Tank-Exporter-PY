@@ -46,6 +46,13 @@ in VS_OUT {
     vec2 uv0;
 } fs_in;
 
+// Per-vertex wheel state from the vertex stage.  Codes:
+//   0 = none, 1 = CONTACT (red), 2 = HANGING (green),
+//   3 = OVER_COMPRESSED (red, same as CONTACT).
+// `flat` matches the vertex shader's declaration -- single-bone
+// wheels propagate one consistent state across the triangle.
+flat in int v_wheel_state;
+
 out vec4 FragColor;
 
 // ---- Texture samplers -------------------------------------------------------
@@ -542,6 +549,22 @@ void main()
     // Wireframe override: when on, every passing fragment renders as
     // a uniform light grey so the line work is readable regardless of
     // the underlying material shading / lighting state.
+    // Wheel-state colour overlay.  60 / 40 mix preserves
+    // shading + texture (we want to SEE which wheels are in
+    // contact / hanging, not lose the rim / hub detail).
+    //   v_wheel_state == 1 (CONTACT)        -> red
+    //   v_wheel_state == 2 (HANGING)        -> green
+    //   v_wheel_state == 3 (OVER_COMP)      -> red (same as contact;
+    //                                          bottomed-out is
+    //                                          still touching).
+    // Wireframe mode below paints dark grey instead so the
+    // highlight only shows on the solid pass.
+    if (v_wheel_state == 1 || v_wheel_state == 3) {
+        result = mix(result, vec3(1.0, 0.05, 0.05), 0.60);
+    } else if (v_wheel_state == 2) {
+        result = mix(result, vec3(0.05, 1.0, 0.05), 0.60);
+    }
+
     if (wireframe_mode == 1) {
         FragColor = vec4(0.02, 0.02, 0.02, 1.0);
     } else {

@@ -32,6 +32,16 @@ tankExporterPy/
                         (IQ technique), sand-diffuse texture loader
                         (mip-chain + 16x anisotropic), tiled detail-
                         displacement layer
+    tank_physics.py     Per-wheel-on-terrain rigid-body suspension.
+                        Auto-extracts wheel rigs from any tank's chassis
+                        bones (`from_chassis_meshes`); classifies each
+                        wheel as CONTACT / HANGING / OVER_COMP with
+                        hysteresis; lstsq plane fit through contact
+                        wheels for chassis pitch / roll; force-balance
+                        Newton iteration for chassis pos_y; iterative
+                        PBD-style refinement; hard terrain floor
+                        (no wheel below surface); per-wheel residual
+                        Y propagated to the GPU skinning shader.
     ui.py               2-D overlay: bar widgets, tank browser tree, modal dialog
     viewer.py           Main application class, render loop, scene lifecycle
     xloader.py          Text-format DirectX .x file parser (skybox cube)

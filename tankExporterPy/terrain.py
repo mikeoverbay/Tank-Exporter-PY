@@ -375,6 +375,19 @@ def _detail_displacement(detail_path, world_size, mesh_size,
 
     try:
         img = Image.open(detail_path).convert('L')
+        # Flip vertically to match the SAND COLOUR TEXTURE's GL
+        # upload convention (`_load_terrain_diffuse` flips before
+        # `glTexImage2D` so V=0 in the GL texture maps to the
+        # ORIGINAL image's bottom row).  Without this flip on the
+        # height companion, the displacement and the colour read
+        # OPPOSITE Z directions inside each 50-m tile -- the
+        # geometric bump lands at one Z within the tile, the
+        # painted ripple stripe at the mirror Z.  Caught while
+        # eyeballing the tank-on-terrain demo on a sandy patch:
+        # wheel sat in a hole that visually was a crest.  Flipping
+        # the detail load aligns the two so colour and geometry
+        # land on the same Z within every tile.
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
     except Exception as exc:
         print(f"[terrain] detail heightmap load failed: {exc}")
         return np.zeros((mesh_size, mesh_size), dtype=np.float32)

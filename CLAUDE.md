@@ -194,6 +194,49 @@ track-skinning architecture:
 
 Reference write-up: `hand_off/TRACK_SKINNING_T110E4.md`.
 
+### Tank-physics: pivot is V_BlendBone at chassis-local origin
+
+Chassis pose composition in `tank_physics.py` is `T(pos) @ Ry(yaw) @
+Rx(pitch) @ Rz(roll)`.  All three rotations apply about chassis-local
+`(0, 0, 0)` -- which coincides with `V_BlendBone`'s bind position
+(V_BlendBone's parent V is at +1.139 Y, V_BlendBone has a -1.139
+local offset that cancels it).  V_BlendBone in bind pose sits at the
+**ground-plane center** of the tank, so when the chassis tilts, the
+front rises / rear drops symmetrically about that point.  This is
+intentional and matches the WoT convention.
+
+Suspension travel happens at the `Track_<L|R><i>` ground nodes,
+NOT V_BlendBone.  Each Track_L\<i\> is a parent of W_L\<i\> (the
+visible wheel) which sits +0.421 m above the ground node.  When
+the engine deflects a wheel, it moves the GROUND NODE vertically;
+the wheel rides along as a rigid child.  V_BlendBone is rigid-with-
+hull -- everything under it (decorative WD_ wheels, virtual track
+nodes) follows the chassis pose only, no per-wheel deflection.
+
+### Tank-physics: classification uses hysteresis to kill oscillation
+
+`update()` classifies each wheel as CONTACT / HANGING / OVER_COMP
+each frame.  Without hysteresis, a borderline wheel flapped between
+states every frame, dragging plane-fit pitch / roll with it -- the
+chassis visibly rang.  Solution: 2 cm hysteresis margin at the
+envelope edges.  A CONTACT wheel only flips to HANGING when its
+delta clears `ext_cap - HYST`; a HANGING wheel only flips back when
+delta climbs above `ext_cap + HYST`.  Same for OVER_COMP.  Don't
+remove the hysteresis without putting something else in to
+break the feedback loop.
+
+### Tank-physics: avoid mass-inertia inside iterative refinement
+
+A v1.93.0 attempt to add critically-damped angular acceleration on
+pitch / roll caused wild jumps.  Cause: the iterative refinement
+loop calls `chassis_matrix()` repeatedly, each iteration reading
+`self.pitch_deg` / `self.roll_deg` -- but those were the LAGGED
+integrator outputs, not the target ones, so refinement saw stale
+poses, classified wheels wrong, plane fit jumped wildly, integrator
+chased -- positive feedback runaway.  Reverted in v1.93.2.  If we
+revisit, compute the converged target OUTSIDE the refinement loop,
+then ramp pos / pitch / roll once at the very end of `update()`.
+
 ### Picker / overlay shaders MUST consume `u_model`
 
 The off-screen triangle picker and its overlay shader take the

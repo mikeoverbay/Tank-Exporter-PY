@@ -29,7 +29,8 @@ import numpy as np
 import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
-                            VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w)
+                            VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
+                            K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
 from .loaders  import MeshParser, VisualLoader, TextureLoader, VehicleXMLLoader, PkgExtractor
@@ -649,6 +650,11 @@ class Viewer:
         # Painted only when both Debug checkbox + tank physics
         # active so a normal viewing session isn't cluttered.
         self.physics_lines = LineBatch(line_width=1.5)
+        # Hull bounding-box overlay: 12 line edges around the
+        # AABB of every component=='hull' mesh.  Computed at load
+        # time + transformed by chassis_pose each frame so the
+        # box follows the tank.
+        self.hull_box_lines = LineBatch(line_width=1.5)
         # Flag set by `handle_input` each tick; checked by
         # `render` to decide whether to draw the crosshair.  Lives
         # on `self` (not a render-time recheck) so we can capture
@@ -953,6 +959,58 @@ class Viewer:
         self._suspension_test     = bool(
             self._cfg.get('suspension_test', False))
         self.tank_physics_enabled = self._suspension_test
+
+        # ---- Drive speed control (keys 1..9 + 0) ---------------------
+        # Stepped speed selector for the arrow-key tank drive.  Steps:
+        #   0 = stopped (default)
+        #   1 = current tank's max forward speed (kph)
+        #   9 = 0.1 kph (creep)
+        #   2..8 = linear interpolation between 1 and 9.
+        # `_top_speed_kph` is parsed per-tank from the gameplay XML's
+        # <speedLimits><forward> when load_vehicle wires it up; falls
+        # back to 50 kph when the parse misses.  Conversion to scene
+        # units assumes 1 unit = 1 yard (TEPY's terrain scale -- the
+        # heightmap's quad is 256 yards on a side).
+        self._top_speed_kph    = 50.0    # default; overridden per load
+        self._speed_step       = 0       # 0..9, 0 = stopped
+        # Contact-wheel red highlight toggle.  Mirrors `tank_physics
+        # _enabled` by default so the moment Susp goes on, the four
+        # corner wheels light up red -- making it visually obvious
+        # which wheels are anchoring the plane fit.  H key toggles
+        # it independently in case the highlight is distracting
+        # while inspecting wheel geometry.
+        self._highlight_contacts = True
+
+        # ---- Camera mode (cycle with `C`) ------------------------------
+        # 0 = orbit (default trackball, mouse-driven, free-fly)
+        # 1 = driver-side chase camera (anchored behind + above + driver
+        #     side of the chassis, rotates with chassis_pose so it
+        #     follows pitch / roll / yaw)
+        # 2 = commander view (anchored at the centre of the hull
+        #     above the chassis, looking forward along the tank's
+        #     visible-front axis; turret + gun meshes are hidden in
+        #     this mode so the commander has a clear view-out)
+        self.camera_mode    = 0
+        self._N_CAMERA_MODES = 3
+
+        # ---- Auto circle-drive (`O` toggles) ---------------------------
+        # When True, the tank ignores the arrow keys and instead
+        # drives in a circle of radius `_auto_circle_radius` at the
+        # CURRENT speed step.  Yaw rate is derived so the tank
+        # always faces along the tangent: omega = v / R.  Useful
+        # for hands-free demo / suspension testing -- you can watch
+        # the chassis tilt cleanly while the tank pulls a steady
+        # arc around the heightmap centre.
+        self._auto_circle        = False
+        self._auto_circle_radius = 25.0   # metres
+        # Scene units are METRES (chassis primitives + gameplay XML
+        # both use metres).  Earlier yard-conversion was off by ~9%.
+        # 1 kph = 1000 / 3600 m/s = 0.2778 m/s = 0.2778 units/s.
+        self._KPH_TO_UNITS_PER_S = 1000.0 / 3600.0
+        # Backwards-compat alias used by older comments / log lines
+        # that still reference yds/s.  Same value as the metres
+        # conversion (1 unit = 1 metre).
+        self._KPH_TO_YDS_PER_S   = self._KPH_TO_UNITS_PER_S
 
         # Toggleable display flags
         self.show_grid    = False
@@ -3671,6 +3729,394 @@ class Viewer:
     # ==================================================================
     # Extract / Open / Remove -- res_mods I/O
     # ==================================================================
+
+    def _dump_bone_angles_to_console(self, tp):
+        """Per-frame console readout of every wheel bone's state.
+
+        Clears the terminal each frame and reprints the chassis pose
+        + per-wheel state lines.  Keeps the most recent data on the
+        screen so the user can watch wheel deflection live as the
+        tank drives over terrain.
+
+        ANSI cursor-home + clear-screen via `\\x1b[H\\x1b[2J`.  Falls
+        back to a `cls`/`clear` system call on terminals that don't
+        honour ANSI (older Windows cmd, although Win10+ should
+        support it).
+        """
+        import sys
+        try:
+            # ANSI: cursor home + clear screen.  One write keeps the
+            # output atomic enough that a screen-tear between frames
+            # is rare.  Doesn't fully clear the OS-level scrollback
+            # but readers see only the latest state.
+            sys.stdout.write('\x1b[H\x1b[2J')
+
+            sys.stdout.write(
+                f'TEPY tank-physics live state\n'
+                f'================================\n'
+                f'pos     : ({tp.pos[0]:+.3f}, {tp.pos[1]:+.3f}, {tp.pos[2]:+.3f}) m\n'
+                f'yaw     : {tp.yaw_deg:+8.3f} deg\n'
+                f'pitch   : {tp.pitch_deg:+8.3f} deg\n'
+                f'roll    : {tp.roll_deg:+8.3f} deg\n'
+                f'vy      : {tp.vy:+8.3f} m/s\n'
+                f'\n'
+                f'  {"#":>2s} {"bone":<22s}  {"state":<8s}  '
+                f'{"resid_y":>9s}  {"susp_arm_deg":>12s}  '
+                f'{"target_y":>9s}  {"terrain":>9s}\n'
+            )
+            STATE_NAMES = ['NONE   ', 'CONTACT', 'HANGING', 'OVER   ']
+            n = len(tp.wheels)
+            # Approx suspension-arm length for the angle estimate.
+            # Real WoT torsion-bar arm is about half the wheel
+            # radius; using radius gives a comfortable upper bound.
+            ARM = max(getattr(tp, 'radius', 0.33), 0.30)
+            import math
+            for i in range(n):
+                name = (tp.wheel_bone_names[i]
+                        if i < len(tp.wheel_bone_names)
+                        and tp.wheel_bone_names[i]
+                        else f'(slot{i})')
+                state_idx = (int(tp.last_wheel_state[i])
+                             if hasattr(tp, 'last_wheel_state')
+                             and len(tp.last_wheel_state) > i
+                             else 0)
+                state = (STATE_NAMES[state_idx]
+                         if 0 <= state_idx < len(STATE_NAMES)
+                         else '?      ')
+                ry = (float(tp.last_residual_y[i])
+                      if hasattr(tp, 'last_residual_y')
+                      and len(tp.last_residual_y) > i
+                      else 0.0)
+                # arc-length / arm = approximate arm rotation
+                # (radians).  Good enough for a debug readout; real
+                # torsion-bar arm length isn't surfaced in the def
+                # XML for any of the tanks we've parsed.
+                susp_deg = math.degrees(ry / ARM) if ARM else 0.0
+                ty = (float(tp.last_terrain_y[i])
+                      if hasattr(tp, 'last_terrain_y')
+                      and len(tp.last_terrain_y) > i
+                      else 0.0)
+                wc = (float(tp.last_target_y[i])
+                      if hasattr(tp, 'last_target_y')
+                      and len(tp.last_target_y) > i
+                      else 0.0)
+                sys.stdout.write(
+                    f'  {i:>2d} {name:<22s}  {state}  '
+                    f'{ry:+9.4f}  {susp_deg:+12.2f}  '
+                    f'{wc:+9.4f}  {ty:+9.4f}\n')
+            sys.stdout.flush()
+        except Exception as exc:
+            # Don't take down the render loop if the console pipe
+            # ever errors out (e.g. piped to /dev/null).  Printed
+            # once.
+            if not getattr(self, '_dump_console_warned', False):
+                print(f'[viewer] bone-angle console dump failed: {exc}')
+                self._dump_console_warned = True
+
+    def _build_hull_box_local(self):
+        """Build the chassis-local AABB of every component=='hull'
+        mesh.  Cached as `self._hull_box_local` (np.ndarray of shape
+        (2, 3) -- min and max corners).  Re-built when load_vehicle
+        clears it via `self._hull_box_local = None`.
+        """
+        import numpy as np
+        hull_meshes = [m for m in self.meshes
+                       if getattr(m, 'component', '') == 'hull']
+        if not hull_meshes:
+            self._hull_box_local = None
+            return
+        # Each mesh has a `bind_model_matrix` (the load-time pose
+        # before chassis_pose was layered on).  Bring vertices into
+        # chassis-local space by applying that matrix; the chassis
+        # box then rides with the chassis when chassis_pose
+        # rotates / translates the whole rig.
+        all_pts = []
+        for m in hull_meshes:
+            bm = (m.bind_model_matrix
+                  if hasattr(m, 'bind_model_matrix')
+                  else m.model_matrix)
+            pts = np.asarray(m.positions, dtype=np.float64)
+            ones = np.ones((len(pts), 1))
+            ph = np.hstack([pts, ones])
+            world = (bm @ ph.T).T[:, :3]
+            all_pts.append(world)
+        pts_all = np.concatenate(all_pts, axis=0)
+        bmin = pts_all.min(axis=0)
+        bmax = pts_all.max(axis=0)
+        self._hull_box_local = np.array([bmin, bmax])
+
+    def _render_hull_box(self, view, proj):
+        """Draw the 12 wireframe edges of the hull AABB,
+        transformed by `chassis_pose`."""
+        import numpy as np
+        bmin, bmax = self._hull_box_local[0], self._hull_box_local[1]
+        # 8 corners of the box.
+        corners = np.array([
+            [bmin[0], bmin[1], bmin[2]],
+            [bmax[0], bmin[1], bmin[2]],
+            [bmax[0], bmax[1], bmin[2]],
+            [bmin[0], bmax[1], bmin[2]],
+            [bmin[0], bmin[1], bmax[2]],
+            [bmax[0], bmin[1], bmax[2]],
+            [bmax[0], bmax[1], bmax[2]],
+            [bmin[0], bmax[1], bmax[2]],
+        ], dtype=np.float64)
+        # Apply chassis_pose so the box follows the tank.
+        if self.tank_physics is not None:
+            chassis = np.asarray(self.tank_physics.chassis_matrix(),
+                                  dtype=np.float64)
+            ones = np.ones((8, 1))
+            ph = np.hstack([corners, ones])
+            corners = (chassis @ ph.T).T[:, :3]
+        # 12 edges of an AABB.
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # bottom face
+            (4, 5), (5, 6), (6, 7), (7, 4),  # top face
+            (0, 4), (1, 5), (2, 6), (3, 7),  # vertical edges
+        ]
+        ORANGE = (1.0, 0.55, 0.10)
+        segs = [(tuple(corners[a]), tuple(corners[b]), ORANGE)
+                for a, b in edges]
+        self.hull_box_lines.update(segs)
+        self.hull_box_lines.render(self.color_shader, view, proj)
+
+    def _anchored_view_matrix(self):
+        """Return the view matrix for the currently-active camera mode.
+
+        Modes:
+          * 0 (orbit)     -> the existing trackball camera.
+          * 1 (chase)     -> camera anchored to the chassis pose, sitting
+                             above + behind + on the driver-side (left)
+                             of the tank, looking at a point 5 m ahead
+                             of the chassis centre.  Rolls / pitches /
+                             yaws with the tank.
+          * 2 (commander) -> camera at hull-centre above the chassis,
+                             looking straight forward along the tank's
+                             visible-front axis (= chassis-local -Z in
+                             our convention).
+        """
+        if self.camera_mode == 0 or self.tank_physics is None:
+            return self.camera.get_view_matrix()
+
+        # Chassis pose places our chassis-local frame in world space.
+        chassis = np.asarray(self.tank_physics.chassis_matrix(),
+                              dtype=np.float64)
+
+        # Pick chassis-local eye + look-at + up per mode.  Visible-front
+        # of the tank lives at chassis-local -Z (the user's repeated
+        # convention).  +X is right, -X left.
+        if self.camera_mode == 1:
+            # Driver-side chase (free camera, locked look-at).  The
+            # CAMERA position uses the orbit camera's mouse-driven
+            # state -- user can pan / orbit / zoom freely.  The
+            # LOOK-AT point gets pinned to the driver's seat in
+            # chassis-local space and transformed by chassis_pose
+            # each frame, so the camera always faces the driver
+            # side of the tank no matter where the orbit puts the
+            # eye.
+            #
+            # Driver-position chassis-local: +X side (right; US
+            # tanks like T110E4 put the driver on the right hull),
+            # near front (Z = -2.0 in our visible-front-is--Z
+            # convention), at hatch height (+0.6 Y).  Tunable
+            # per-tank if the position feels off.
+            driver_local = np.array([+0.7, +0.6, -2.0, 1.0],
+                                     dtype=np.float64)
+            driver_world = (chassis @ driver_local)[:3]
+            self.camera.center = driver_world.astype(np.float32)
+            return self.camera.get_view_matrix()
+        else:
+            # Commander POV: centre of hull, head height above the
+            # chassis floor.  Looking forward means the look-at point
+            # is way out at chassis-local -Z.
+            eye_local    = np.array([+0.0, +1.95, +0.0, 1.0], dtype=np.float64)
+            target_local = np.array([+0.0, +1.95, -10.0, 1.0], dtype=np.float64)
+
+        eye    = (chassis @ eye_local)[:3]
+        target = (chassis @ target_local)[:3]
+        # Up vector: chassis-local +Y rotated by chassis pose (so it
+        # rolls with the tank).  Use the rotation block only -- no
+        # translation on a direction vector.
+        up_local  = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        up        = (chassis[:3, :3] @ up_local)
+        up       /= max(np.linalg.norm(up), 1e-9)
+
+        # Build the view matrix via gluLookAt (matches the orbit
+        # camera's recipe so projection / depth all stay consistent).
+        from OpenGL.GL  import glMatrixMode, glLoadIdentity, glGetFloatv
+        from OpenGL.GL  import GL_MODELVIEW, GL_MODELVIEW_MATRIX
+        from OpenGL.GLU import gluLookAt
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        gluLookAt(float(eye[0]), float(eye[1]), float(eye[2]),
+                  float(target[0]), float(target[1]), float(target[2]),
+                  float(up[0]), float(up[1]), float(up[2]))
+        return np.array(glGetFloatv(GL_MODELVIEW_MATRIX),
+                         dtype=np.float32).T
+
+    def _kph_for_step(self, step):
+        """Return the kph corresponding to a speed step (0..9).
+
+        Convention: 1 = current tank's `_top_speed_kph` (HARD CAP --
+        never exceeds the per-tank gameplay-XML maximum forward
+        speed), 9 = 0.5 kph (creep), 2..8 linearly interpolate
+        between, 0 = stopped.
+
+        Hard cap: `_top_speed_kph` is set per-tank from
+        `<speedLimits><forward>` in the gameplay XML.  Step 1
+        returns exactly that value -- we don't allow any step to
+        exceed it.  Default 50 kph fallback applies only when the
+        XML didn't carry the block (rare; modded / premium tanks).
+
+        Bumped from 0.1 to 0.5 kph at the bottom step at Professor
+        Coffee's request -- 0.1 felt unresponsive when nudging the
+        tank one wheel into a divot.
+        """
+        s = max(0, min(9, int(step)))
+        if s == 0:
+            return 0.0
+        # Per-tank XML max.  The `min()` guarantees step 1 never
+        # produces more than the XML cap even if `_top_speed_kph`
+        # got stomped to a higher value somewhere upstream.
+        top = float(self._top_speed_kph or 50.0)
+        # k=1 -> top, k=9 -> 0.5, linear in between.
+        t   = (s - 1) / 8.0
+        kph = top + t * (0.5 - top)
+        # Belt-and-braces clamp: never exceed the XML max.
+        if kph > top:
+            kph = top
+        return kph
+
+    def _speed_units_per_sec(self):
+        """Convert the current speed step to a movement rate in scene
+        units (= metres) per second.  Honours the `_kph_for_step`
+        hard cap so the velocity never exceeds the per-tank XML max."""
+        return self._kph_for_step(self._speed_step) * self._KPH_TO_UNITS_PER_S
+
+    # Backwards-compat alias -- some sites still call `_speed_yards_per_sec`.
+    def _speed_yards_per_sec(self):
+        return self._speed_units_per_sec()
+
+    def _set_speed_step(self, step):
+        """Apply a new speed step + log to the in-app console.
+
+        Called by the KEYDOWN handler.  Also resets the
+        `_drive_keys_seen` flag so the user gets a fresh "tank pos"
+        line the next time they press an arrow key, which makes
+        the speed change easy to verify visually.
+        """
+        s = max(0, min(9, int(step)))
+        self._speed_step = s
+        kph = self._kph_for_step(s)
+        ups = kph * self._KPH_TO_UNITS_PER_S
+        if s == 0:
+            self.log(f"speed: 0 -- stopped",
+                     color=(180, 180, 180))
+        else:
+            self.log(f"speed: step {s}/9  =  {kph:.2f} kph  "
+                     f"({ups:.3f} m/s)  "
+                     f"[cap {self._top_speed_kph:.1f} kph]",
+                     color=(180, 220, 255))
+        # Re-arm the one-shot drive diagnostic so changing speed
+        # mid-drive re-prints the position line on the next keypress.
+        self._drive_keys_seen = False
+
+    def _update_emitters_for_chassis_pose(self, chassis_pose):
+        """Transform every smoke / fire emitter through `chassis_pose`
+        and re-publish to the particle systems.
+
+        Why this exists
+        ---------------
+        Engine-exhaust + fire-spawn hardpoints (`HP_engineExhaust_*`,
+        `HP_Fire_*`, etc.) get parsed out of the per-component
+        `.visual_processed` files at load time as bind-pose world
+        positions -- mesh-local coords plus the component offset,
+        with a BW->GL Z negation already applied.  They were
+        published once via `set_emitters` at load time.
+
+        The tank-physics pipeline now wraps every per-mesh transform
+        in a `chassis_pose` (translation + yaw + plane-fit pitch /
+        roll), so the rendered geometry no longer sits at the bind
+        pose -- but the hardpoints, captured pre-physics, do.  Result
+        without this routine: smoke plumes keep emitting from the
+        spot the tank started at, while the tank drives away.
+
+        What it does
+        ------------
+        First call lazily snapshots `bind_pos` / `bind_fwd` onto each
+        hardpoint dict -- these never change for a given tank load.
+        Every call (one per frame) builds a fresh emitter list with
+        positions = `chassis_pose @ bind_pos` and forwards =
+        `chassis_pose[:3,:3] @ bind_fwd` (rotation only, no world
+        translation on a direction vector), then hands the list to
+        `set_emitters` on each active particle system.
+
+        Cost: O(n_hardpoints) per frame.  Typical tank: 4-8 exhaust +
+        2-4 fire hardpoints.  Negligible.
+        """
+        # Compose bind pos/fwd once per tank load -- avoids rebuilding
+        # the snapshots when set_emitters is called repeatedly during
+        # a single load session.
+        for hp in (getattr(self, '_exhaust_points', None) or []):
+            if 'bind_pos' not in hp:
+                hp['bind_pos'] = np.asarray(hp['pos'], dtype=np.float32).copy()
+                hp['bind_fwd'] = np.asarray(hp['fwd'], dtype=np.float32).copy()
+        for hp in (getattr(self, '_fire_points', None) or []):
+            if 'bind_pos' not in hp:
+                hp['bind_pos'] = np.asarray(hp['pos'], dtype=np.float32).copy()
+                hp['bind_fwd'] = np.asarray(hp['fwd'], dtype=np.float32).copy()
+
+        # Transform helper.  Position gets the full 4x4; direction
+        # gets just the rotation 3x3.  Both arrive as float32 so
+        # the particle systems' cast in set_emitters is a no-op.
+        R = np.asarray(chassis_pose[:3, :3], dtype=np.float32)
+        def _xform(hp_list):
+            out = []
+            for hp in hp_list:
+                bp = hp['bind_pos']
+                bf = hp['bind_fwd']
+                # 4x4 @ vec4 -- one matmul, three components out.
+                p4 = np.array([bp[0], bp[1], bp[2], 1.0], dtype=np.float32)
+                wp = (chassis_pose @ p4)[:3]
+                wf = R @ bf
+                # Update the live records too so any consumer that
+                # reads hp['pos'] / hp['fwd'] (HP-marker overlay,
+                # exhaust direction lines) gets the current world
+                # values.
+                hp['pos'] = wp.astype(np.float32)
+                hp['fwd'] = wf.astype(np.float32)
+                out.append({'component': hp.get('component', ''),
+                            'name':      hp.get('name',      ''),
+                            'pos':       wp,
+                            'fwd':       wf})
+            return out
+
+        ex = _xform(getattr(self, '_exhaust_points', None) or [])
+        fr = _xform(getattr(self, '_fire_points',    None) or [])
+
+        # Re-publish to whichever particle systems are alive on this
+        # session.  `set_emitters` is cheap (just rewraps the list);
+        # it's safe to call every frame.
+        if getattr(self, 'smoke_particles', None) is not None:
+            self.smoke_particles.set_emitters(ex)
+        if getattr(self, 'fire_smoke_particles', None) is not None:
+            self.fire_smoke_particles.set_emitters(fr)
+        if getattr(self, 'fire_billboards', None) is not None:
+            self.fire_billboards.set_emitters(fr)
+
+        # Refresh the cyan exhaust-direction debug lines too --
+        # they're built from hp['pos'] + hp['fwd'] * 0.5, so the
+        # update needs to happen after the transform above.
+        if hasattr(self, 'hp_lines'):
+            EXHAUST_VECTOR_LEN = 0.5
+            cyan = (0.20, 1.00, 1.00)
+            segments = []
+            for hp in (getattr(self, '_exhaust_points', None) or []):
+                start = tuple(float(v) for v in hp['pos'])
+                end   = tuple(float(v) for v in
+                              (hp['pos'] + hp['fwd'] * EXHAUST_VECTOR_LEN))
+                segments.append((start, end, cyan))
+            self.hp_lines.update(segments)
 
     def _stash_extract_paths(self):
         """Compute the res_mods Extract paths for the loaded tank and
@@ -6962,8 +7408,18 @@ class Viewer:
 
                 # Parse material / texture data
                 group_textures = {}
+                # Bone palette per primitive group, declaration order.
+                # Plumbed onto each Mesh as `mesh.bone_palette` so
+                # downstream consumers (currently `tank_physics.
+                # from_chassis_meshes`) can resolve raw `iii` byte
+                # values into bone NAMES and filter accordingly.
+                # Empty dict when this is a non-skinned component
+                # (hull / turret / gun on most tanks) -- the lookup
+                # below just returns None for those meshes.
+                group_bones = {}
                 if vis:
                     group_textures = VisualLoader.parse_textures(vis, group_names)
+                    group_bones    = VisualLoader.parse_renderset_bones(vis)
 
                 for group in parsed_groups:
                     group_name = group['name']
@@ -7113,6 +7569,14 @@ class Viewer:
                         # loop above, lower-cased so the picker dialog
                         # and the writer share one canonical key.
                         mesh.component = label.lower()
+
+                        # Bone palette in declaration order.  Sub-meshes
+                        # split off the same group all share one
+                        # vertex stream, so they all share one palette.
+                        # `None` when the visual carries no skinned
+                        # renderSet for this group (hull / turret /
+                        # gun on the vast majority of tanks).
+                        mesh.bone_palette = group_bones.get(group_name)
                         # Remember the in-pkg path so Save-Prim can
                         # write the output to res_mods/<version>/<same
                         # path>, making the file an automatic override
@@ -7156,6 +7620,9 @@ class Viewer:
                 # Reset position state on tank reload so old
                 # positions don't carry over.
                 self.tank_physics.pos[:]   = 0.0
+                # Force the hull-AABB overlay to rebuild from the
+                # new tank's hull meshes on the next render.
+                self._hull_box_local = None
                 self.tank_physics.yaw_deg  = 0.0
                 self.tank_physics.pitch_deg = 0.0
                 self.tank_physics.roll_deg  = 0.0
@@ -7224,6 +7691,23 @@ class Viewer:
                                                    self._pkg_extractor)
                 self._active_set.tank_info = info
                 self._build_info_panel(info)
+                # Pull the per-tank max forward speed for the drive
+                # speed-step controller.  Vehicle XMLs carry this as
+                # `<speedLimits><forward>` in m/s; the loader has
+                # already converted to kph.  Default 50 kph if the
+                # XML didn't carry the block (rare).
+                fwd_kph = ((info.get('speed') or {}).get('forward_kph')
+                           or 50.0)
+                self._top_speed_kph = float(fwd_kph)
+                # Reset speed step on tank reload so the new tank
+                # starts stopped (the previous tank's selected step
+                # would otherwise carry over silently and the user
+                # might find the new tank moving with no key press).
+                self._speed_step    = 0
+                self.log(
+                    f"top speed: {self._top_speed_kph:.1f} kph  "
+                    f"(use 1-9 to drive, 0 to stop)",
+                    color=(180, 220, 255))
             except Exception as exc:
                 print(f"[viewer] info-panel build failed: {exc}")
 
@@ -7231,6 +7715,35 @@ class Viewer:
             # newly-loaded meshes (all reset to visible).  Window stays
             # closed/open as the user left it; only its contents change.
             self._populate_mesh_window()
+
+            # Snapshot bind_pos / bind_fwd RIGHT NOW (at load time)
+            # for every exhaust + fire hardpoint.  The lazy snapshot
+            # in `_update_emitters_for_chassis_pose` was supposed to
+            # cover this but had a subtle hole: any code that touched
+            # `hp['pos']` between load and the first physics tick
+            # would corrupt the bind reference.  This explicit
+            # snapshot at load time makes bind_pos authoritative.
+            #
+            # Also dumps the captured bind values to the in-app
+            # console so we can see at a glance whether all HPs got
+            # captured at the SAME chassis-relative coordinates --
+            # if one HP shows a wildly different bind_pos, that's
+            # the framing-bug culprit.
+            for hp in self._exhaust_points:
+                hp['bind_pos'] = np.asarray(hp['pos'], dtype=np.float32).copy()
+                hp['bind_fwd'] = np.asarray(hp['fwd'], dtype=np.float32).copy()
+            for hp in self._fire_points:
+                hp['bind_pos'] = np.asarray(hp['pos'], dtype=np.float32).copy()
+                hp['bind_fwd'] = np.asarray(hp['fwd'], dtype=np.float32).copy()
+            if self._exhaust_points:
+                print(f"  Exhaust HPs ({len(self._exhaust_points)}) "
+                      f"bind-pose snapshot:")
+                for hp in self._exhaust_points:
+                    bp = hp['bind_pos']; bf = hp['bind_fwd']
+                    print(f"    {hp.get('name', '?'):24s}  "
+                          f"comp={hp.get('component', '?'):8s}  "
+                          f"pos=({bp[0]:+.3f}, {bp[1]:+.3f}, {bp[2]:+.3f})  "
+                          f"fwd=({bf[0]:+.2f}, {bf[1]:+.2f}, {bf[2]:+.2f})")
 
             # Build exhaust direction-vector lines: 0.5-unit ray from each
             # hardpoint along its (already-flipped) forward vector.
@@ -7946,6 +8459,37 @@ class Viewer:
                     self._sync_button_state('wireframe', self.wireframe)
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
+                elif event.key == K_o:
+                    # Toggle auto-circle drive.  Tank pulls a steady
+                    # arc of radius `_auto_circle_radius` at the
+                    # current speed-step kph; yaw rate auto-derived
+                    # to face the tangent.
+                    self._auto_circle = not self._auto_circle
+                    self.log(f"auto-circle: "
+                             f"{'on' if self._auto_circle else 'off'}  "
+                             f"(R={self._auto_circle_radius:.1f} m)",
+                             color=(180, 220, 255) if self._auto_circle
+                             else (180, 180, 180))
+                elif event.key == K_c:
+                    # Cycle camera mode: orbit -> chase -> commander -> orbit.
+                    self.camera_mode = (self.camera_mode + 1) % self._N_CAMERA_MODES
+                    label = ('orbit', 'chase (driver side)',
+                             'commander (turret POV)')[self.camera_mode]
+                    self.log(f"camera: {label}",
+                             color=(180, 220, 255))
+                elif event.key == K_h:
+                    # Toggle the contact-wheel red highlight.
+                    # Independent of Susp so the user can keep the
+                    # physics running while turning the visual aid
+                    # on/off.  Default ON because the highlight is
+                    # the whole point of the per-wheel-anchor visual
+                    # debug -- you want to SEE which 4 wheels the
+                    # plane fit is leaning on.
+                    self._highlight_contacts = not self._highlight_contacts
+                    self.log(f"contact highlight: "
+                             f"{'on' if self._highlight_contacts else 'off'}",
+                             color=(255, 80, 80) if self._highlight_contacts
+                             else (180, 180, 180))
                 elif event.key == K_r:
                     # Full camera reset -- restore yaw/pitch and re-fit to mesh bounds.
                     # Matches Camera.__init__ defaults (yaw 225 = 45-deg
@@ -7956,6 +8500,33 @@ class Viewer:
                     self.camera.distance = 10.0
                     if self._scene_bbox is not None:
                         self.camera.fit_to_bounds(*self._scene_bbox)
+                # Speed step selector: 0 stops the tank, 1 picks the
+                # current tank's max forward speed, 9 picks creep
+                # (0.1 kph), 2..8 linearly interpolate.  Driven by
+                # _kph_for_step / _speed_yards_per_sec; consumed by
+                # the arrow-key drive logic in handle_input.  Number
+                # row only -- numpad keys are NOT bound so we don't
+                # collide with future zoom / camera shortcuts.
+                elif event.key == K_0:
+                    self._set_speed_step(0)
+                elif event.key == K_1:
+                    self._set_speed_step(1)
+                elif event.key == K_2:
+                    self._set_speed_step(2)
+                elif event.key == K_3:
+                    self._set_speed_step(3)
+                elif event.key == K_4:
+                    self._set_speed_step(4)
+                elif event.key == K_5:
+                    self._set_speed_step(5)
+                elif event.key == K_6:
+                    self._set_speed_step(6)
+                elif event.key == K_7:
+                    self._set_speed_step(7)
+                elif event.key == K_8:
+                    self._set_speed_step(8)
+                elif event.key == K_9:
+                    self._set_speed_step(9)
 
             elif event.type == MOUSEWHEEL:
                 # Tree panel scroll has priority over camera zoom
@@ -8041,34 +8612,83 @@ class Viewer:
                 and self.show_terrain and self.terrain):
             keys = pygame.key.get_pressed()
             dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
-            move_speed = -5.0   # m/s, sign flipped (see comment above)
-            yaw_speed  = -60.0  # deg/s, sign flipped
+            # Stepped speed selector.  `_speed_yards_per_sec()`
+            # returns the per-step rate in scene units (= yards) per
+            # second; we negate to match TEPY's rendered Z direction
+            # (visible front of the tank lives at world -Z because
+            # the chassis is not Z-flipped on load while the hull /
+            # turret / gun are).  Default step is 0 (stopped) so the
+            # tank doesn't move until the user picks a speed via
+            # keys 1-9.
+            move_speed = -self._speed_yards_per_sec()   # m/s, sign flipped
+            yaw_speed  = -60.0  # deg/s, sign flipped (yaw rate is
+                                # speed-step-independent for now;
+                                # could scale with move_speed later
+                                # but turn-in-place has its own feel
+                                # and Professor Coffee can flag if
+                                # it needs a step ladder too)
             tp = self.tank_physics
             yaw = math.radians(tp.yaw_deg)
             cyy, syy = math.cos(yaw), math.sin(yaw)
             moved = False
-            if keys[pygame.K_UP]:
-                tp.pos[0] += syy * move_speed * dt
-                tp.pos[2] += cyy * move_speed * dt
-                moved = True
-            if keys[pygame.K_DOWN]:
-                tp.pos[0] -= syy * move_speed * dt
-                tp.pos[2] -= cyy * move_speed * dt
-                moved = True
-            if keys[pygame.K_LEFT]:
-                tp.pos[0] -= cyy * move_speed * dt
-                tp.pos[2] += syy * move_speed * dt
-                moved = True
-            if keys[pygame.K_RIGHT]:
-                tp.pos[0] += cyy * move_speed * dt
-                tp.pos[2] -= syy * move_speed * dt
-                moved = True
-            if keys[pygame.K_q]:
-                tp.yaw_deg -= yaw_speed * dt
-                moved = True
-            if keys[pygame.K_e]:
-                tp.yaw_deg += yaw_speed * dt
-                moved = True
+
+            # ---- Auto circle drive ---------------------------------
+            # When toggled ON via `O`, the tank ignores arrow / Q /
+            # E keys and instead pulls a steady arc of radius
+            # `_auto_circle_radius` at the current speed-step kph.
+            # Yaw rate omega = v / R is exactly what's needed to
+            # keep the chassis facing along the circle's tangent
+            # at every point (small-angle / kinematic).  Sign of
+            # `move_speed` is already negated for TEPY's render-Z
+            # convention; matching the yaw_speed sign here keeps
+            # the tank pointing in its travel direction.
+            if self._auto_circle:
+                R    = max(0.1, float(self._auto_circle_radius))
+                v    = abs(move_speed)   # absolute m/s
+                if v > 1e-6:
+                    omega_deg = math.degrees(v / R)
+                    # Same sign convention as Q/E: negate so the
+                    # tank turns in the same world direction the
+                    # arrow keys would push it forward.
+                    tp.yaw_deg -= omega_deg * dt
+                    yaw = math.radians(tp.yaw_deg)
+                    cyy, syy = math.cos(yaw), math.sin(yaw)
+                    # Forward motion at the new heading -- same
+                    # math the K_UP branch uses, just unconditional.
+                    tp.pos[0] += syy * move_speed * dt
+                    tp.pos[2] += cyy * move_speed * dt
+                    moved = True
+                # Skip the manual-drive keys when auto-drive is on
+                # so the user can't accidentally double up.
+                # (`continue` would also skip the diagnostic; just
+                # let the if/elif chain below short-circuit.)
+            elif not self._auto_circle:
+                # Manual drive keys -- only consulted when auto-
+                # circle is off.  Multiple keys can be held at
+                # once (forward + strafe = diagonal), so each
+                # branch is its own independent if.
+                if keys[pygame.K_UP]:
+                    tp.pos[0] += syy * move_speed * dt
+                    tp.pos[2] += cyy * move_speed * dt
+                    moved = True
+                if keys[pygame.K_DOWN]:
+                    tp.pos[0] -= syy * move_speed * dt
+                    tp.pos[2] -= cyy * move_speed * dt
+                    moved = True
+                if keys[pygame.K_LEFT]:
+                    tp.pos[0] -= cyy * move_speed * dt
+                    tp.pos[2] += syy * move_speed * dt
+                    moved = True
+                if keys[pygame.K_RIGHT]:
+                    tp.pos[0] += cyy * move_speed * dt
+                    tp.pos[2] -= syy * move_speed * dt
+                    moved = True
+                if keys[pygame.K_q]:
+                    tp.yaw_deg -= yaw_speed * dt
+                    moved = True
+                if keys[pygame.K_e]:
+                    tp.yaw_deg += yaw_speed * dt
+                    moved = True
             # One-shot diagnostic so we can tell whether the issue
             # is "keys not detected at all" (focus) vs "detected
             # but tank not visibly responding".  Logged once per
@@ -8209,7 +8829,7 @@ class Viewer:
             glEnable(GL_POLYGON_OFFSET_FILL)
             glPolygonOffset(4.0, 4.0)
 
-        view = self.camera.get_view_matrix()
+        view = self._anchored_view_matrix()
         proj = self.camera.get_projection_matrix()
 
         # ---- Tank physics (per-wheel terrain conformance) ------------
@@ -8245,12 +8865,34 @@ class Viewer:
             for m in self.meshes:
                 m.model_matrix = (chassis_pose
                                    @ m.bind_model_matrix).astype(np.float32)
+
+            # Particle hardpoints (engine smoke + fire) live in
+            # bind-pose world coords -- they were captured at load
+            # time before chassis_pose existed.  As the tank moves
+            # / rotates / pitches / rolls, those bind positions go
+            # stale and the smoke plumes start emitting from the
+            # spot where the tank USED to be.  Snapshot the bind
+            # values once on first use, then transform them through
+            # chassis_pose every frame and re-publish to the
+            # particle systems.
+            #
+            # Position gets the full 4x4 (rotation + translation);
+            # forward direction gets only the 3x3 rotation block --
+            # we don't want a hardpoint emit-direction to pick up
+            # the chassis's world translation.
+            self._update_emitters_for_chassis_pose(chassis_pose)
         else:
             # Restore bind pose if we ever applied physics earlier
             # in this load (e.g. terrain toggled off mid-session).
             for m in self.meshes:
                 if hasattr(m, 'bind_model_matrix'):
                     m.model_matrix = m.bind_model_matrix.copy()
+            # Same restore for emitters: when physics was on then
+            # toggled off, the emitter pos/fwd carry the last
+            # transformed values.  Snap them back to bind so the
+            # smoke plume re-anchors at the bind-pose hardpoint
+            # locations.
+            self._update_emitters_for_chassis_pose(np.eye(4, dtype=np.float32))
 
         # ---- Triangle picker (off-screen colour-pick) ----------------
         # When the Pick Tri tool is on, render the tank into a hidden
@@ -8328,13 +8970,13 @@ class Viewer:
             self.lookat_lines.render(self.color_shader, view, proj)
 
         # Tank physics overlay: per-wheel ground / wheel-centre
-        # markers + yellow suspension lines.  Gated only by the
-        # Susp checkbox (NOT the master Debug flag) so the user
-        # gets visual feedback whenever the physics is active --
-        # treat the markers as part of "what Susp does".  Without
-        # them you can't see WHERE the wheels think they're
-        # touching, which is half the point of the test.
-        if (self.tank_physics_enabled and self.tank_physics is not None
+        # markers + yellow suspension lines.  Gated by the master
+        # Debug checkbox AND the Susp checkbox -- terrain markers
+        # are debug-overlay info, hidden in normal viewing.  When
+        # Debug is OFF, the chassis still moves correctly under
+        # the suspension; we just don't draw the markers.
+        if (self._debug
+                and self.tank_physics_enabled and self.tank_physics is not None
                 and self.meshes
                 and self.show_terrain and self.terrain
                 and len(self.tank_physics.last_wheel_world)):
@@ -8342,6 +8984,7 @@ class Viewer:
             PINK   = (1.0, 0.40, 0.65)   # ground-contact dots
             CYAN   = (0.40, 0.95, 0.95)  # target wheel-centre dots
             YELLOW = (1.0, 0.92, 0.20)
+            BLUE   = (0.20, 0.45, 1.00)  # physics hit-location X
             # 20 cm asterisk: visible at any zoom level.  Drawn as a
             # 3-axis cross + diagonal so the marker reads as a "star"
             # against the terrain texture even when the camera is
@@ -8380,8 +9023,44 @@ class Viewer:
                 # ---- Suspension shaft: yellow line ----------------
                 segs.append(((wx, ty, wz),
                              (wx, wc, wz), YELLOW))
+
+                # ---- Physics hit-location: blue X -----------------
+                # Two diagonal segments at the wheel's terrain
+                # sample point.  Lifted 1 mm above the terrain Y
+                # so it doesn't z-fight with the ground texture
+                # (the pink star sits at exact terrain Y; the X
+                # rides 1 mm proud and reads as a separate
+                # marker).  Used to visually verify the physics's
+                # computed hit location matches what's under the
+                # rendered wheel.
+                ty_x = ty + 0.001
+                segs.append(((wx - DOT_R, ty_x, wz - DOT_R),
+                             (wx + DOT_R, ty_x, wz + DOT_R), BLUE))
+                segs.append(((wx - DOT_R, ty_x, wz + DOT_R),
+                             (wx + DOT_R, ty_x, wz - DOT_R), BLUE))
             self.physics_lines.update(segs)
             self.physics_lines.render(self.color_shader, view, proj)
+
+            # ---- Live console dump of per-bone angles ----------------
+            # Clear + reprint every frame so the user gets a real-time
+            # readout of what each wheel's suspension is doing.  Slows
+            # the frame loop noticeably (one cls + N print() calls per
+            # tick) but Professor Coffee explicitly accepted that
+            # cost ("i dont care if it slows it down").
+            self._dump_bone_angles_to_console(tp)
+
+        # ---- Hull bounding-box overlay -------------------------------
+        # Draws a wireframe AABB around every component=='hull' mesh.
+        # Built once at tank-load time as 12 line edges in HULL-LOCAL
+        # space, transformed by chassis_pose each frame so the box
+        # rides with the chassis.  Useful for sizing / collision-
+        # debug; doesn't constrain the physics.
+        if (self.meshes and self.tank_physics_enabled
+                and self.tank_physics is not None):
+            if not hasattr(self, '_hull_box_local') or self._hull_box_local is None:
+                self._build_hull_box_local()
+            if self._hull_box_local is not None:
+                self._render_hull_box(view, proj)
 
         glEnable(GL_DEPTH_TEST)
 
@@ -8434,6 +9113,88 @@ class Viewer:
         active.set_mat4('view',       view)
         active.set_mat4('projection', proj)
         active.set_vec3_array('light_pos', light_positions)
+
+        # ---- Per-mesh skinning upload helper --------------------------
+        # Closures over `active` so we don't repeat the bind dance at
+        # every draw site (main pass + wireframe pass).  Behaviour:
+        #
+        #   * If the mesh is skinned AND tank physics is active AND
+        #     the mesh carries a bone palette, build a per-bone matrix
+        #     array via `TankPhysics.bone_matrix_array(palette)`,
+        #     upload as `u_bones`, and set `u_skinned = 1`.  Each
+        #     wheel's bone gets a translation in mesh-local Y by the
+        #     residual between the rigid plane fit and the actual
+        #     terrain target -- so per-wheel deflections show through
+        #     the geometry.
+        #
+        #   * Otherwise set `u_skinned = 0`.  The shader's identity
+        #     branch then runs and the mesh draws at its bind pose
+        #     (or rigid `chassis_matrix` pose, whichever is composed
+        #     into mesh.model_matrix).
+        #
+        # This keeps non-skinned meshes (hull / turret / gun, every
+        # imported FBX) untouched -- they never carried bone data
+        # to begin with, and the disabled `iii / ww` attribs are
+        # never read by the shader's identity branch.
+        # Pre-resolve the per-wheel state (CONTACT / HANGING /
+        # OVER_COMP / NONE) once per frame.  Each chassis sub-mesh
+        # then maps wheel_bone_names[i] -> its OWN palette slot to
+        # build the 64-slot state array uploaded as u_wheel_state.
+        per_wheel_state = None
+        wheel_names_global = []
+        # Wheel-color highlight is now gated by the master Debug
+        # checkbox in addition to the H-toggle / tank-physics
+        # active flags.  When Debug is OFF, the coloured shader
+        # path goes dormant -- wheels render with their normal
+        # PBR look regardless of contact state.
+        if (self.tank_physics is not None
+                and self.tank_physics_enabled
+                and self._highlight_contacts
+                and self._debug):
+            per_wheel_state    = getattr(
+                self.tank_physics, 'last_wheel_state', None)
+            wheel_names_global = (
+                getattr(self.tank_physics, 'wheel_bone_names', None) or [])
+
+        def _upload_skinning(mesh):
+            palette = getattr(mesh, 'bone_palette', None)
+            has_skin_data = (mesh.bone_indices is not None
+                             and mesh.bone_weights is not None
+                             and palette)
+            if (has_skin_data
+                    and self.tank_physics_enabled
+                    and self.tank_physics is not None):
+                bones = self.tank_physics.bone_matrix_array(palette)
+                active.set_mat4_array('u_bones', bones)
+                active.set_int('u_skinned', 1)
+            else:
+                active.set_int('u_skinned', 0)
+
+            # Per-bone state array (size MAX_BONES = 64, must match
+            # mesh.vert).  Default 0 (no highlight); each wheel name
+            # known to the physics maps to ITS palette slot in this
+            # mesh's `bone_palette` and gets the wheel's CONTACT /
+            # HANGING / OVER_COMP state code from
+            # `tank_physics.last_wheel_state`.  Sub-meshes that
+            # don't carry the wheel bones (turret / hull / gun, also
+            # the track-ribbon meshes whose renderSet only declares
+            # Track_* bones) end up with all-zeros and the shader
+            # paints nothing.
+            MAX_BONES = 64
+            wheel_state_arr = [0] * MAX_BONES
+            mode = 0
+            if (palette and per_wheel_state is not None
+                    and len(wheel_names_global) > 0
+                    and has_skin_data):
+                for i, nm in enumerate(wheel_names_global):
+                    if not nm or nm not in palette:
+                        continue
+                    pi = palette.index(nm)
+                    if pi < MAX_BONES:
+                        wheel_state_arr[pi] = int(per_wheel_state[i])
+                        mode = 1 if (self._highlight_contacts and self._debug) else 0
+            active.set_int_array('u_wheel_state', wheel_state_arr)
+            active.set_int('u_contact_mode', mode)
 
         # Camera world-space eye position (derived from view matrix inverse)
         # The view matrix is R|t; eye = -R^T * t = transpose(R) * (-t)
@@ -8538,10 +9299,18 @@ class Viewer:
             active.set_vec3('armor_color',    1.0, 1.0, 1.0)
             active.set_int ('has_armor_color', 0)
 
+        # Commander camera mode hides the turret + gun so the user
+        # can see out from inside the turret -- otherwise the camera
+        # is buried in the geometry and you just see the back of
+        # the breech.  Mode 0 / 1 leave everything visible.
+        hide_turret_gun = (self.camera_mode == 2)
+
         # Draw each primitive group
         for mesh in self.meshes:
             if not getattr(mesh, 'visible', True):
                 continue   # user toggled this sub-mesh off in the info panel
+            if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
+                continue   # commander POV: hide turret + gun
             # Alpha test
             if mesh.alpha_test_enable:
                 active.set_int(  'alpha_test_enable', 1)
@@ -8567,6 +9336,7 @@ class Viewer:
                 glCullFace(GL_BACK)
 
             active.set_mat4('model', mesh.model_matrix)
+            _upload_skinning(mesh)
             mesh.render(active)
 
         glEnable(GL_CULL_FACE)
@@ -8601,7 +9371,10 @@ class Viewer:
             for mesh in self.meshes:
                 if not getattr(mesh, 'visible', True):
                     continue
+                if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
+                    continue
                 active.set_mat4('model', mesh.model_matrix)
+                _upload_skinning(mesh)
                 mesh.render(active)
             # Restore everything we touched.
             glEnable(GL_CULL_FACE)
@@ -8638,6 +9411,8 @@ class Viewer:
                 'u_mode', 1 if self._normals_per_vertex else 0)
             for mesh in self.meshes:
                 if not getattr(mesh, 'visible', True):
+                    continue
+                if hide_turret_gun and getattr(mesh, 'component', '') in ('turret', 'gun'):
                     continue
                 if mesh.vao is None:
                     continue
@@ -9204,6 +9979,7 @@ class Viewer:
         self.fire_outlines.cleanup()
         self.lookat_lines.cleanup()
         self.physics_lines.cleanup()
+        self.hull_box_lines.cleanup()
         if self.smoke_particles is not None:
             self.smoke_particles.cleanup()
         if self.fire_smoke_particles is not None:

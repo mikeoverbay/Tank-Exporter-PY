@@ -210,6 +210,42 @@ class ShaderProgram:
     def set_mat4(self, name, matrix):
         glUniformMatrix4fv(glGetUniformLocation(self.program, name), 1, GL_TRUE, matrix)
 
+    def set_int_array(self, name, values):
+        """Upload a list of ints to a `uniform int name[N]` array.
+
+        Uses `glUniform1iv` against the base array name (no `[0]`
+        suffix); some drivers don't expose per-element locations
+        for active uniform arrays, so the only portable path is
+        one call against the base location.
+        """
+        import numpy as _np
+        loc = glGetUniformLocation(self.program, name)
+        if loc < 0:
+            return
+        arr = _np.asarray(values, dtype=_np.int32)
+        glUniform1iv(loc, arr.size, arr)
+
+    def set_mat4_array(self, name, matrices):
+        """Upload a list of mat4s to a `uniform mat4 name[N]` array.
+
+        Source matrices arrive row-major (numpy / TankPhysics convention);
+        we forward `transpose=GL_TRUE` to match the per-matrix `set_mat4`
+        path so the shader sees its `u_bones[i] * vec4(p, 1.0)` resolve
+        the same way for arrays as for single uniforms.
+
+        Args:
+            name (str): uniform name (just the array name, no `[0]`).
+            matrices (np.ndarray): shape (N, 4, 4) float32, OR any
+                array-like that reshapes to (N, 4, 4).
+        """
+        import numpy as _np
+        loc = glGetUniformLocation(self.program, name)
+        if loc < 0:
+            return
+        arr = _np.ascontiguousarray(matrices, dtype=_np.float32)
+        n   = arr.size // 16
+        glUniformMatrix4fv(loc, n, GL_TRUE, arr)
+
     def set_vec3(self, name, x, y, z):
         glUniform3f(glGetUniformLocation(self.program, name), x, y, z)
 
@@ -275,6 +311,31 @@ class ImportedShader:
 
     def set_int(self, name, value):
         glUniform1i(glGetUniformLocation(self.program, name), value)
+
+    def set_int_array(self, name, values):
+        # Mirrored from ShaderProgram.set_int_array so the viewer
+        # can upload `u_contact_bones` polymorphically regardless
+        # of whether ImportedShader or ShaderProgram is active.
+        import numpy as _np
+        loc = glGetUniformLocation(self.program, name)
+        if loc < 0:
+            return
+        arr = _np.asarray(values, dtype=_np.int32)
+        glUniform1iv(loc, arr.size, arr)
+
+    def set_mat4_array(self, name, matrices):
+        # Mirrored from ShaderProgram.set_mat4_array (skinning
+        # bones).  ImportedShader uses the same mesh.vert as
+        # ShaderProgram, so the GPU skinning path needs the same
+        # uniform-array upload regardless of which fragment shader
+        # is paired with it.
+        import numpy as _np
+        loc = glGetUniformLocation(self.program, name)
+        if loc < 0:
+            return
+        arr = _np.ascontiguousarray(matrices, dtype=_np.float32)
+        n   = arr.size // 16
+        glUniformMatrix4fv(loc, n, GL_TRUE, arr)
 
     def set_float(self, name, value):
         glUniform1f(glGetUniformLocation(self.program, name), value)

@@ -211,11 +211,23 @@ class Mesh:
         """Upload vertex data to GPU and create VAO.
 
         Attribute layout:
-            0 - position  (vec3)
-            1 - normal    (vec3)
-            2 - tangent   (vec3)
-            3 - binormal  (vec3)
-            4 - uv0       (vec2)
+            0 - position      (vec3)
+            1 - normal        (vec3)
+            2 - tangent       (vec3)
+            3 - binormal      (vec3)
+            4 - uv0           (vec2)
+            5 - iii           (uvec4 -- 4 raw bone bytes, skinned only)
+            6 - ww            (vec4  -- 4 normalised weights, skinned only)
+
+        The bone attribs (5 + 6) are only uploaded when both
+        `bone_indices` and `bone_weights` are populated -- i.e. the
+        source primitive group was a skinned format
+        (`xyznuviiiwwtb`, `BPVTxyznuviiiwwtb`, ...).  Non-skinned
+        meshes leave those locations DISABLED so the shader sees
+        whatever the driver default is when it tries to read them
+        (typically zero); the matching `mesh.vert` short-circuits
+        the skin maths via `u_skinned == 0` so the disabled attribs
+        are never actually consulted.
         """
         self.vao = glGenVertexArrays(1)
         glBindVertexArray(self.vao)
@@ -234,6 +246,48 @@ class Mesh:
         self.vbos['tangent']  = _upload(2, self.tangents,  3)
         self.vbos['binormal'] = _upload(3, self.binormals, 3)
         self.vbos['uv0']      = _upload(4, self.uv0,       2)
+
+        # ---- Skinning attribs (locations 5 + 6) -------------------
+        # Uploaded only when the source mesh was skinned.  We use
+        # glVertexAttribIPointer for `iii` so the bytes arrive as
+        # uvec4 in the shader (no implicit normalisation, no
+        # float-cast surprises).  Weights go through the standard
+        # FLOAT path with `normalized=GL_FALSE` since they're
+        # already in [0,1] floats on the CPU side.
+        if self.bone_indices is not None and self.bone_weights is not None:
+            n = len(self.positions)
+            # Coerce to contiguous uint8 / float32 arrays of shape
+            # (n, 4).  Source data MAY arrive with fewer than 4
+            # slots populated; pad with zero (bone 0 / weight 0)
+            # which the shader's weighted sum then ignores.
+            bi = np.ascontiguousarray(self.bone_indices, dtype=np.uint8)
+            bw = np.ascontiguousarray(self.bone_weights, dtype=np.float32)
+            if bi.ndim == 1:
+                bi = bi.reshape(n, -1)
+            if bw.ndim == 1:
+                bw = bw.reshape(n, -1)
+            if bi.shape[1] < 4:
+                pad = np.zeros((n, 4 - bi.shape[1]), dtype=np.uint8)
+                bi  = np.hstack([bi, pad])
+            if bw.shape[1] < 4:
+                pad = np.zeros((n, 4 - bw.shape[1]), dtype=np.float32)
+                bw  = np.hstack([bw, pad])
+
+            buf_iii = glGenBuffers(1)
+            glBindBuffer(GL_ARRAY_BUFFER, buf_iii)
+            glBufferData(GL_ARRAY_BUFFER, bi.nbytes, bi, GL_STATIC_DRAW)
+            glVertexAttribIPointer(5, 4, GL_UNSIGNED_BYTE, 4,
+                                   ctypes.c_void_p(0))
+            glEnableVertexAttribArray(5)
+            self.vbos['bone_idx'] = buf_iii
+
+            buf_ww = glGenBuffers(1)
+            glBindBuffer(GL_ARRAY_BUFFER, buf_ww)
+            glBufferData(GL_ARRAY_BUFFER, bw.nbytes, bw, GL_STATIC_DRAW)
+            glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, 16,
+                                  ctypes.c_void_p(0))
+            glEnableVertexAttribArray(6)
+            self.vbos['bone_w']   = buf_ww
 
         self.ebo = glGenBuffers(1)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
