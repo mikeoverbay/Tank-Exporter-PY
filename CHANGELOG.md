@@ -9,6 +9,61 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Track NURB Y-lift fix + manual deflection test (1.106.0)
+
+Two viewer-side fixes for the F8 spline overlay.
+
+#### Y-lift -- "spline is in the terrain"
+
+`Track_L<i>` bones in `.visual_processed` bind at chassis-local
+Y = 0, but the actual TRACK SURFACE sits one wheel-radius +
+track-thickness BELOW the wheel hub.  The chassis integrator
+positions the chassis-local origin BELOW the terrain so the
+wheels reach down to ground.  Together that meant the spline
+bottom run was rendering ~7 cm below the terrain
+("can't tell, it's in the terrain" -- Professor Coffee).
+
+Fix in `_track_current_bone_positions`: lift each Track_<side>\<i\>
+chassis-local Y by `hub_y_local - radius - track_thickness`,
+then add the wheel residual on top.  T30: lift = 0.426 -
+0.345 - 0.029 = +0.052 m.  M60: lift = 0.448 - 0.357 -
+0.0003 = +0.091 m.  Per-wheel hub_y_local because some
+chassis variants have wheels at slightly different heights.
+
+The bond between the wheel hub and the track surface is now
+geometrically exact -- the spline bottom run rides on top of
+the terrain at the same height as the textured rubber-band
+ribbon.
+
+#### Manual wheel deflection test (LEFT / RIGHT arrows)
+
+Park-test feature for the spline overlay: while F8 overlay is
+on, the arrow keys inject a uniform Y bias into every Track
+control point, so you see the bottom run move on a stationary
+tank.
+
+* RIGHT arrow held -> all wheels DROP (test droop / extension)
+* LEFT  arrow held -> all wheels LIFT (test compression)
+* BACKSPACE -> reset bias to 0
+* Held rate: 0.5 m / s, clamped to +- 30 cm
+
+The `_show_lookat_lines` flag (the same one that draws the
+look-at crosshair while RIGHT-mouse pans) is raised while
+either arrow is held, so you've got a consistent visual
+anchor (3-axis cross at camera target) for "is the spline
+moving?".
+
+Bias is overlay-only -- it does NOT enter the physics
+solver, so the tank stays parked and the wheels-on-ground
+markers don't lie.  On-screen log shows the current
+`track test dy = +/-X.XXX m` value at up to 4 Hz while held.
+
+Use case: you've loaded a tank, F8 the overlay, want to
+verify the bottom-run pads track suspension without
+having to drive over a heightmap bump.  Hold RIGHT, watch
+the bottom run drop; release, watch it spring back to
+the resting position the physics solver actually computed.
+
 ### Track NURB Phase A3 + B — live deformation overlay (1.105.0)
 
 The spline can now be SEEN.  F8 toggles a per-side closed line

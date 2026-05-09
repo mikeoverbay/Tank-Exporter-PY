@@ -31,6 +31,7 @@ from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTT
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
                             K_a, K_d, K_s, K_x, K_z, K_F2, K_F3, K_F4, K_F8,
+                            K_LEFT, K_RIGHT, K_BACKSPACE,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -688,6 +689,17 @@ class Viewer:
         self._track_chassis_bones_bind = {}
         self._show_track_spline = bool(
             self._cfg.get('show_track_spline', True))
+        # Manual wheel test-deflection bias added to every wheel's
+        # spline-overlay residual (NOT to the real physics
+        # residuals).  Held by RIGHT-arrow (drop, +droop = -dy) /
+        # LEFT-arrow (lift, +compression = +dy) while the spline
+        # overlay is on.  Backspace zeros it.  Lets the user
+        # SEE the spline deformation respond on a parked tank
+        # without having to drive over a bump.  Clamped to the
+        # suspension envelope (track_test_dy_clamp) so visuals stay
+        # plausible.
+        self._track_test_dy = 0.0
+        self._track_test_dy_clamp = 0.30   # m, +-30 cm cap
         # Flag set by `handle_input` each tick; checked by
         # `render` to decide whether to draw the crosshair.  Lives
         # on `self` (not a render-time recheck) so we can capture
@@ -3921,17 +3933,32 @@ class Viewer:
             `Track_VD_*`, `WD_*`, `HP_*`, etc.) so they're
             already correct in chassis-local space.
           * Override `Track_<side><i>` ground-contact bones with
-            the wheel's vertical residual.  The runtime GPU
-            skinning shader's bone matrix already does this for
-            the visible track ribbon; here we MIRROR that math so
-            the NURB spline overlay shows the SAME deformation
-            pattern as the rendered track segments.
+            the chassis-local Y where the OUTER track surface
+            actually lives, plus the wheel residual.
+
+        The Y-lift fix is the subtle bit.  In bind pose the
+        Track_L<i> bones in `.visual_processed` all sit at
+        Y = 0 -- that's WoT's authoring convention but it is NOT
+        where the visible track ribbon contacts the ground.  The
+        ground-contact surface lives one wheel-radius +
+        track-thickness BELOW the wheel hub, so:
+
+            track_y_local = hub_y_local - radius - track_thickness
+                            + smoothed_residual_y
+
+        For T30 this is +0.448 - 0.345 - 0.029 = +0.074 m -- about
+        7.4 cm above Y = 0.  Without the lift the spline bottom
+        run renders ~7 cm below the terrain (since the chassis
+        integrator sits the chassis with its origin BELOW the
+        terrain so wheels reach down to ground); user reported
+        "spline is in the terrain" 2026-05-08, this is the fix.
 
         Wheel -> Track_<side><i> mapping: derived from
         `tp.wheel_bone_names` by name substitution
-        (`W_L0_BlendBone` -> `Track_L0`).  This works whether the
-        tank has 6 wheels (M60) or 9 (T30); each wheel contributes
-        a Y-residual to its identically-indexed Track bone.
+        (`W_L0_BlendBone` -> `Track_L0`).  Same indexing the GPU
+        skinning shader's bone matrix array uses, so the NURB
+        spline overlay shows the SAME deformation as the
+        rendered track ribbon.
 
         Args:
             tp: The active `TankPhysics` instance, post-update so
@@ -3950,10 +3977,13 @@ class Viewer:
         out = {k: v.copy() for k, v in bind.items()}
         residuals = getattr(tp, 'smoothed_residual_y', None)
         names     = getattr(tp, 'wheel_bone_names', None)
-        if residuals is None or not names:
+        wheels    = getattr(tp, 'wheels', None)
+        if residuals is None or not names or wheels is None:
             return out
+        radius          = float(getattr(tp, 'radius', 0.345))
+        track_thickness = float(getattr(tp, 'track_thickness', 0.029))
         for i, wn in enumerate(names):
-            if i >= len(residuals):
+            if i >= len(residuals) or i >= len(wheels):
                 break
             # 'W_L0_BlendBone' -> 'Track_L0'.  Skip any bone name
             # that doesn't fit the expected pattern -- safer than
@@ -3965,16 +3995,28 @@ class Viewer:
             base = bind.get(track_name)
             if base is None:
                 continue
-            # Track_L<i> bind sits at ground level (Y ~= 0); the
-            # wheel residual is the suspension delta in chassis-
-            # local Y.  Positive residual = wheel rose (compression
-            # / hit a bump); the track follows the wheel up by the
-            # same amount, so we ADD residual to bind Y.
+            # Per-wheel hub Y in chassis-local (mesh-local).  Used
+            # instead of a single global lift constant because
+            # different wheels CAN sit at different heights -- T30's
+            # frontmost wheel is at Y = +0.426 while its rear road
+            # wheel is at Y = +0.460 in some chassis variants.
+            hub_y_local = float(wheels[i][1])
+            # `_track_test_dy` is a manual visualization bias --
+            # adds the same offset to every wheel for the spline
+            # overlay so a parked tank shows the bottom run drop
+            # / lift when the user holds LEFT/RIGHT arrows.  Does
+            # NOT enter the physics solver, so wheels-on-ground
+            # state stays correct even while the spline droops.
+            track_y = (hub_y_local - radius - track_thickness
+                       + float(residuals[i])
+                       + float(getattr(self, '_track_test_dy', 0.0)))
+            # Keep base X / Z (wheel-aligned along the track) and
+            # only override Y.  The ground-contact bone's bind X
+            # already matches its sister wheel's X, so we don't
+            # want to use the WHEEL's X here -- there can be a
+            # small per-bone authoring offset.
             out[track_name] = np.array(
-                [base[0],
-                 base[1] + float(residuals[i]),
-                 base[2]],
-                dtype=np.float64)
+                [base[0], track_y, base[2]], dtype=np.float64)
         return out
 
     # ==================================================================
@@ -8983,59 +9025,95 @@ class Viewer:
                 self._track_left = None
                 self._track_right = None
                 self._track_chassis_bones_bind = {}
+                # Detailed diagnostic logging so a user pressing F8
+                # and getting nothing on screen has a clear trail
+                # to follow in the console.  Each early-out path
+                # prints a distinct reason; success path summarises
+                # what got bound.
                 try:
                     from .track_spline import (
                         TrackSplineLoader,
                         parse_chassis_bone_world_positions,
                     )
-                    # Find a chassis mesh's pkg path.
+                    # Step 1: find a chassis mesh's pkg path.
                     vehicle_base = None
                     chassis_visual_path = None
+                    chass_pz_seen = []
                     for _m in chass:
                         pz = (getattr(_m, 'primitives_zip', '')
                               or '').replace('\\', '/').lstrip('/')
+                        chass_pz_seen.append(pz)
                         if pz and pz.lower().startswith('vehicles/'):
                             # Strip "/normal/lod0/Chassis.prims_proc..."
                             # back to "vehicles/<nation>/<tank>".
                             parts = pz.split('/')
                             if len(parts) >= 6 and parts[0] == 'vehicles':
                                 vehicle_base = '/'.join(parts[:3])
-                                # Companion visual path lives at the
-                                # same /normal/lod0 level as the
-                                # primitives we just split out.
                                 chassis_visual_path = pz.replace(
                                     '.primitives_processed',
                                     '.visual_processed')
                             break
-                    if vehicle_base and self._pkg_extractor is not None:
+                    if not vehicle_base:
+                        print(f"[track_spline] no vehicle pkg path on "
+                              f"any chassis mesh; primitives_zip seen: "
+                              f"{chass_pz_seen}")
+                    elif self._pkg_extractor is None:
+                        print(f"[track_spline] no PkgExtractor "
+                              f"configured -- skip {vehicle_base}")
+                    else:
+                        # Step 2: load left + right .track files.
                         L, R = TrackSplineLoader.from_pkg(
                             self._pkg_extractor, vehicle_base)
-                        # Bind only if BOTH sides loaded -- partial
-                        # rigs (one side missing) can happen on
-                        # broken / mod tanks; we'd rather draw
-                        # nothing than half a track.
-                        if L is not None and R is not None:
+                        if L is None and R is None:
+                            print(f"[track_spline] {vehicle_base}: "
+                                  f"no left.track / right.track in pkg")
+                        elif L is None or R is None:
+                            print(f"[track_spline] {vehicle_base}: "
+                                  f"only one side present "
+                                  f"(L={'ok' if L else 'missing'}, "
+                                  f"R={'ok' if R else 'missing'}) -- "
+                                  f"skipping (need both for overlay)")
+                        else:
+                            # Step 3: parse chassis bone hierarchy.
                             visual_local = self._pkg_extractor.extract(
                                 chassis_visual_path)
-                            bones = parse_chassis_bone_world_positions(
-                                visual_local) if visual_local else {}
-                            if bones:
-                                L.attach_binding(bones)
-                                R.attach_binding(bones)
-                                self._track_left = L
-                                self._track_right = R
-                                self._track_chassis_bones_bind = bones
-                                print(
-                                    f"[track_spline] {vehicle_base}: "
-                                    f"L={len(L.vloc_names)} V_loc + "
-                                    f"{len(L.binding.bottom_run_bones)} "
-                                    f"Track_L bones, "
-                                    f"R={len(R.vloc_names)} V_loc + "
-                                    f"{len(R.binding.bottom_run_bones)} "
-                                    f"Track_R bones")
+                            if not visual_local:
+                                print(f"[track_spline] {vehicle_base}: "
+                                      f"could not extract "
+                                      f"{chassis_visual_path}")
+                            else:
+                                bones = parse_chassis_bone_world_positions(
+                                    visual_local)
+                                if not bones:
+                                    print(f"[track_spline] "
+                                          f"{vehicle_base}: bone parse "
+                                          f"returned 0 named nodes "
+                                          f"(unparseable visual_processed?)")
+                                else:
+                                    # Step 4: bind + commit.
+                                    L.attach_binding(bones)
+                                    R.attach_binding(bones)
+                                    self._track_left = L
+                                    self._track_right = R
+                                    self._track_chassis_bones_bind = bones
+                                    nL = len(L.binding.bottom_run_bones)
+                                    nR = len(R.binding.bottom_run_bones)
+                                    print(
+                                        f"[track_spline] {vehicle_base}"
+                                        f": L={len(L.vloc_names)} "
+                                        f"V_loc + {nL} Track_L bones, "
+                                        f"R={len(R.vloc_names)} V_loc "
+                                        f"+ {nR} Track_R bones, "
+                                        f"{len(bones)} chassis bones; "
+                                        f"press F8 to toggle overlay")
                 except Exception as exc:
+                    import traceback
                     print(f"[track_spline] load skipped: "
                           f"{type(exc).__name__}: {exc}")
+                    traceback.print_exc()
+                # Reset the per-render error gate so a previous
+                # tank's spline error doesn't silence this load.
+                self._track_spline_err_logged = False
 
                 # Reset position state on tank reload so old
                 # positions don't carry over.
@@ -9951,13 +10029,28 @@ class Viewer:
                     except Exception as _ex:
                         print(f"[viewer] config save "
                               f"(show_track_spline) failed: {_ex}")
-                    self.log(
-                        f"track NURB overlay: "
-                        f"{'on' if self._show_track_spline else 'off'} "
-                        f"(F8)",
-                        color=((180, 220, 255)
-                               if self._show_track_spline
-                               else (180, 180, 180)))
+                    # Honest message: distinguish "toggled on but no
+                    # data loaded" (orange / warn) from "toggled on
+                    # and rendering" (cyan / info).  Mismatch between
+                    # the F8 state and what's actually on screen was
+                    # the first thing Professor Coffee hit when
+                    # pressing F8 produced no visible change.
+                    have_data = (self._track_left is not None
+                                 and self._track_right is not None)
+                    if self._show_track_spline and not have_data:
+                        self.log(
+                            "track NURB overlay: ON but NO spline data "
+                            "loaded for this tank -- check console for "
+                            "[track_spline] log line",
+                            color=(255, 180, 120))
+                    else:
+                        self.log(
+                            f"track NURB overlay: "
+                            f"{'on' if self._show_track_spline else 'off'} "
+                            f"(F8)",
+                            color=((180, 220, 255)
+                                   if self._show_track_spline
+                                   else (180, 180, 180)))
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
                 elif event.key == K_o:
@@ -10341,6 +10434,53 @@ class Viewer:
             # squat-dive leans -- much cleaner signal than deriving
             # speed from chassis position deltas.
             tp.cur_forward_mps = -float(cur)
+
+            # ---- Track NURB test deflection (LEFT / RIGHT arrows) ----
+            # While the spline overlay is on, hold:
+            #   RIGHT-arrow -> all wheels DROP (test droop / extension)
+            #   LEFT-arrow  -> all wheels LIFT (test compression)
+            # Adds a uniform Y bias to every Track_<side><i> control
+            # point used by the spline overlay -- doesn't touch the
+            # actual physics solver, so a parked tank stays parked.
+            # Crosshair flag is raised while holding so you can
+            # visually anchor "is the spline reacting?" at a
+            # consistent screen location.  BACKSPACE zeros the
+            # bias.  Clamped to +- track_test_dy_clamp (default 30 cm).
+            if self._show_track_spline:
+                TRACK_TEST_RATE = 0.5   # m/s while held
+                bias_changed = False
+                if keys[pygame.K_RIGHT]:
+                    self._track_test_dy -= TRACK_TEST_RATE * dt
+                    self._show_lookat_lines = True
+                    bias_changed = True
+                if keys[pygame.K_LEFT]:
+                    self._track_test_dy += TRACK_TEST_RATE * dt
+                    self._show_lookat_lines = True
+                    bias_changed = True
+                if keys[pygame.K_BACKSPACE]:
+                    self._track_test_dy = 0.0
+                    bias_changed = True
+                if bias_changed:
+                    self._track_test_dy = max(
+                        -self._track_test_dy_clamp,
+                        min(self._track_test_dy_clamp,
+                            self._track_test_dy))
+                    # One-shot hint per session so the user sees
+                    # the dy value in metres on the on-screen log.
+                    # We log here (per-frame while held) deliberately
+                    # -- it's the most direct feedback channel for
+                    # "what value am I at" without a HUD readout.
+                    # Suppress repeats faster than 4 Hz to avoid
+                    # spamming the log.
+                    last_t = getattr(self, '_track_test_log_t', 0.0)
+                    now_t  = pygame.time.get_ticks() / 1000.0
+                    if (now_t - last_t) > 0.25:
+                        self.log(
+                            f"track test dy = "
+                            f"{self._track_test_dy:+.3f} m  "
+                            f"(LEFT/RIGHT to adjust, BACKSPACE = 0)",
+                            color=(180, 220, 255))
+                        self._track_test_log_t = now_t
 
             # ---- Auto circle drive ---------------------------------
             # When toggled ON via `O`, the tank ignores manual drive
