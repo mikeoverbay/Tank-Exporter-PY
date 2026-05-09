@@ -39,8 +39,9 @@ primitives without modifying them.
 
 from __future__ import annotations
 
+import os
 import re
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -50,6 +51,8 @@ __all__ = [
     'to_chassis_frame',
     'centripetal_catmull_rom_closed',
     'resample_uniform',
+    'parse_chassis_bone_world_positions',
+    'TrackBoneBinding',
     'TrackSplineLoader',
     'TrackSplineSide',
 ]
@@ -311,6 +314,318 @@ def resample_uniform(dense: np.ndarray,
 
 
 # ----------------------------------------------------------------------
+# Phase A2 -- Chassis bone hierarchy walk + V_loc -> bone binding.
+# ----------------------------------------------------------------------
+
+def _parse_visual_node_xform(transform_el) -> np.ndarray:
+    """Parse a single `<transform>` block out of a .visual_processed
+    node into a 4x4 numpy matrix.
+
+    The XML format uses four `<rowN>` children with three space-
+    separated floats each.  Rows 0..2 are the rotation / scale
+    block; row 3 is the translation.  Missing rows default to
+    identity (matches what WoT does on its end -- e.g. pure-
+    translation nodes omit the rotation rows).
+    """
+    M = np.eye(4, dtype=np.float64)
+    if transform_el is None:
+        return M
+    for i, r in enumerate(('row0', 'row1', 'row2', 'row3')):
+        e = transform_el.find(r)
+        if e is None or not e.text:
+            continue
+        vals = [float(x) for x in e.text.split()]
+        if len(vals) < 3:
+            continue
+        if i < 3:
+            M[i, :3] = vals[:3]
+        else:
+            M[3, :3] = vals[:3]
+    return M
+
+
+def parse_chassis_bone_world_positions(
+        visual_path: str,
+        ) -> Dict[str, np.ndarray]:
+    """Walk a .visual_processed file's node hierarchy and return a
+    dict `{bone_name: world_position_xyz}` for every named node.
+
+    The walk multiplies parent transforms down so each returned
+    position is in the same chassis-local frame as the chassis
+    primitives' vertex coords (and as the V_loc positions after
+    `to_chassis_frame()`).  Both BWXML and plain-XML files are
+    supported; the BWXML case is decoded via
+    `tankExporterPy.common.decode_bwxml`.
+
+    Args:
+        visual_path: Absolute path to a Chassis.visual_processed
+            file on disk (already extracted from a pkg).
+
+    Returns:
+        Dict mapping every named node's `<identifier>` text to its
+        world translation as an `np.ndarray((3,), dtype=float64)`.
+        Includes the entire hierarchy (HP_*, W_*, Track_L*,
+        Track_VT_L*, Track_VD_L*, WD_*, V_*, etc.) -- callers
+        filter as needed.  Empty dict if the file is missing or
+        unparseable.
+    """
+    if not visual_path or not os.path.exists(visual_path):
+        return {}
+
+    # Local imports keep the hot path's import set thin and avoid
+    # circular imports if loaders.py later wants to import us.
+    import xml.etree.ElementTree as ET
+    from .common import decode_bwxml, is_bwxml
+
+    try:
+        with open(visual_path, 'rb') as fh:
+            raw = fh.read()
+    except OSError:
+        return {}
+
+    try:
+        if is_bwxml(raw):
+            text = decode_bwxml(raw)
+        else:
+            text = raw.decode('utf-8', errors='replace')
+    except Exception:
+        return {}
+
+    # Strip any default-namespace wrapper that ET would otherwise
+    # carry through into every tag name (`{ns}node` -> `node`),
+    # mirroring the same regex the standalone probes use.
+    text = re.sub(r'<xmlns:[^>]*>[^<]*</xmlns:[^>]*>', '', text)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return {}
+
+    out: Dict[str, np.ndarray] = {}
+
+    def _walk(node, parent_world: np.ndarray) -> None:
+        ident = node.find('identifier')
+        nm = (ident.text.strip()
+              if ident is not None and ident.text else '')
+        M = _parse_visual_node_xform(node.find('transform'))
+        world = parent_world @ M
+        if nm:
+            out[nm] = np.asarray(
+                [float(world[3, 0]),
+                 float(world[3, 1]),
+                 float(world[3, 2])], dtype=np.float64)
+        for child in node.findall('node'):
+            _walk(child, world)
+
+    for n in root.findall('node'):
+        _walk(n, np.eye(4, dtype=np.float64))
+    return out
+
+
+class TrackBoneBinding:
+    """Per-side V_loc -> chassis bone binding map.
+
+    Built once at vehicle load by `bind_to_chassis_bones()` on a
+    `TrackSplineSide`.  Each entry records the V_loc's NEAREST
+    chassis bone (by chassis-local Y/Z distance) plus the rigid
+    OFFSET that bone-relative bind preserves.  At runtime the
+    V_loc world position is
+
+        V_loc.world = bone.world + offset
+
+    For tanks where none of the V_loc parents (Track_VT_*,
+    Track_VD_*, WD_*) actually deflect with terrain, this is just
+    a static rebrand of the V_loc bind position.  We still go
+    through the bone lookup because Phase A3's bottom-run
+    insertion needs the wheel-attached Track_L<i> bones, and
+    keeping the bookkeeping consistent across the top + bottom
+    runs makes the per-frame deform pass uniform.
+
+    Also captures the bottom-run gap detection: the two
+    consecutive V_locs whose chord crosses the entire wheel-Z
+    extent (V_loc2 -> V_loc15 on T30, a 6.76 m chord at Y ~ 0.55
+    above the wheels).  Phase A3 splices Track_L<i> bone
+    positions into this bracket in arc-length order.
+    """
+
+    # Bone-name regex for the per-side ground-contact ("bottom-
+    # run") wheel-attached bones.  Captures the index so we can
+    # sort by track position along the loop traversal.  T30 has
+    # Track_L0..L8 (9 bones); other tanks may have more or fewer.
+    _TRACK_LANE_BONE_RE = re.compile(r'^Track_([LR])(\d+)$')
+
+    def __init__(self,
+                 *,
+                 side: str,
+                 vloc_to_bone: List[Tuple[str, str, np.ndarray]],
+                 bottom_run_after_idx: int,
+                 bottom_run_before_idx: int,
+                 bottom_run_bones: List[Tuple[str, np.ndarray]]):
+        """Args:
+            side: 'left' or 'right'.
+            vloc_to_bone: Parallel to TrackSplineSide.vloc_names --
+                one entry per V_loc, of the form
+                `(vloc_name, bone_name, offset_xyz)` where offset
+                is `vloc_pos - bone_pos` in chassis-local metres.
+                When no bone is in range, `bone_name` is an empty
+                string and `offset_xyz` is the V_loc's bind
+                position (so Phase A3 can fall back to "stay at
+                bind" gracefully).
+            bottom_run_after_idx: V_loc index AFTER which the
+                bottom-run insertion goes.  In source / arc-length
+                order, the next entry in the augmented control list
+                is the first synthesised wheel point (front-of-
+                bottom).
+            bottom_run_before_idx: V_loc index BEFORE which the
+                last synthesised wheel point sits (rear-of-bottom).
+                Equal to `bottom_run_after_idx + 1` when the gap
+                straddles two adjacent V_locs in source order;
+                stored explicitly to keep wrap-around math simple.
+            bottom_run_bones: List of `(bone_name, bind_xyz)` for
+                each Track_L<i> on this side, ordered by Z so that
+                arc-length-order traversal of the augmented loop
+                visits them front-to-rear (or rear-to-front
+                depending on which way the wraparound at
+                bottom_run_after_idx is going).  Phase A3 uses
+                these names to look up runtime bone positions
+                each frame.
+        """
+        self.side = str(side)
+        self.vloc_to_bone = list(vloc_to_bone)
+        self.bottom_run_after_idx = int(bottom_run_after_idx)
+        self.bottom_run_before_idx = int(bottom_run_before_idx)
+        self.bottom_run_bones = list(bottom_run_bones)
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def build(cls,
+              spline_side: 'TrackSplineSide',
+              chassis_bones: Dict[str, np.ndarray],
+              ) -> 'TrackBoneBinding':
+        """Build a `TrackBoneBinding` for one side.
+
+        Algorithm:
+          1. Filter `chassis_bones` to the requested side
+             (`L` for left / `R` for right) by suffix match on
+             names like `Track_VT_LN`, `WD_LN`, `Track_LN`, etc.
+          2. For each V_loc on this side, find the chassis bone
+             with smallest 2-D (Y, Z) distance.  X is essentially
+             constant on a side (T30 left = -1.480 across every
+             track-related bone) so including X in the distance
+             metric just adds zero noise -- skip it.
+          3. Detect the bottom-run gap: the largest chord between
+             consecutive V_locs in SOURCE order is the bottom run
+             (V_loc2 -> V_loc15 on T30, 6.76 m).  Verified on T30
+             where the next-largest gap is ~0.4 m (top-run
+             between adjacent return rollers).
+          4. Order the Track_L<i> bones for bottom-run insertion
+             by Z so arc-length traversal between the gap V_locs
+             walks them sequentially.
+
+        Args:
+            spline_side: `TrackSplineSide` with V_locs already in
+                chassis frame (m).
+            chassis_bones: Output of
+                `parse_chassis_bone_world_positions()`.
+
+        Returns:
+            A `TrackBoneBinding` instance.
+        """
+        side_letter = 'L' if spline_side.side.lower().startswith('l') else 'R'
+
+        # ---- Step 1: filter bones to this side -------------------
+        # Side resolution: a bone belongs to this side iff its name
+        # matches one of:
+        #   Track_<L|R>\d+         (ground-contact)
+        #   Track_VT_<L|R>\d+      (top-run sag)
+        #   Track_VD_<L|R>\d+      (sprocket / idler wraparound)
+        #   WD_<L|R>\d+            (sprocket / idler / return rollers)
+        # Anything not matching one of these (Scene Root, HP_*,
+        # turret bones, etc.) is irrelevant to the track.
+        side_re = re.compile(
+            rf'^(Track_VT_{side_letter}|Track_VD_{side_letter}'
+            rf'|Track_{side_letter}|WD_{side_letter})(\d+)$')
+        side_bones: Dict[str, np.ndarray] = {
+            n: p for n, p in chassis_bones.items() if side_re.match(n)
+        }
+
+        # ---- Step 2: V_loc -> nearest bone by (Y, Z) -------------
+        vloc_to_bone: List[Tuple[str, str, np.ndarray]] = []
+        if side_bones:
+            bone_names = list(side_bones.keys())
+            bone_yz = np.stack(
+                [np.array([side_bones[b][1], side_bones[b][2]],
+                          dtype=np.float64)
+                 for b in bone_names], axis=0)  # (B, 2)
+            for vname, vpos in zip(spline_side.vloc_names,
+                                    spline_side.vloc_positions):
+                vyz = np.array([vpos[1], vpos[2]], dtype=np.float64)
+                d2 = ((bone_yz - vyz) ** 2).sum(axis=1)
+                k = int(np.argmin(d2))
+                bn = bone_names[k]
+                offset = vpos - side_bones[bn]
+                vloc_to_bone.append((vname, bn, offset))
+        else:
+            # No bones found on this side -- fall back to "stay at
+            # bind" entries.  Empty bone name signals Phase A3 to
+            # not bother looking up runtime positions for these.
+            for vname, vpos in zip(spline_side.vloc_names,
+                                    spline_side.vloc_positions):
+                vloc_to_bone.append((vname, '', vpos.copy()))
+
+        # ---- Step 3: detect the bottom-run gap -------------------
+        # Walk consecutive V_locs in SOURCE order (which is the
+        # order they appear in the .track file = arc-length order
+        # around the loop) and find the largest chord.  T30: 6.76 m
+        # gap between V_loc2 and V_loc15; next-largest 0.40 m.
+        n_v = len(spline_side.vloc_positions)
+        gap_sizes = np.zeros(n_v, dtype=np.float64)
+        if n_v >= 2:
+            for i in range(n_v):
+                a = spline_side.vloc_positions[i]
+                b = spline_side.vloc_positions[(i + 1) % n_v]
+                gap_sizes[i] = float(np.linalg.norm(b - a))
+        bottom_run_after = int(np.argmax(gap_sizes)) if n_v >= 2 else 0
+        bottom_run_before = (bottom_run_after + 1) % n_v
+
+        # ---- Step 4: order Track_L<i> for bottom-run insertion ---
+        # Pull every `Track_<side>\d+$` bone (no VT / VD prefix --
+        # those are top-run / wraparound, not ground-contact) and
+        # sort by Z so arc-length traversal between the gap V_locs
+        # visits them sequentially.
+        lane_re = cls._TRACK_LANE_BONE_RE
+        lane_bones: List[Tuple[str, np.ndarray]] = []
+        for n, p in chassis_bones.items():
+            m = lane_re.match(n)
+            if m and m.group(1) == side_letter:
+                lane_bones.append((n, p))
+
+        # Decide direction by checking which V_loc anchor the
+        # bottom-run-after-idx is at: if the V_loc at that index
+        # has a smaller Z than the one at before-idx, we walk from
+        # smaller-Z (front, in chassis-local where +Z = rear) to
+        # larger-Z, sorting bones by ascending Z.  Otherwise the
+        # opposite.  This makes the binding side-agnostic and
+        # robust to .track files whose V_locs were authored in
+        # the opposite traversal direction.
+        if n_v >= 2:
+            after_z = float(spline_side.vloc_positions[bottom_run_after][2])
+            before_z = float(spline_side.vloc_positions[bottom_run_before][2])
+            ascending = (before_z > after_z)
+        else:
+            ascending = True
+        lane_bones.sort(key=lambda t: float(t[1][2]),
+                        reverse=not ascending)
+
+        return cls(
+            side=spline_side.side,
+            vloc_to_bone=vloc_to_bone,
+            bottom_run_after_idx=bottom_run_after,
+            bottom_run_before_idx=bottom_run_before,
+            bottom_run_bones=lane_bones,
+        )
+
+
+# ----------------------------------------------------------------------
 # Per-side / whole-tank loaders.
 # ----------------------------------------------------------------------
 
@@ -360,6 +675,100 @@ class TrackSplineSide:
         self._pad_tan: Optional[np.ndarray] = None
         self._total_length: float = 0.0
         self._n_pads_cached: int = -1
+
+        # Phase A2 binding -- attached via `attach_binding()` after
+        # the chassis .visual_processed has been parsed.  None until
+        # then; bottom-run insertion + bone-driven V_loc updates in
+        # Phase A3 require this to be present.
+        self.binding: Optional[TrackBoneBinding] = None
+
+    # ------------------------------------------------------------------
+    def attach_binding(self,
+                       chassis_bones: Dict[str, np.ndarray]) -> None:
+        """Build and attach a `TrackBoneBinding` for this side from
+        the parsed chassis bone world positions.  Runs the binding
+        algorithm in `TrackBoneBinding.build()`.
+
+        Idempotent: replaces any previously-attached binding so
+        the caller can re-bind on a tank reload without
+        instantiating a new `TrackSplineSide`.
+        """
+        self.binding = TrackBoneBinding.build(self, chassis_bones)
+
+    # ------------------------------------------------------------------
+    def build_augmented_control_loop(
+            self,
+            current_bone_positions: Dict[str, np.ndarray],
+            ) -> np.ndarray:
+        """Compose the full per-frame control point loop for the
+        Catmull-Rom pass: original V_locs (driven by their bound
+        chassis bones) PLUS the synthesised bottom-run points
+        spliced between `bottom_run_after_idx` and
+        `bottom_run_before_idx`.
+
+        This is the Phase A3 hook -- each frame the caller supplies
+        a `{bone_name: current_world_position}` dict (typically
+        derived from the chassis pose + per-wheel residual), and
+        gets back an `(M, 3)` array ready to feed straight into
+        `centripetal_catmull_rom_closed()`.
+
+        Args:
+            current_bone_positions: Current chassis-local-frame
+                positions for every bone the binding references.
+                Missing entries fall back to bind-pose offsets
+                (V_loc stays at its bind position).
+
+        Returns:
+            (M, 3) array.  M = len(V_locs) + len(bottom_run_bones)
+            (T30 left = 17 + 9 = 26 control points).  Order:
+            traversal-order around the closed loop, starting at
+            V_loc index 0.
+
+        Phase A2 builds the binding; this method is the explicit
+        bridge to Phase A3 so the runtime never has to know about
+        the bottom-run insertion arithmetic -- it just calls
+        `build_augmented_control_loop(bones)` and feeds the
+        result to the CR.
+        """
+        if self.binding is None:
+            # No binding -- return raw V_locs.  Phase A1 fallback;
+            # produces the bottom-run-less spline through 17
+            # source points.  Useful when the visual_processed
+            # parse failed for some reason.
+            return self.vloc_positions.copy()
+
+        b = self.binding
+        n_v = len(self.vloc_names)
+        bottom_pts: List[np.ndarray] = []
+        for bn, bind_pos in b.bottom_run_bones:
+            cur = current_bone_positions.get(bn)
+            bottom_pts.append(np.asarray(cur, dtype=np.float64)
+                              if cur is not None
+                              else np.asarray(bind_pos, dtype=np.float64))
+
+        # Walk V_loc indices in source order, splicing bottom-run
+        # points after the gap-after index.  Bone-driven V_loc
+        # positions: V_loc.world = bone.world + offset (where
+        # offset was captured at bind time).  Falls back to the
+        # V_loc's bind position when the bone wasn't found in the
+        # current dict.
+        out: List[np.ndarray] = []
+        for i in range(n_v):
+            vname, bn, offset = b.vloc_to_bone[i]
+            if bn:
+                cur = current_bone_positions.get(bn)
+                if cur is not None:
+                    out.append(np.asarray(cur, dtype=np.float64)
+                               + np.asarray(offset, dtype=np.float64))
+                else:
+                    out.append(self.vloc_positions[i].copy())
+            else:
+                out.append(self.vloc_positions[i].copy())
+            # Splice the bottom-run synthesised points right after
+            # the gap-after V_loc.
+            if i == b.bottom_run_after_idx:
+                out.extend(bottom_pts)
+        return np.asarray(out, dtype=np.float64)
 
     # ------------------------------------------------------------------
     def update_vloc_positions(self, positions: np.ndarray) -> None:

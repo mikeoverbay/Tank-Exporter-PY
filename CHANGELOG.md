@@ -9,6 +9,152 @@ available at the time this file was written).
 
 ## 2026-05-08
 
+### Track NURB Phase A3 + B — live deformation overlay (1.105.0)
+
+The spline can now be SEEN.  F8 toggles a per-side closed line
+strip rendered through the resampled track loop on top of the
+live tank.  The overlay deforms in real time as wheels deflect
+over terrain -- bumps push the bottom-run pads up, droops pull
+them down, and the V_loc-driven top run / wraparounds stay
+locked to the chassis pose through the inertia-damped render
+matrix.
+
+Wiring (`viewer.py`):
+
+* New state on Viewer: `self.track_lines` (`LineBatch`),
+  `self._track_left / _track_right` (per-side
+  `TrackSplineSide`), `self._track_chassis_bones_bind` (bind-pose
+  dict captured once at vehicle load),
+  `self._show_track_spline` (persisted to config).
+* Vehicle-load hook (next to the `from_chassis_meshes` call):
+  derives `vehicles/<nation>/<tank>` from the chassis mesh's
+  `primitives_zip`, calls `TrackSplineLoader.from_pkg`,
+  parses the chassis `.visual_processed` for bones via
+  `parse_chassis_bone_world_positions`, attaches per-side
+  `TrackBoneBinding`.  Soft-fails on any error -- the rig
+  should never block a tank load.
+* New helper `_track_current_bone_positions(tp)`: returns a
+  `{name: chassis_local_xyz}` dict that's a copy of the bind
+  dict with `Track_<side><i>` Y values overridden by
+  `tp.smoothed_residual_y[wheel_idx]`.  This is the per-frame
+  mapping from suspension state to spline control points.
+  Wheel-to-track index by name substitution
+  (`W_L0_BlendBone` -> `Track_L0`); the same indexing the
+  GPU skinning shader's bone matrix array uses, so the line-
+  strip overlay shows the SAME deformation as the textured
+  track ribbon.
+* Render block in the post-tank overlay pass: per side, builds
+  the augmented control loop, runs centripetal CR + uniform
+  arc-length resample to 64 pads, transforms chassis-local pad
+  positions to world via `tp.chassis_matrix().T` (column-
+  vector convention -- the docstring there explicitly says
+  `world = chassis_matrix @ vert`, so a batch row-matrix
+  multiply uses the transpose), draws closed line strip via
+  `LineBatch`.  Yellow = LEFT, cyan = RIGHT.
+* `K_F8` keymap added.  Toggling logs "track NURB overlay: on/
+  off" + saves to `_cfg['show_track_spline']` so the state
+  survives a reload.
+
+Soft-fail on any in-loop exception: the first failure logs a
+single warning to the on-screen log and silences subsequent
+attempts via `_track_spline_err_logged`, so a glitchy tank
+doesn't spam the log every frame.
+
+#### `cust_tools/analyze_track_spline.py` (CLI analyser)
+
+New offline-analysis tool that runs the full spline pipeline
+against any tank and prints diagnostics + optional PNG
+side-view plot.  Usage:
+
+```
+python cust_tools/analyze_track_spline.py A14_T30
+python cust_tools/analyze_track_spline.py A14_T30 --plot
+python cust_tools/analyze_track_spline.py A14_T30 \
+        --bump Track_L4 0.10 --bump Track_R4 -0.05 --plot
+```
+
+Reports per side:
+* All V_loc names + chassis-local positions
+* V_loc -> bound bone (with offset)
+* Bottom-run gap detection + chord length
+* Track_L\<i\> bones to splice in
+* Phase A1 spline metrics (V_locs only)
+* Phase A2 spline metrics (augmented w/ Track_L\<i\>)
+* Y range of resampled pads -- quick "does the bottom run
+  reach the ground?" check.
+
+`--bump <bone> <dy>` injects synthetic Y deflections so you
+can verify the spline deforms the right way without needing
+the viewer running.  Repeatable.
+
+`--plot` writes `<basename>_track_spline_analysis.png` -- a
+side-view (YZ projection) showing V_locs (yellow dots),
+augmented control loop (dim yellow/cyan), resampled pad
+loop (bright yellow/cyan), and Y=0 ground reference.
+
+### Track NURB Phase A2 — V_loc -> bone binding map (1.104.0)
+
+Extended `tankExporterPy/track_spline.py` with the bone-binding
+piece of the kinematic-CR pipeline:
+
+* `parse_chassis_bone_world_positions(visual_path)` -- walks a
+  `.visual_processed` node hierarchy and returns
+  `{bone_name: world_xyz}` for every named node, multiplying
+  parent transforms down so positions are chassis-local.
+  Handles BWXML and plain XML.
+* `TrackBoneBinding` -- per-side V_loc -> bone map plus the
+  bottom-run insertion bracket.  Algorithm:
+  1. Filter bones to the requested side
+     (`Track_<side>\d+ | Track_VT_<side>\d+ | Track_VD_<side>\d+
+     | WD_<side>\d+`).
+  2. For each V_loc, nearest bone by 2-D (Y, Z) distance --
+     X is essentially constant on a side (T30 left = -1.480
+     across every track-related bone), so 2-D suffices.
+  3. Detect the bottom-run gap: largest source-order chord
+     between consecutive V_locs (T30: V_loc2 -> V_loc15 at
+     6.76 m; next-largest 0.4 m).
+  4. Order Track_L\<i\> bones by Z for arc-length traversal
+     between the gap V_locs (front-to-rear when the
+     after-gap V_loc Z is smaller than the before-gap V_loc Z).
+* `TrackSplineSide.attach_binding(chassis_bones)` -- attaches a
+  binding built by the above.
+* `TrackSplineSide.build_augmented_control_loop(bones)` --
+  Phase A3's bridge.  Takes a `{bone_name: current_world_pos}`
+  dict and returns the full augmented (V_locs spliced with
+  bottom-run) `(M, 3)` control array ready for CR.
+
+T30 binding result (sanity check):
+
+| V_loc neighbourhood | Bound bone (LEFT side) |
+|---|---|
+| V_loc29..V_loc1 (front wraparound)            | `WD_L9` (front idler) |
+| V_loc2 (front-bottom transition)              | `Track_L8` |
+| V_loc15..V_loc19 (rear wraparound)            | `WD_L0` (rear drive sprocket) |
+| V_loc21..V_loc27 (top run, 7 pts)             | `WD_L1..WD_L7` (return rollers, 1:1 in order) |
+
+Geometric improvement vs Phase A1 (V_locs only) on T30:
+
+| Metric | Phase A1 | Phase A2 |
+|---|---:|---:|
+| Control points         | 17        | 26 |
+| Spline length          | 15.126 m  | **15.510 m** |
+| Residual vs target     | -2.79 %   | **-0.33 %** (8x better) |
+| Pad spacing std        | 0.30 mm   | 0.30 mm |
+| Min pad Y              | +0.366 m  | **-0.038 m** (now reaches ground) |
+
+The Phase A1 -2.79 % residual was originally interpreted in
+the doc as "track slack budget".  Phase A2 made clear that most
+of it was just the missing bottom run -- with the 9 Track_L\<i\>
+bones spliced in, the spline matches the gameplay XML's
+`segmentsCount * segmentLength / 2` target to 5 cm and the pad
+Y minimum reaches -0.038 m (the bottom run now hits the ground
+where the wheels are).  Doc updated.
+
+Phase A3 (per-frame deform in `tank_physics.py` driven by
+suspension residuals + chassis pose) is now mostly bookkeeping
+on top of these primitives -- pull bones, call
+`build_augmented_control_loop`, CR, resample.
+
 ### Track NURB Phase A1 — track_spline.py module (1.103.0)
 
 Promoted the proven Catmull-Rom + arc-length-resample math from

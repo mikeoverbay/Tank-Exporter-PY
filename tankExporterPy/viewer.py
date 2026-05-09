@@ -30,7 +30,7 @@ import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
-                            K_a, K_d, K_s, K_x, K_z, K_F2, K_F3, K_F4,
+                            K_a, K_d, K_s, K_x, K_z, K_F2, K_F3, K_F4, K_F8,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -665,6 +665,29 @@ class Viewer:
         # time + transformed by chassis_pose each frame so the
         # box follows the tank.
         self.hull_box_lines = LineBatch(line_width=1.5)
+        # Track NURB spline overlay (Phase B of TRACK_PHYSICS.md).
+        # Renders the centripetal-CR resampled track loop per
+        # side as line strips so the deformation under wheel
+        # deflection is visible while the tank drives.  Computed
+        # once per frame from current chassis bone positions in
+        # `_compute_track_spline_lines`; rendered alongside the
+        # other physics overlays in the post-tank pass.  Per-side
+        # state + binding live below; toggled by F8 (default on
+        # while the rig is being developed -- flip to False to
+        # silence once visuals land in Phase C).
+        self.track_lines = LineBatch(line_width=1.0)
+        self._track_left = None         # type: Optional[TrackSplineSide]
+        self._track_right = None
+        # Bind-pose chassis-local bone positions, keyed by name.
+        # Snapshot once at load via
+        # `parse_chassis_bone_world_positions` and then mutated
+        # per frame by `_track_current_bone_positions` (only the
+        # Track_L<i> Y values are touched -- everything else
+        # stays at bind, so the snapshot doubles as the
+        # bind-pose dict for the no-op path).
+        self._track_chassis_bones_bind = {}
+        self._show_track_spline = bool(
+            self._cfg.get('show_track_spline', True))
         # Flag set by `handle_input` each tick; checked by
         # `render` to decide whether to draw the crosshair.  Lives
         # on `self` (not a render-time recheck) so we can capture
@@ -3882,6 +3905,77 @@ class Viewer:
                 continue
             print(f"  [{origin}] {tex_zip}")
         print(f"[save-prim] {label}: textures copied={copied} skipped={skipped}")
+
+    # ------------------------------------------------------------------
+    # Track NURB spline -- per-frame chassis-local bone positions.
+    # ------------------------------------------------------------------
+    def _track_current_bone_positions(self, tp):
+        """Return a `{bone_name: chassis_local_xyz}` dict for the
+        current frame, suitable for
+        `TrackSplineSide.build_augmented_control_loop()`.
+
+        Strategy:
+          * Start from the bind-pose dict captured at vehicle
+            load (`self._track_chassis_bones_bind`).  Most chassis
+            bones don't deflect with terrain (`Track_VT_*`,
+            `Track_VD_*`, `WD_*`, `HP_*`, etc.) so they're
+            already correct in chassis-local space.
+          * Override `Track_<side><i>` ground-contact bones with
+            the wheel's vertical residual.  The runtime GPU
+            skinning shader's bone matrix already does this for
+            the visible track ribbon; here we MIRROR that math so
+            the NURB spline overlay shows the SAME deformation
+            pattern as the rendered track segments.
+
+        Wheel -> Track_<side><i> mapping: derived from
+        `tp.wheel_bone_names` by name substitution
+        (`W_L0_BlendBone` -> `Track_L0`).  This works whether the
+        tank has 6 wheels (M60) or 9 (T30); each wheel contributes
+        a Y-residual to its identically-indexed Track bone.
+
+        Args:
+            tp: The active `TankPhysics` instance, post-update so
+                `tp.smoothed_residual_y` reflects the current
+                frame's per-wheel Y deflection.
+
+        Returns:
+            Dict mapping bone names to `np.ndarray((3,))`
+            chassis-local positions.  Same keys as
+            `_track_chassis_bones_bind`; values mutated for the
+            wheel-attached subset.
+        """
+        bind = self._track_chassis_bones_bind
+        if not bind:
+            return {}
+        out = {k: v.copy() for k, v in bind.items()}
+        residuals = getattr(tp, 'smoothed_residual_y', None)
+        names     = getattr(tp, 'wheel_bone_names', None)
+        if residuals is None or not names:
+            return out
+        for i, wn in enumerate(names):
+            if i >= len(residuals):
+                break
+            # 'W_L0_BlendBone' -> 'Track_L0'.  Skip any bone name
+            # that doesn't fit the expected pattern -- safer than
+            # silently corrupting the dict.
+            if not wn.startswith('W_') or '_BlendBone' not in wn:
+                continue
+            track_name = ('Track_'
+                          + wn[len('W_'):].replace('_BlendBone', ''))
+            base = bind.get(track_name)
+            if base is None:
+                continue
+            # Track_L<i> bind sits at ground level (Y ~= 0); the
+            # wheel residual is the suspension delta in chassis-
+            # local Y.  Positive residual = wheel rose (compression
+            # / hit a bump); the track follows the wheel up by the
+            # same amount, so we ADD residual to bind Y.
+            out[track_name] = np.array(
+                [base[0],
+                 base[1] + float(residuals[i]),
+                 base[2]],
+                dtype=np.float64)
+        return out
 
     # ==================================================================
     # Extract / Open / Remove -- res_mods I/O
@@ -8867,6 +8961,82 @@ class Viewer:
                         pass
                 self.tank_physics = TankPhysics.from_chassis_meshes(
                     chass, **_chassis_kwargs)
+
+                # ---- Track NURB spline (Phase A1+A2 wiring) -----
+                # Loaded ONCE per tank.  Resolves the canonical
+                # vehicle pkg path from any chassis mesh's
+                # `primitives_zip` ("vehicles/<nation>/<tank>/normal/
+                # lod0/Chassis.primitives_processed") -> strip the
+                # /normal/.../Chassis.primitives_processed suffix
+                # to get the vehicle base path
+                # (vehicles/<nation>/<tank>) -- THAT's the prefix
+                # `TrackSplineLoader.from_pkg` wants for finding
+                # `track/{left,right}.track`.
+                # Bind to chassis bones via
+                # `parse_chassis_bone_world_positions(visual_path)`
+                # so the per-frame deform pass can pull current
+                # Track_L<i> Y values driven by suspension residuals.
+                # Soft-fails on any error (no .track file, missing
+                # visual_processed, etc.) -- the rig should never
+                # block tank loads on tanks that don't ship a
+                # NURB spline (very old / mod tanks).
+                self._track_left = None
+                self._track_right = None
+                self._track_chassis_bones_bind = {}
+                try:
+                    from .track_spline import (
+                        TrackSplineLoader,
+                        parse_chassis_bone_world_positions,
+                    )
+                    # Find a chassis mesh's pkg path.
+                    vehicle_base = None
+                    chassis_visual_path = None
+                    for _m in chass:
+                        pz = (getattr(_m, 'primitives_zip', '')
+                              or '').replace('\\', '/').lstrip('/')
+                        if pz and pz.lower().startswith('vehicles/'):
+                            # Strip "/normal/lod0/Chassis.prims_proc..."
+                            # back to "vehicles/<nation>/<tank>".
+                            parts = pz.split('/')
+                            if len(parts) >= 6 and parts[0] == 'vehicles':
+                                vehicle_base = '/'.join(parts[:3])
+                                # Companion visual path lives at the
+                                # same /normal/lod0 level as the
+                                # primitives we just split out.
+                                chassis_visual_path = pz.replace(
+                                    '.primitives_processed',
+                                    '.visual_processed')
+                            break
+                    if vehicle_base and self._pkg_extractor is not None:
+                        L, R = TrackSplineLoader.from_pkg(
+                            self._pkg_extractor, vehicle_base)
+                        # Bind only if BOTH sides loaded -- partial
+                        # rigs (one side missing) can happen on
+                        # broken / mod tanks; we'd rather draw
+                        # nothing than half a track.
+                        if L is not None and R is not None:
+                            visual_local = self._pkg_extractor.extract(
+                                chassis_visual_path)
+                            bones = parse_chassis_bone_world_positions(
+                                visual_local) if visual_local else {}
+                            if bones:
+                                L.attach_binding(bones)
+                                R.attach_binding(bones)
+                                self._track_left = L
+                                self._track_right = R
+                                self._track_chassis_bones_bind = bones
+                                print(
+                                    f"[track_spline] {vehicle_base}: "
+                                    f"L={len(L.vloc_names)} V_loc + "
+                                    f"{len(L.binding.bottom_run_bones)} "
+                                    f"Track_L bones, "
+                                    f"R={len(R.vloc_names)} V_loc + "
+                                    f"{len(R.binding.bottom_run_bones)} "
+                                    f"Track_R bones")
+                except Exception as exc:
+                    print(f"[track_spline] load skipped: "
+                          f"{type(exc).__name__}: {exc}")
+
                 # Reset position state on tank reload so old
                 # positions don't carry over.
                 self.tank_physics.pos[:]   = 0.0
@@ -9763,6 +9933,31 @@ class Viewer:
                     # threshold -- locations to inspect on the
                     # map.  Press again mid-run to cancel.
                     self._on_zigzag_test_clicked()
+                elif event.key == K_F8:
+                    # Toggle the track NURB spline overlay.
+                    # Yellow = LEFT loop, cyan = RIGHT loop.
+                    # The line strip deforms as the wheels move:
+                    # bumps push the bottom-run pads up, droops
+                    # pull them down.  Useful while developing
+                    # the kinematic-bone-driven track work in
+                    # docs/TRACK_PHYSICS.md.  Persisted to the
+                    # `show_track_spline` config flag so the
+                    # state survives a tank reload.
+                    self._show_track_spline = not self._show_track_spline
+                    self._cfg['show_track_spline'] = bool(
+                        self._show_track_spline)
+                    try:
+                        _config.save(self._cfg)
+                    except Exception as _ex:
+                        print(f"[viewer] config save "
+                              f"(show_track_spline) failed: {_ex}")
+                    self.log(
+                        f"track NURB overlay: "
+                        f"{'on' if self._show_track_spline else 'off'} "
+                        f"(F8)",
+                        color=((180, 220, 255)
+                               if self._show_track_spline
+                               else (180, 180, 180)))
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
                 elif event.key == K_o:
@@ -11285,6 +11480,101 @@ class Viewer:
             # local enable keeps the markers from going always-on-top.
             glEnable(GL_DEPTH_TEST)
             self.physics_lines.render(self.color_shader, view, proj)
+
+        # ---- Track NURB spline overlay (Phase B) ----------------
+        # Per-side closed line strip through the resampled pad
+        # transforms.  Each frame:
+        #   1. Build current bone positions = bind dict + per-wheel
+        #      Track_L<i> Y deflection from suspension residuals.
+        #   2. Per side: build_augmented_control_loop -> CR ->
+        #      uniform-arc resample to the pad count.  Pad count
+        #      is half of <segmentsCount> from gameplay XML; for
+        #      the overlay we don't need the exact game count -- a
+        #      visually-uniform 64 pads/side keeps the line strip
+        #      smooth without pegging the GPU.
+        #   3. Transform each pad world from chassis-local to
+        #      world via tp.chassis_matrix() (the RENDER pose
+        #      after inertia damping + lateral lean), build line
+        #      segments connecting consecutive pads (with the
+        #      loop closing back from N-1 to 0).
+        # Toggled by `_show_track_spline` (F8 in handle_input).
+        # Not gated by self._debug because the user may want to
+        # see the deformation while playing without the rest of
+        # the debug stars active.
+        if (self._show_track_spline
+                and self.tank_physics is not None
+                and self._track_left is not None
+                and self._track_right is not None):
+            try:
+                tp = self.tank_physics
+                cm = np.asarray(tp.chassis_matrix(), dtype=np.float64)
+                bones = self._track_current_bone_positions(tp)
+                segs = []
+                NURB_PADS = 64
+                # Distinct colours per side so a glance tells you
+                # which track you're looking at while the camera
+                # moves around.  Bright for visibility against the
+                # sand / grass terrain colours.
+                COL_L = (1.0, 0.85, 0.20)   # warm yellow -- LEFT
+                COL_R = (0.30, 0.85, 1.00)  # cyan       -- RIGHT
+                for spline, col in ((self._track_left, COL_L),
+                                     (self._track_right, COL_R)):
+                    ctrl = spline.build_augmented_control_loop(bones)
+                    if len(ctrl) < 4:
+                        continue
+                    # Direct CR + resample.  We don't reuse
+                    # `spline.pad_transforms()` because that path
+                    # caches off the SOURCE V_locs only; the
+                    # augmented loop is per-frame fresh data.
+                    from .track_spline import (
+                        centripetal_catmull_rom_closed,
+                        resample_uniform,
+                    )
+                    dense = centripetal_catmull_rom_closed(
+                        ctrl, samples_per_seg=64, alpha=0.5)
+                    pad_pos, _pad_tan, _total = resample_uniform(
+                        dense, NURB_PADS)
+                    # Chassis-local (M, 3) -> world (M, 3).
+                    # `chassis_matrix()` follows the OpenGL column-
+                    # vector convention (translation in column 3,
+                    # rows 0-2; documented as
+                    # `world = chassis_matrix @ vert`).  For the
+                    # batch transform of a (M, 4) row matrix, the
+                    # equivalent is `pad_h @ chassis_matrix.T` --
+                    # NOT `pad_h @ chassis_matrix` (which would
+                    # silently rotate around the wrong axis and
+                    # offset the spline by the chassis's pos
+                    # vector instead of placing it in world).
+                    pad_h = np.concatenate(
+                        [pad_pos, np.ones((len(pad_pos), 1),
+                                           dtype=np.float64)],
+                        axis=1)
+                    pad_w = pad_h @ cm.T
+                    pad_w = pad_w[:, :3].astype(np.float32)
+                    # Closed line strip via N segments connecting
+                    # i -> i+1 (with i+1 mod N to close back).
+                    for i in range(len(pad_w)):
+                        a = tuple(pad_w[i])
+                        b = tuple(pad_w[(i + 1) % len(pad_w)])
+                        segs.append((a, b, col))
+                if segs:
+                    self.track_lines.update(segs)
+                    glEnable(GL_DEPTH_TEST)
+                    self.track_lines.render(
+                        self.color_shader, view, proj)
+            except Exception as _ex:
+                # Don't kill the frame on a NURB glitch -- log
+                # once + skip future frames until the underlying
+                # cause is gone.  Most likely sources: shape
+                # mismatch in build_augmented_control_loop,
+                # NaN from a degenerate residual.
+                if not getattr(self, '_track_spline_err_logged',
+                                False):
+                    self.log(
+                        f"track-spline overlay error: "
+                        f"{type(_ex).__name__}: {_ex}",
+                        color=(255, 180, 120))
+                    self._track_spline_err_logged = True
 
         # Look-at crosshair: pale-pink lines spanning 10 units along
         # each world axis (X / Y / Z), centred on `camera.center`.

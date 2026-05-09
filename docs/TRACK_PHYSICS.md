@@ -80,22 +80,28 @@ T30 numbers (sanity check):
 
 | Curve | Length | Δ vs 117 × 0.133 |
 |-------|-------:|-----------------:|
-| Chord polyline (V_loc straight lines)        | 15.062 m | -0.499 m (-3.21 %) |
-| Uniform CR (α = 0)                           | 16.558 m | +0.997 m (+6.40 %) |
-| **Centripetal CR (α = 0.5)**                 | **15.126 m** | **-0.435 m (-2.79 %)** |
-| Target = `segmentsCount × segmentLength / 2` | 15.561 m | — |
+| Chord polyline (V_loc straight lines)            | 15.062 m | -0.499 m (-3.21 %) |
+| Uniform CR (α = 0)                               | 16.558 m | +0.997 m (+6.40 %) |
+| Centripetal CR through 17 V_locs only (Phase A1) | 15.126 m | -0.435 m (-2.79 %) |
+| **Centripetal CR through V_locs + Track_L<i> (A2)** | **15.510 m** | **-0.051 m (-0.33 %)** |
+| Target = `segmentsCount × segmentLength / 2`     | 15.561 m | — |
 
-The 2.79 % shortfall is the **track slack budget** — pad rest-
-length sum naturally exceeds the rigid spline path so the track
-can hang loose between the rear roller and the drive sprocket.
-At runtime we either let the top run sag (visually correct) or
-stretch pad pitch to 0.1292 m if we want pads tight on the
-spline.
+The Phase A1 number was originally interpreted as "track slack
+budget"; Phase A2 measurement made clear that most of it was the
+missing bottom-run.  Once the 9 Track_L\<i\> bone positions are
+spliced into the V_loc loop in arc-length order between V_loc2
+and V_loc15, the residual drops 8× and the spline path now
+reaches the ground (pad Y minimum -0.038 m vs Track_L\<i\> bind
+Y = 0, matching to numerical precision).  The remaining 5 cm
+shortfall (-0.33 %) is the actual physical slack — pads can
+hang loose between the rear roller and the drive sprocket
+without bottoming out the spline path.
 
-Resampled-pad spacing on T30 with centripetal CR: mean
-0.1292 m, **std 0.3 mm** across all 117 pads — uniformity is
-essentially machine-precision once the cumulative-arc-length
-table is in.
+Resampled-pad spacing on T30, **Phase A2** (V_locs + Track_L<i>,
+26 control points, 117 pads): mean 0.1325 m, std 0.3 mm —
+uniformity is essentially machine-precision once the cumulative-
+arc-length table is in (and the augmented control loop didn't
+hurt it).
 
 ---
 
@@ -149,15 +155,27 @@ Not in scope yet.
 
 **Phase A — Physics + spline (no visuals).**
 
-1. `TrackSplineLoader` in `loaders.py`: per-side V_loc parse,
-   DX→GL conversion + traversal reversal, cache on the loaded
-   vehicle.
-2. Bone-binding map: walk `.visual_processed` once, build
-   `{V_loc_i → bone_name}` by nearest-neighbour with type
-   preference (`Track_L*` for Y≈0, `Track_VD*` near
-   sprocket/idler centres, `Track_VT*` for top run).
-3. Per-frame deform in `tank_physics.py`: pull each V_loc's bone
-   world position, run centripetal CR, resample
+1. **DONE (1.103.0)** -- `tankExporterPy/track_spline.py` shipped:
+   `parse_track_vlocs`, `to_chassis_frame`, centripetal CR,
+   uniform arc-length resample, `TrackSplineLoader.from_pkg`,
+   `TrackSplineSide`.  T30 smoke test passes.
+2. **DONE (1.104.0)** -- bone-binding map.  Same module gained
+   `parse_chassis_bone_world_positions` (walks .visual_processed
+   for `{name -> world_xyz}`) and `TrackBoneBinding.build` /
+   `TrackSplineSide.attach_binding`.  Algorithm: filter bones to
+   the requested side, V_loc -> nearest bone by 2-D (Y, Z)
+   distance, capture rigid offset.  Bottom-run gap detected as
+   the largest source-order chord (T30: V_loc2 -> V_loc15 at
+   6.76 m); Track_L\<i\> bones ordered by Z for arc-length
+   traversal.  T30 binding result: V_loc29..V_loc1 -> WD_L9
+   (front idler), V_loc15..V_loc19 -> WD_L0 (rear sprocket),
+   V_loc21..V_loc27 -> WD_L1..WD_L7 (return rollers, 1:1 in
+   order).
+3. **TODO** -- per-frame deform in `tank_physics.py`: pull each
+   bone's runtime world position from the chassis pose +
+   wheel-residual integration, build the augmented control loop
+   via `TrackSplineSide.build_augmented_control_loop()` (already
+   shipped in 1.104.0), run centripetal CR, resample
    `segmentsCount/2` pad transforms per side.  Reuses the wheel
    rest-Y already settled by the existing physics.
 
