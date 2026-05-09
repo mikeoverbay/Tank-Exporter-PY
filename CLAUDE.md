@@ -11,6 +11,37 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 
 ---
 
+## Where we left off (handoff 2026-05-08, v1.106.0)
+
+**Active workstream: Track NURB rendering.**  Phases A + B are
+DONE -- the per-side spline runs every frame, deforms with wheel
+suspension residuals, F8 toggles the line-strip overlay, LEFT /
+RIGHT arrows inject manual test deflections (BACKSPACE resets).
+Topology audited (no Z-flip needed).  See `docs/TRACK_PHYSICS.md`
+"Status snapshot at handoff" + "Next session pickup".
+
+**Top of next session's todo: Phase C -- per-pad mesh + instance
+render** to replace the line-strip with actual track segment
+geometry.  Discovery starts at the gameplay XML's
+`<chassis>...<tracks><trackPair>` block; pad meshes likely live at
+`vehicles/<n>/<tank>/normal/lod0/Track*.primitives_processed`.
+Use `cust_tools/analyze_track_spline.py <tank>` to verify the
+binding still works on whatever tank you start with.
+
+Also pending Phase A2 generalisation: binding has only been
+validated on T30; need a sweep across one tank from each major
+nation (T110E4, Object 268, Maus, AMX 50B, plus the WD-only
+Hotchkiss EBR edge case) before declaring it tank-agnostic.
+
+Recent tank-physics work (v1.100.0 -> 1.106.0): two-pose
+solver/render split + inertia damping, per-tank yaw cap from
+`<rotationSpeed>` XML, F3 1-Turn / F4 Zig-Zag automated test
+recordings to `test_runs/`, C-key 3rd-press crash fixed.  See
+`docs/PHYSICS.md` and `CHANGELOG.md` for details -- those
+landed cleanly and are stable.
+
+---
+
 ## Where to look first
 
 **Before any `Grep` over source code, run the doc search:**

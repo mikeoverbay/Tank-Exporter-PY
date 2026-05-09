@@ -171,21 +171,50 @@ Not in scope yet.
    (front idler), V_loc15..V_loc19 -> WD_L0 (rear sprocket),
    V_loc21..V_loc27 -> WD_L1..WD_L7 (return rollers, 1:1 in
    order).
-3. **TODO** -- per-frame deform in `tank_physics.py`: pull each
-   bone's runtime world position from the chassis pose +
-   wheel-residual integration, build the augmented control loop
-   via `TrackSplineSide.build_augmented_control_loop()` (already
-   shipped in 1.104.0), run centripetal CR, resample
-   `segmentsCount/2` pad transforms per side.  Reuses the wheel
-   rest-Y already settled by the existing physics.
+3. **DONE (1.105.0)** -- per-frame deform.  Implemented in
+   `viewer.py` rather than `tank_physics.py` (kept the physics
+   layer untouched; the spline runs in the render pass alongside
+   the other debug overlays).  See Phase B below for the wiring.
 
-**Phase B — Debug visualisation.**
+**Phase B — Debug visualisation.  DONE (1.105.0 + 1.106.0).**
 
-4. NURB debug overlay in `viewer.py` — draws the V_loc dots, the
-   smooth CR polyline, and the resampled pad tangent ticks as
-   3-D line strips.  Toggled from an existing Debug checkbox.
-   Built *before* any pad mesh work — debugging mesh placement
-   without the spline overlay is masochism.
+4. NURB debug overlay in `viewer.py`:
+   * `Viewer.__init__`: `track_lines = LineBatch(line_width=1.0)`,
+     `_track_left / _track_right`, `_track_chassis_bones_bind`,
+     `_show_track_spline` (persisted in cfg).
+   * Vehicle-load hook: derives `vehicles/<nation>/<tank>` from
+     `mesh.primitives_zip`, calls `TrackSplineLoader.from_pkg`,
+     parses chassis bones via
+     `parse_chassis_bone_world_positions`, attaches per-side
+     binding.  Soft-fails with detailed `[track_spline]`
+     console diagnostics on every early-out path.
+   * `_track_current_bone_positions(tp)`: returns
+     `{bone_name: chassis_local_xyz}` -- bind dict copy with
+     `Track_<side><i>` Y values overridden by
+     `(hub_y_local - radius - track_thickness +
+       smoothed_residual_y[wheel_idx] + _track_test_dy)`.  The
+     `hub_y - radius - thickness` lift is the **Y-lift fix**
+     (1.106.0) that put the spline on top of the terrain
+     instead of 5 cm below it.
+   * Render block in the post-tank overlay pass: per side, build
+     augmented control loop, run centripetal CR + uniform
+     resample to 64 pads, transform chassis-local pad positions
+     to world via `chassis_matrix().T` (column-vector
+     convention; `world = chassis_matrix @ vert`), draw closed
+     line strip via `LineBatch`.  Yellow = LEFT, cyan = RIGHT.
+   * **Toggles**:
+     * `F8` -- show / hide overlay.  Persists to cfg.
+     * `RIGHT arrow` (held) -- drop all wheels by 0.5 m/s
+       (droop test).  Adds to a uniform `_track_test_dy` bias
+       on the spline overlay only -- does NOT enter the
+       physics solver.
+     * `LEFT arrow`  (held) -- lift all wheels (compression test).
+     * `BACKSPACE` -- reset bias to 0.
+     * Bias clamped to +- 30 cm; on-screen log shows
+       `track test dy = +-X.XXX m` while held.
+     * The `_show_lookat_lines` flag (look-at crosshair) is
+       raised while either arrow is held so the user has a
+       consistent visual anchor for "is the spline reacting?".
 
 **Phase C — Per-pad meshes + textures.**
 
@@ -218,35 +247,116 @@ Not in scope yet.
 
 ---
 
-## Open probes (do before writing code)
+## Status snapshot at handoff (1.106.0, 2026-05-08)
 
-* Dump the contents of `vehicles/american/A14_T30/normal/lod0/`
-  and any other directories the gameplay-XML `<trackPair>` block
-  points at.  Confirm where per-pad mesh assets actually live.
-* Run the V_loc → nearest-bone mapping on T30 + one Russian +
-  one German tank.  Confirm the binding rule generalises before
-  we bake it into `TrackSplineLoader`.
+| Phase | Status | Where it lives |
+|---|---|---|
+| A1 -- spline math + parsers | DONE 1.103.0 | `tankExporterPy/track_spline.py` |
+| A2 -- V_loc <-> bone binding | DONE 1.104.0 | same module (`TrackBoneBinding`) |
+| A3 -- per-frame deform     | DONE 1.105.0 | `viewer.py` (in render pass; physics layer untouched) |
+| B  -- debug overlay        | DONE 1.105.0 | `viewer.py` -- F8 toggle + LEFT/RIGHT manual deflection |
+| Y-lift correction          | DONE 1.106.0 | `Viewer._track_current_bone_positions` |
+| Topology Z-flip audit      | VERIFIED 1.106.0 | augmented loop is Z-monotone through bottom run; no flip needed |
+| C  -- per-pad mesh + texture | NOT STARTED | next |
+| D  -- park rubber-band ribbon | NOT STARTED | gated behind `RENDER_RUBBER_BAND_TRACK = False` flag still |
+| E  -- FBX export / import   | NOT STARTED | |
+
+The line-strip overlay deforms correctly under wheel residuals
+on T30 in static + driving tests.  Manual deflection bias
+(LEFT/RIGHT arrows, BACKSPACE reset) confirms the bottom run
+moves with `_track_test_dy` across the full +/-30 cm clamp range.
+Topology check via `cust_tools/analyze_track_spline.py` passes
+on T30 (front idler at -Z, rear sprocket at +Z, bottom run
+Z-monotone ascending, no front/back mixup).
+
+## Next session pickup
+
+**Top priority: Phase C -- per-pad mesh + texture.**  We have
+the pad TRANSFORMS (position + tangent) for free already; what's
+missing is the actual pad geometry to instance at each pad.
+
+Concrete first steps:
+
+1. Probe the gameplay XML's `<chassis>...<tracks><trackPair>`
+   block on T30 to find pad mesh references.  Likely fields:
+   `<modelLeft>`, `<modelRight>`, `<segmentLength>`,
+   `<segmentsCount>`, possibly a `<linkLeft>` / `<linkRight>`
+   for two-piece pads.  See `cust_tools/analyze_track_spline.py`
+   for the gameplay-XML-target-length code already pulling
+   `<segmentLength>` and `<segmentsCount>` -- extend that to
+   harvest the model paths.
+2. Where do those model paths point?  Probable target:
+   `vehicles/<n>/<tank>/normal/lod0/Track*.primitives_processed`,
+   but confirm by extracting and listing the contents with
+   `cust_tools/dump_sections.py`.
+3. Loader: register a per-tank pad-mesh table.  Cache in
+   `MeshSet.tank_info['track_pads'] = {'left': [(model, length,
+   count), ...], 'right': [...]}`.
+4. Renderer: instanced draw of pad geometry.  234 instances
+   total (117/side on T30) is well within "submit one draw per
+   side" territory.  Each pad's instance transform =
+   `chassis_matrix @ pad_transform_chassis_local`.  Pad-local
+   orientation: tangent + chassis-up cross product gives the
+   pad's binormal; build a 3x3 orthonormal frame from
+   tangent + binormal + up.
+5. Texture: ride along the pad mesh's `.visual_processed`
+   material section; existing `TextureLoader` path handles it.
+
+**Secondary -- generalisation.**  Phase A2 binding has only
+been validated on T30.  The binding heuristic
+(nearest-neighbour by Y/Z, gap = largest source-order chord,
+Track_L\<i\> sorted by Z) should generalise but verify on at
+least:
+
+* T110E4 (American, 7-wheel)
+* IS-7 / Object 268 (Russian)
+* Maus / E100 (German, 8-wheel)
+* AMX 50B (French autoloader)
+* Hotchkiss EBR (the WD-only edge case noted in PHYSICS.md)
+
+Run `cust_tools/analyze_track_spline.py <tank>` against each;
+the topology-check section flags any non-monotonic bottom run
+or front/back swap.
+
+**Tertiary -- polish.**  None blocking, but on the radar:
+
+* Top-run catenary sag between return rollers (currently the
+  V_locs are at fixed bind position; real tracks droop slightly).
+* Track texture UV scrolling driven by chassis forward speed
+  (the rubber-band ribbon already does this; pad meshes need
+  the same treatment if we want visible movement at ribbon
+  speed).
+* Gameplay XML `<segmentsCount>` parse into
+  `VehicleXMLLoader.parse_info` so the analyzer's
+  `target_per_side` length comparison populates by default.
 
 ---
 
-## Files that will land
+## Reference files
 
 ```
-tankExporterPy/track_spline.py         (new) TrackSplineLoader, centripetal CR
-tankExporterPy/tank_physics.py         per-frame V_loc → resampled pads pass
-tankExporterPy/viewer.py               NURB debug overlay, --legacy-tracks flag
-tankExporterPy/legacy_rubber_track.py  (new) old rubber-band code, parked
-tankExporterPy/loaders.py              <trackPair> pad-pattern parsing extension
+tankExporterPy/track_spline.py         shipped (Phase A1+A2 + augmented loop builder)
+tankExporterPy/viewer.py               shipped (Phase A3+B overlay + manual deflection)
+tankExporterPy/tank_physics.py         untouched -- the spline doesn't enter the physics loop
+tankExporterPy/loaders.py              untouched (chassis-info parse already covers what we use)
+cust_tools/analyze_track_spline.py     CLI analyser; parameter discovery + PNG plot
 ```
 
-The standalone probes that proved this out and produced the
-plots referenced above live at the experiment-tree root and are
-NOT shipped:
+Standalone probes that proved this out (root of experiment
+tree, NOT shipped):
 
 ```
-_plot_t30_track.py    (V_loc + wheels + bend-bone YZ overview)
-_plot_t30_segs.py     (V_loc loop + 117 pads + drive sprocket + idler)
-_plot_t30_smooth.py   (centripetal-CR resample + length / spacing report)
+_plot_t30_track.py    V_loc + wheels + bend-bone YZ overview
+_plot_t30_segs.py     V_loc loop + 117 pads + drive sprocket + idler
+_plot_t30_smooth.py   centripetal-CR resample + length / spacing report
+```
+
+Files that WILL land in Phase C:
+
+```
+tankExporterPy/track_pads.py           (new) pad mesh loader + instance render
+tankExporterPy/legacy_rubber_track.py  (new) old rubber-band code, parked behind --legacy-tracks
+tankExporterPy/loaders.py              <trackPair> pad-pattern + segmentLength parse extension
 ```
 
 ---
