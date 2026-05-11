@@ -8,7 +8,7 @@
   "info_panel_collapsed": false,
   "theme": "TEPY Default",
   "theme_bg": null,
-  "light_value": 0.25,
+  "light_value": 0.169921875,
   "ambient_value": 0.65625,
   "smoke_groups": {
     "gas_small": {
@@ -23,12 +23,12 @@
       "end_size": 0.25,
       "speed": 2.0,
       "fade_start_frame": 30.0,
-      "fade_end_frame": 49.77777777777778
+      "fade_end_frame": 58.785185185185185
     },
     "gas_large": {
-      "start_size": 0.08518518518518518,
+      "start_size": 0.07407407407407407,
       "end_size": 0.7703703703703704,
-      "speed": 3.437037037037037,
+      "speed": 2.1333333333333333,
       "fade_start_frame": 2.3703703703703702,
       "fade_end_frame": 46.45925925925926
     },
@@ -98,5 +98,6 @@
   "normals_per_vertex": false,
   "debug": false,
   "show_terrain": true,
-  "suspension_test": true
+  "suspension_test": true,
+  "show_track_spline": true
 }

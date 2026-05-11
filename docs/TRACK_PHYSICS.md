@@ -33,28 +33,70 @@ spline length, which is the slack budget — not a spring.
 
 ## Coordinate-frame conversion
 
-The `.track` Collada matrices land in the SAME chassis-local
-frame as the chassis-mesh vertices (and the bone hierarchy in
-`.visual_processed`).  At load time we apply only a units
-conversion:
+The `.track` Collada matrices need a **Z-negate + units
+conversion** to match the runtime chassis-local frame (the
+frame `parse_chassis_bone_world_positions` returns):
 
 ```python
-chassis_pos = (raw[0] / 100, raw[1] / 100, raw[2] / 100)   # cm -> m
+chassis_pos = (raw[0] / 100, raw[1] / 100, -raw[2] / 100)   # cm -> m, Z negated
 ```
 
-**No Y flip, no Z flip.**  Verified on T30: raw V_loc Y values
-land in [+0.52, +1.26] with the top run at Y = +1.24 m sitting
-above the W_L<i> wheel hubs at Y = +0.448 m, which is exactly
-the geometric arrangement (track wraps over the top of the
-hull above the wheels).  The chassis is no longer Z-flipped on
-load (`from_chassis_meshes` has used `flip_z = False` since
-v1.93.2), so we don't need to undo a flip we no longer apply.
+`track_spline.to_chassis_frame()` applies this by default
+(`flip_z=True`).
 
-The standalone probes (`_plot_t30_*.py`) negate Y in their
-extraction, but that's a PLOT-axis convention for the side-view
-images — they project to YZ with Y-down as the natural image
-axis.  Don't carry that into the runtime; `track_spline.to_chassis_frame()`
-defaults to `flip_y=False` and warns against opting in.
+### Why the Z-negate (1.111.0+)
+
+Pre-1.111 the conversion left Z unsigned.  The spline LOOKED
+right because the V_loc set is Z-symmetric (front cluster <->
+rear cluster), so a Z-rotated spline still draped correctly
+over the wheels.  But it was actually rotated 180 deg about Y --
+the spline's "rear" was being rendered at the chassis's front,
+and lean-pitch (squat / dive) was applied with the wrong sign
+at each end.  That's the symptom Coffee reported as "spline
+sinks at rear under accel, front under brake".
+
+Verified by the gameplay-XML `<teethSyncs>` data
+(`cust_tools/plot_t30_spline_math.py`):
+
+  * Each drive wheel has a `<startAngle>` + `<teethCount>` in
+    the chassis XML.  Tooth k=0 sits at
+    `(wheel_Y - R*sin(angle), wheel_Z - R*cos(angle))` on the
+    outer track-surface circle.
+  * With Z **unflipped** the worst tooth-to-V_loc match was
+    ~4.7 cm and the assumed front-tangent V_loc landed on the
+    wrong end of the tank.
+  * With Z **negated** the matches drop to **machine
+    precision**: WD_L0 tooth k=2 -> V_loc31 at 0.001 m;
+    WD_L9 tooth k=12 -> V_loc19 at 0.014 m.  Per-tooth angular
+    spacing (24 deg on a 15-tooth wheel) lines up with adjacent
+    V_locs across the entire wraparound -- impossible by
+    coincidence.
+
+The standalone probes (`_plot_t30_*.py`) negate Y for plot-axis
+convention; that's separate from the runtime Z-negate fixed
+here.
+
+### Drive wheels (WD_) and pitch radius
+
+`<wheelGroup><groupRadius>` is the **outer track-surface
+radius**, not the pitch radius.  V_locs and the teethSync tooth
+positions all sit on this outer circle.
+
+If you need the pitch radius (for engineering-correct per-pad
+spacing on the wraparound, e.g. Phase C instanced pad meshes),
+derive it from the inscribed-chord formula on a regular
+N-tooth polygon:
+
+```
+R_pitch = segmentLength / (2 * sin(pi / teethCount))
+```
+
+T30 example: `0.133 / (2 * sin(12 deg)) = 0.3198 m` for both
+drive wheels.  Outer-vs-pitch error: WD_L0 (rear) = 5.9 %
+(19 mm tooth height); WD_L9 (front) = 1.3 % (4 mm).  The 1.3 %
+front isn't an idler -- both ends are drive wheels (per the
+WD_ asset-naming convention); WD_L0 just has more pronounced
+sprocket teeth because it transmits engine torque.
 
 ---
 
@@ -244,6 +286,52 @@ Not in scope yet.
    objects (or a skinned mesh with one bone per pad) so DCC
    tools see a real animatable track.  Round-trippable.
 10. Mirror import.
+
+---
+
+## Investigation tooling (1.107.0)
+
+Coffee reported "oscillating and not settling after spline was
+added" -- visible chassis ringing on uneven terrain that didn't
+exist pre-1.105.  Source-of-truth `tank_physics.py` is
+unchanged between 1.103 and 1.106 (the spline is purely a
+viewer-side render pass), so the suspect chain is:
+
+1. **dt-spike from spline overhead** -- centripetal-CR through
+   17 segments x 64 samples x 2 sides + uniform resample x 64
+   pads runs every frame.  An explicit-Euler integrator over
+   a critically-damped second-order spring (omega_n ~ 14
+   rad/s on the Y axis) is numerically stable up to dt ~
+   143 ms; below that it just damps slower.  But if dt jitter
+   blows past that ceiling, the integrator goes unstable.
+2. **Hysteresis chattering** -- a wheel sitting at
+   `|d - (env_edge +/- HYST)| < 0.005 m` flips CONTACT <->
+   HANGING <-> OVER_COMP every frame, dragging plane fit with
+   it.
+3. **Integrator error not decaying** -- the second-order
+   spring fighting an input that keeps changing under it
+   (e.g. solver target drifting because the contact set
+   keeps changing).
+
+Rather than guess, 1.107 ships a manual recorder that
+captures every signal feeding the loop:
+
+* `F3` toggles a manual recording.  Output is
+  `test_runs/manual_<tank>_<ts>.json` (one frame per render).
+* Per-frame timers (`frame_dt_in`, `physics_update`,
+  `spline_overlay`, etc.) localise dt spikes to specific
+  passes.
+* Per-wheel `hyst_dist_to_flip_m` exposes hysteresis-edge
+  proximity (small sustained values = chattering).
+* Integrator `e_pitch_deg`, `e_roll_deg`, `e_y_m` exposes
+  spring error decay.
+* `state_changes_count` per frame surfaces classifier
+  flip-flopping at the top level for fast triage.
+
+See `docs/PHYSICS.md` "F3 manual recorder" for the full
+field list.  No physics-math changes in this rev -- only
+field assignments (`last_delta_y`, `_last_target_*`,
+`_last_e_*`, `_last_lift_needed_m`) for diagnostic readout.
 
 ---
 

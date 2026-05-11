@@ -11,18 +11,53 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 
 ---
 
-## Where we left off (handoff 2026-05-08, v1.106.0)
+## Where we left off (handoff 2026-05-08, v1.107.0)
 
-**Active workstream: Track NURB rendering.**  Phases A + B are
-DONE -- the per-side spline runs every frame, deforms with wheel
-suspension residuals, F8 toggles the line-strip overlay, LEFT /
-RIGHT arrows inject manual test deflections (BACKSPACE resets).
-Topology audited (no Z-flip needed).  See `docs/TRACK_PHYSICS.md`
-"Status snapshot at handoff" + "Next session pickup".
+**Active investigation: chassis-oscillation diagnostic.**  Coffee
+reported the chassis "oscillates and does not settle" since
+the track NURB overlay was added in 1.105 -- but
+`tank_physics.py` was NOT touched between 1.103 and 1.106, so
+the spline render is the only post-1.103 change.  Hypotheses:
+(1) dt-spike from spline overhead destabilising the explicit-
+Euler integrator, (2) hysteresis-edge wheel chattering,
+(3) integrator error not decaying.  v1.107 ships a manual
+recorder + per-section frame timers to localise the cause:
 
-**Top of next session's todo: Phase C -- per-pad mesh + instance
-render** to replace the line-strip with actual track segment
-geometry.  Discovery starts at the gameplay XML's
+* **F3** is now a manual-record toggle (was 1-Turn).  Press
+  once to start, again to stop and save
+  `test_runs/manual_<tank>_<ts>.json`.  No auto-circle, no
+  time limit, no tank-pose reset.  Drive normally, capture
+  every frame.
+* Per-frame snapshot now exposes `delta_y` (unclamped),
+  `state_changed`, `hyst_dist_to_flip_m` per wheel; integrator
+  error terms `e_pitch_deg / e_roll_deg / e_y_m`,
+  `target_*_with_lean_deg`, `lift_needed_m`; per-section CPU
+  ms in `frame_timers_ms` (`physics_update`, `spline_overlay`,
+  etc.).
+* 1-Turn / Zig-Zag automated tests are unchanged (still on
+  their Tools-group buttons; just no F3 / F4 hotkeys).  All
+  three recorders go through the same
+  `Viewer._build_recorder_frame` helper, so adding fields is
+  a single edit.
+
+See `docs/PHYSICS.md` "F3 manual recorder" + `docs/TRACK_PHYSICS.md`
+"Investigation tooling" for the full field list and the
+diagnostic playbook.
+
+**Track NURB rendering** (the underlying workstream): Phases
+A + B done in 1.106 -- per-side spline runs every frame,
+deforms with wheel suspension residuals, F8 toggles the
+line-strip overlay, LEFT / RIGHT arrows inject manual test
+deflections (BACKSPACE resets).  Topology audited (no Z-flip
+needed).  See `docs/TRACK_PHYSICS.md` "Status snapshot at
+handoff" + "Next session pickup".
+
+**Top of next session's todo: drive a tank around with F3
+recording on, analyse the resulting JSON to localise the
+oscillation cause.**  Once root cause is identified, fix it
+and move on to **Phase C -- per-pad mesh + instance render**
+to replace the line-strip with actual track segment geometry.
+Discovery starts at the gameplay XML's
 `<chassis>...<tracks><trackPair>` block; pad meshes likely live at
 `vehicles/<n>/<tank>/normal/lod0/Track*.primitives_processed`.
 Use `cust_tools/analyze_track_spline.py <tank>` to verify the
@@ -33,10 +68,11 @@ validated on T30; need a sweep across one tank from each major
 nation (T110E4, Object 268, Maus, AMX 50B, plus the WD-only
 Hotchkiss EBR edge case) before declaring it tank-agnostic.
 
-Recent tank-physics work (v1.100.0 -> 1.106.0): two-pose
+Recent tank-physics work (v1.100.0 -> 1.107.0): two-pose
 solver/render split + inertia damping, per-tank yaw cap from
-`<rotationSpeed>` XML, F3 1-Turn / F4 Zig-Zag automated test
-recordings to `test_runs/`, C-key 3rd-press crash fixed.  See
+`<rotationSpeed>` XML, 1-Turn / Zig-Zag automated test
+recordings to `test_runs/`, C-key 3rd-press crash fixed,
+F3 manual recorder + per-section frame timers (1.107).  See
 `docs/PHYSICS.md` and `CHANGELOG.md` for details -- those
 landed cleanly and are stable.
 

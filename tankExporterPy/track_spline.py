@@ -64,96 +64,208 @@ __all__ = [
 # whole file lives in WoT's BWXML container -- caller is expected
 # to have already passed the bytes through `decode_bwxml` (in
 # `tankExporterPy.common`) so the input here is plain text XML.
-_VLOC_RE = re.compile(
-    r'<name>(V_loc\d+)</name>.*?<matrix>([-+\d\.eE\s]+)<',
+#
+# Two naming + encoding conventions appear in the wild:
+#
+#   T30 / higher-tier tanks
+#       <name>V_loc0</name> ... <matrix>16 floats row-major</matrix>
+#
+#   M3 Stuart / older tanks (per Coffee 2026-05-09)
+#       <name>Track_VD_L0_loc1</name> ... <position>x y z</position>
+#       (also seen with <name>...someName_loc<N>...</name>)
+#
+# Both forms describe a control point on the closed track loop.
+# The parser below matches EITHER convention -- the inner
+# matched-text scanner picks up <matrix> if present, else
+# <position>, and synthesises an identity-rotation 4x4 with the
+# position triple in the translation column.
+_VLOC_NAME_RE = re.compile(
+    r'<name>([^<]*?_loc\d+|V_loc\d+)</name>([^<]*<[^<]*</[^<]*>)*?'
+    r'\s*(?:<matrix>([-+\d\.eE\s]+)</matrix>'
+    r'|<position>([-+\d\.eE\s]+)</position>)',
     re.DOTALL,
 )
 
 
 def parse_track_vlocs(text: str) -> List[Tuple[str, np.ndarray]]:
-    """Parse V_loc nodes out of a `.track` Collada-flavoured XML
-    string.
+    """Parse track-spline anchor nodes out of a `.track` Collada-
+    flavoured XML string.
+
+    Tolerates both transform encodings the WoT pipeline ships:
+        * `<matrix>` -- 16 floats, row-major 4x4 (T30 style)
+        * `<position>` -- 3 floats; rotation is treated as identity
+          (M3 Stuart style; rotation isn't used downstream anyway,
+          only the translation column).
+
+    Tolerates both naming conventions:
+        * `V_loc<N>` (T30, higher-tier)
+        * `<anything>_loc<N>` (M3 Stuart `Track_VD_L0_loc1`, etc.)
 
     Args:
         text: The XML text content of `vehicles/<n>/<tank>/track/
             {left,right}.track` after BWXML decoding.
 
     Returns:
-        List of `(name, matrix4x4)` pairs in the order they appear
-        in the file.  Each matrix is a numpy float64 (4, 4) array
-        in **row-major** layout (matches the file's `<matrix>` row
-        order).  Translation lives at `M[0, 3]`, `M[1, 3]`,
-        `M[2, 3]`.
+        List of `(name, matrix4x4)` pairs in source order.  Each
+        matrix is a numpy float64 (4, 4) row-major array.
+        Translation lives at `M[0, 3]`, `M[1, 3]`, `M[2, 3]`.
 
         Units are **centimetres** in WoT's DirectX-handed frame.
         Apply `to_chassis_frame()` to convert into the runtime
         chassis-local metre frame.
     """
     out: List[Tuple[str, np.ndarray]] = []
-    for m in _VLOC_RE.finditer(text):
-        nums = [float(x) for x in m.group(2).split()][:16]
-        if len(nums) < 16:
+    # Per Coffee 2026-05-09 ("seg spacing was touched.. why?"):
+    # only `V_loc<N>` named nodes are real spline control points.
+    # Both T30 and M3 Stuart ship `Track_<...>_loc<N>` auxiliary
+    # nodes alongside but those are NOT part of the closed loop
+    # (T30's pre-1.115.42 spline used 17 `V_loc<N>` anchors and
+    # filled the bottom run via the chassis `Track_<L|R>i` bone
+    # splice in `build_augmented_control_loop`; M3 Stuart works
+    # the same way -- 7 top-run `V_loc<N>` anchors + 5 chassis
+    # bottom-run bones).
+    name_re     = re.compile(r'<name>([^<]+)</name>', re.DOTALL)
+    matrix_re   = re.compile(r'<matrix>([-+\d\.eE\s]+)<', re.DOTALL)
+    position_re = re.compile(r'<position>([-+\d\.eE\s]+)<', re.DOTALL)
+    name_pattern = re.compile(r'^V_loc\d+$')
+    for m in name_re.finditer(text):
+        nm = m.group(1).strip()
+        if not name_pattern.match(nm):
             continue
-        M = np.asarray(nums, dtype=np.float64).reshape((4, 4))
-        out.append((m.group(1), M))
+        # Scan window from this <name> up to the next <name>
+        # for either a <matrix> (T30) or <position> (M3 Stuart).
+        next_name = name_re.search(text, m.end())
+        end_pos = next_name.start() if next_name else len(text)
+        window = text[m.end():end_pos]
+        M = None
+        mm = matrix_re.search(window)
+        if mm:
+            nums = [float(x) for x in mm.group(1).split()][:16]
+            if len(nums) >= 16:
+                M = np.asarray(nums, dtype=np.float64).reshape((4, 4))
+        if M is None:
+            pm = position_re.search(window)
+            if pm:
+                nums = [float(x) for x in pm.group(1).split()][:3]
+                if len(nums) >= 3:
+                    # Identity rotation, position in translation
+                    # column.  Downstream code only reads the
+                    # translation; rotation is unused.
+                    M = np.eye(4, dtype=np.float64)
+                    M[0, 3] = nums[0]
+                    M[1, 3] = nums[1]
+                    M[2, 3] = nums[2]
+        if M is None:
+            continue
+        out.append((nm, M))
     return out
 
 
 def to_chassis_frame(vlocs_dx_cm: Iterable[Tuple[str, np.ndarray]],
                      *,
                      flip_y: bool = False,
+                     flip_z: bool = False,
+                     unit_scale: float = 0.01,
                      ) -> List[Tuple[str, np.ndarray]]:
-    """Convert raw V_loc cm coords to the runtime chassis-local
+    """Convert raw V_loc coords to the runtime chassis-local
     metre frame.
 
-    Default conversion (matches what the runtime chassis bones
-    expect):
+    `unit_scale` is the multiplier from raw values to metres.
+    Default 0.01 matches T30's `<unit><meter>0.010000</meter>
+    <name>centimeter</name></unit>` declaration.  Older /
+    lower-tier tanks (M3 Stuart, etc.) ship .track files
+    WITHOUT a `<unit>` tag and store positions already in
+    metres -- pass `unit_scale=1.0` for those.  The caller
+    (typically `TrackSplineLoader.from_pkg`) detects the unit
+    from the .track file's `<unit><meter>...</meter></unit>`
+    tag.
+
+    Default conversion (matches the chassis-bone frame from
+    `parse_chassis_bone_world_positions`, verified 2026-05-08
+    against the gameplay-XML `<teethSyncs>` data):
 
         x_chassis = x_raw / 100
         y_chassis = y_raw / 100
-        z_chassis = z_raw / 100
+        z_chassis = -z_raw / 100        <- NEGATED by default
 
-    Verified on T30: raw V_loc Y values land in [+0.52 m,
-    +1.26 m].  The runtime W_L<i> wheel hubs sit at Y = +0.448 m,
-    chassis-vertex frame, and the V_loc top run at Y = +1.24 m
-    sits ABOVE the wheels (top of the hull, where the actual
-    return-rolled track surface should be).  No Y flip is needed
-    because the chassis is no longer Z-flipped on load and its
-    vertex frame is the SAME frame the .track file authored its
-    V_loc matrices in (CLAUDE.md "Skinned bone-byte" note;
-    `from_chassis_meshes` flip_z = False since v1.93.2).
+    Why the Z-negate
+    ----------------
+    Pre-1.111: the conversion left Z unsigned, on the (untested)
+    assumption that the .track file's frame was the same as the
+    chassis-bone frame.  The spline LOOKED right because the
+    V_loc set is Z-symmetric (front cluster <-> rear cluster),
+    so a Z-flipped spline still drapes correctly over the wheels
+    on a tank with Z-symmetric WD_L0 / WD_L9 spacing.
 
-    The standalone probes (`_plot_t30_*.py`) flip Y because they
-    project to a YZ side-view image where Y-down is the natural
-    image axis.  That's a PLOT convention, not a runtime one;
-    don't propagate it here.
+    Verified wrong by the teethSync-anchor experiment
+    (`cust_tools/plot_t30_spline_math.py`):
+
+      * For each drive wheel the gameplay XML carries
+        `<startAngle>` + `<teethCount>`.  Tooth k=0 sits at
+        `(wheel_Y - R*sin(angle), wheel_Z - R*cos(angle))` on the
+        outer track-surface circle.
+      * With Z UNFLIPPED the worst tooth-to-V_loc match is
+        ~4.7 cm and the assumed front-tangent V_loc lands on the
+        wrong end of the tank.
+      * With Z NEGATED the matches drop to **machine precision**
+        (WD_L0 tooth k=2 -> V_loc31 at 0.001 m; WD_L9 tooth k=12
+        -> V_loc19 at 0.014 m).  Per-tooth angular spacing
+        (24 deg on a 15-tooth wheel) lines up with adjacent V_locs
+        across the entire wraparound -- impossible by coincidence.
+
+    Side effect of the original sign error: the spline's "rear"
+    end was being rendered at the chassis's front, so the
+    inertia-lean pitch was applied with the WRONG sign at each
+    end -- which is the symptom that made Coffee report
+    "spline sinks at rear under accel, front under brake".
+    Squat lifts the rear; with the spline rotated 180 deg, that
+    rear-lift was being drawn as a sink at what looked like the
+    rear.
 
     Args:
         vlocs_dx_cm: Output of `parse_track_vlocs()` -- iterable
-            of `(name, 4x4 matrix in cm chassis-aligned frame)`.
-        flip_y: If True, negate Y at conversion time.  Kept as a
-            kwarg only so future tooling that genuinely wants the
-            probe's plot frame can opt in.  Runtime callers should
-            leave the default `False`.
+            of `(name, 4x4 matrix in cm)`.
+        flip_y: If True, negate Y at conversion.  Kept for the
+            standalone probe plots that project YZ with Y-down
+            as the natural image axis.  Runtime callers leave
+            the default False.
+        flip_z: If True (default), negate Z at conversion.
+            Required for the runtime; opt out only when feeding
+            the standalone-probe scripts that pre-date the fix.
 
     Returns:
-        List of `(name, position xyz in m)` tuples.  Only the
-        translation row of each input matrix is consumed; the
-        rotation block is intentionally dropped because the V_loc
-        nodes carry only a position role in the kinematic-CR
-        pipeline (the per-pad orientation is reconstructed from
-        the resampled-curve TANGENT, not from the V_loc rotation).
+        List of `(name, position xyz in m)` tuples.
     """
     sy = -1.0 if flip_y else +1.0
+    sz = -1.0 if flip_z else +1.0
+    s  = float(unit_scale)
     out: List[Tuple[str, np.ndarray]] = []
     for name, M in vlocs_dx_cm:
         p = np.asarray([
-            float(M[0, 3]) / 100.0,
-            sy * float(M[1, 3]) / 100.0,
-            float(M[2, 3]) / 100.0,
+            float(M[0, 3]) * s,
+            sy * float(M[1, 3]) * s,
+            sz * float(M[2, 3]) * s,
         ], dtype=np.float64)
         out.append((name, p))
     return out
+
+
+def detect_unit_scale(track_text: str) -> float:
+    """Return the multiplier that converts raw .track values to
+    metres.  Reads `<unit><meter>VALUE</meter>...</unit>` if
+    present (T30 / high-tier convention; VALUE = 0.01 for
+    centimeters).  Returns 1.0 when the tag is missing
+    (M3 Stuart and other older tanks ship positions already in
+    metres).
+    """
+    m = re.search(r'<unit>.*?<meter>\s*([-+\d\.eE]+)\s*</meter>',
+                  track_text, re.DOTALL)
+    if not m:
+        return 1.0
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return 1.0
 
 
 # ----------------------------------------------------------------------
@@ -205,7 +317,18 @@ def centripetal_catmull_rom_closed(P: np.ndarray,
     if n < 2:
         return P.copy()
 
-    out: List[np.ndarray] = []
+    # Vectorised inner loop -- the per-sample `for k in range(S)`
+    # body in earlier versions dispatched 6 tiny numpy ops on
+    # 3-vectors per sample, dominated by interpreter overhead.
+    # Microbenchmark on T30-shape control loop (26 ctrl x 64
+    # samples) was 17.7 ms / call; vectorised version below is
+    # ~0.4 ms.  Same Barry-Goldman pyramid form, just lifted to
+    # broadcast across `samples_per_seg` per segment.
+    S = int(samples_per_seg)
+    if S < 1:
+        return P.copy()
+    ks = np.arange(S, dtype=np.float64) / float(S)
+    out_segments: List[np.ndarray] = []
     for i in range(n):
         p0 = P[(i - 1) % n]
         p1 = P[i]
@@ -217,24 +340,41 @@ def centripetal_catmull_rom_closed(P: np.ndarray,
         t2 = t1 + float(np.linalg.norm(p2 - p1)) ** alpha
         t3 = t2 + float(np.linalg.norm(p3 - p2)) ** alpha
         # Degenerate run (two coincident control points) -> skip
-        # this segment entirely.  Better to lose 256 samples than
-        # divide-by-zero.
+        # this segment entirely.  Better to lose `samples_per_seg`
+        # samples than divide-by-zero.
         if t1 == t0 or t2 == t1 or t3 == t2:
             continue
-        # Sample [t1, t2) at samples_per_seg uniform-in-u steps.
-        # Endpoint-exclusive so the next segment's first sample is
-        # exactly P[i+1] without a duplicate.
-        for k in range(samples_per_seg):
-            u = t1 + (t2 - t1) * (k / samples_per_seg)
-            # Barry-Goldman pyramid form of CR.
-            A1 = (t1 - u) / (t1 - t0) * p0 + (u - t0) / (t1 - t0) * p1
-            A2 = (t2 - u) / (t2 - t1) * p1 + (u - t1) / (t2 - t1) * p2
-            A3 = (t3 - u) / (t3 - t2) * p2 + (u - t2) / (t3 - t2) * p3
-            B1 = (t2 - u) / (t2 - t0) * A1 + (u - t0) / (t2 - t0) * A2
-            B2 = (t3 - u) / (t3 - t1) * A2 + (u - t1) / (t3 - t1) * A3
-            C  = (t2 - u) / (t2 - t1) * B1 + (u - t1) / (t2 - t1) * B2
-            out.append(C)
-    return np.asarray(out, dtype=np.float64)
+        # Sample [t1, t2) at S uniform-in-u steps.  Endpoint-exclusive
+        # so the next segment's first sample is exactly P[i+1] without
+        # a duplicate.  All weights computed as (S,) vectors then
+        # broadcast against the (dim,) control points to give (S, dim)
+        # interpolated stages.
+        us = t1 + (t2 - t1) * ks                     # (S,)
+        # Pre-compute per-stage weight pairs once.
+        w_a1_p0 = (t1 - us) / (t1 - t0)
+        w_a1_p1 = (us - t0) / (t1 - t0)
+        w_a2_p1 = (t2 - us) / (t2 - t1)
+        w_a2_p2 = (us - t1) / (t2 - t1)
+        w_a3_p2 = (t3 - us) / (t3 - t2)
+        w_a3_p3 = (us - t2) / (t3 - t2)
+        w_b1_a1 = (t2 - us) / (t2 - t0)
+        w_b1_a2 = (us - t0) / (t2 - t0)
+        w_b2_a2 = (t3 - us) / (t3 - t1)
+        w_b2_a3 = (us - t1) / (t3 - t1)
+        w_c_b1  = (t2 - us) / (t2 - t1)
+        w_c_b2  = (us - t1) / (t2 - t1)
+        # Broadcast every weight (S,) against the control points
+        # (dim,) -- result (S, dim).
+        A1 = w_a1_p0[:, None] * p0 + w_a1_p1[:, None] * p1
+        A2 = w_a2_p1[:, None] * p1 + w_a2_p2[:, None] * p2
+        A3 = w_a3_p2[:, None] * p2 + w_a3_p3[:, None] * p3
+        B1 = w_b1_a1[:, None] * A1 + w_b1_a2[:, None] * A2
+        B2 = w_b2_a2[:, None] * A2 + w_b2_a3[:, None] * A3
+        C  = w_c_b1[:, None]  * B1 + w_c_b2[:, None]  * B2
+        out_segments.append(C)
+    if not out_segments:
+        return np.zeros((0, P.shape[1]), dtype=np.float64)
+    return np.concatenate(out_segments, axis=0)
 
 
 def resample_uniform(dense: np.ndarray,
@@ -288,28 +428,60 @@ def resample_uniform(dense: np.ndarray,
     # duplicate the index-0 sample.
     targets = np.linspace(0.0, total, n_pads, endpoint=False)
 
-    pad_pos = np.empty((n_pads, dense.shape[1]), dtype=np.float64)
-    pad_tan = np.empty((n_pads, dense.shape[1]), dtype=np.float64)
-    for i, s in enumerate(targets):
-        # Locate segment index j with cum[j] <= s < cum[j+1].
-        j = int(np.searchsorted(cum, s, side='right') - 1)
-        j = max(0, min(j, M - 1))
-        seg_len = cum[j + 1] - cum[j]
-        t = (s - cum[j]) / seg_len if seg_len > 0 else 0.0
-        a = dense[j]
-        b = dense[(j + 1) % M]
-        pad_pos[i] = a + (b - a) * t
-        # Tangent = unit forward chord.  For typical track loops
-        # adjacent dense samples are 3-4 mm apart so the chord
-        # tangent is essentially the analytical tangent.
-        chord = b - a
-        nrm = float(np.linalg.norm(chord))
-        if nrm > 0:
-            pad_tan[i] = chord / nrm
-        else:
-            # Degenerate -- copy previous tangent or unit-X.
-            pad_tan[i] = (pad_tan[i - 1] if i > 0
-                          else np.eye(1, dense.shape[1])[0])
+    # Vectorised lookup + interpolation.  np.searchsorted is
+    # vectorised; the inner Python loop in earlier versions did
+    # the same searchsorted + slice + norm per pad and the
+    # numpy-on-3-vector overhead dominated.  All operations below
+    # are (n_pads,) or (n_pads, dim) shaped.
+    js = np.searchsorted(cum, targets, side='right') - 1
+    js = np.clip(js, 0, M - 1)
+    seg_len = cum[js + 1] - cum[js]
+    # Where seg_len == 0 (coincident dense samples), fall through
+    # to t=0 -- produces an exact copy of dense[j], matching the
+    # original behaviour.
+    safe = seg_len > 0
+    ts = np.zeros_like(seg_len)
+    ts[safe] = (targets[safe] - cum[js[safe]]) / seg_len[safe]
+
+    a = dense[js]
+    b = dense[(js + 1) % M]
+    pad_pos = a + (b - a) * ts[:, None]
+
+    # Central-difference tangent per Coffee 2026-05-10 ("last
+    # or first link rotation is wrong").  Was forward chord
+    # `b - a` (= dense[(js+1) % M] - dense[js]) which collapses
+    # to near-zero on closed loops where the dense sample
+    # immediately AFTER the closure happens to be coincident
+    # with the sample BEFORE the closure (within float noise).
+    # On those tanks the closure pad's chord normalised to
+    # garbage, the fallback below copied the previous tangent,
+    # and the rendered link at that one slot ended up rotated
+    # backwards.
+    #
+    # Central diff is `dense[(js+1) % M] - dense[(js-1) % M]`
+    # -- both endpoints are real spline samples, never zero
+    # length in practice, and gives the same direction the
+    # forward chord would on every well-conditioned segment.
+    # The closure pad picks up a clean tangent equal to the
+    # average of its incoming + outgoing chord direction.
+    prev_dense = dense[(js - 1) % M]
+    next_dense = dense[(js + 1) % M]
+    chord = next_dense - prev_dense
+    chord_nrm = np.linalg.norm(chord, axis=1)
+    pad_tan = np.zeros_like(chord)
+    valid = chord_nrm > 0
+    pad_tan[valid] = chord[valid] / chord_nrm[valid, None]
+    if not valid.all():
+        # Forward-fill degenerate rows from the previous valid
+        # tangent; if the very first row is degenerate use unit-X
+        # (matches the original `np.eye(1, dim)[0]`).
+        last = np.zeros(dense.shape[1], dtype=np.float64)
+        last[0] = 1.0
+        for i in range(n_pads):
+            if valid[i]:
+                last = pad_tan[i]
+            else:
+                pad_tan[i] = last
     return pad_pos, pad_tan, total
 
 
@@ -494,6 +666,26 @@ class TrackBoneBinding:
         self.bottom_run_after_idx = int(bottom_run_after_idx)
         self.bottom_run_before_idx = int(bottom_run_before_idx)
         self.bottom_run_bones = list(bottom_run_bones)
+        # Resolved end-wheel handles per Coffee 2026-05-09 ("the
+        # first and last of the W_ are end wheels").  Available
+        # without re-deriving from indices: the first / last entry
+        # in `bottom_run_bones` after Z-sort.  Useful when later
+        # code wants explicit "this Track_<side>i is the rear end
+        # wheel for this side" rather than re-running the index
+        # arithmetic.  Both handles are name-only; positions
+        # follow `bottom_run_bones[0/-1][1]`.
+        if bottom_run_bones:
+            # `bottom_run_bones[0]` is whichever Z-end the binding
+            # walks first (= side of `bottom_run_after_idx`); the
+            # other end is `[-1]`.  We don't try to label "rear"
+            # vs "front" here because that flips with V_loc
+            # traversal direction -- the runtime that cares which
+            # is which can compare Z against `vloc_positions`.
+            self.first_end_bone = str(bottom_run_bones[0][0])
+            self.last_end_bone  = str(bottom_run_bones[-1][0])
+        else:
+            self.first_end_bone = ''
+            self.last_end_bone  = ''
 
     # ------------------------------------------------------------------
     @classmethod
@@ -699,6 +891,8 @@ class TrackSplineSide:
     def build_augmented_control_loop(
             self,
             current_bone_positions: Dict[str, np.ndarray],
+            *,
+            wheel_radius: Optional[float] = None,
             ) -> np.ndarray:
         """Compose the full per-frame control point loop for the
         Catmull-Rom pass: original V_locs (driven by their bound
@@ -717,12 +911,26 @@ class TrackSplineSide:
                 positions for every bone the binding references.
                 Missing entries fall back to bind-pose offsets
                 (V_loc stays at its bind position).
+            wheel_radius: If not None, inject a wheel-wrap tangent
+                anchor at the rearmost AND frontmost bottom-run
+                bones, on their wheels' circumferences at 90 deg
+                from the ground contact (i.e. directly behind /
+                ahead of the wheel hub at hub-height).  This forces
+                the centripetal CR to enter / leave each end road
+                wheel **tangent to its circle**, so the pads at
+                Track_<side>0 / Track_<side>(N-1) sit flat on the
+                ground instead of ramping up at the steep V_loc
+                wraparound chord.  Per Coffee 2026-05-09: "you are
+                not including the tangent for the first and last
+                load bearing wheels."
 
         Returns:
             (M, 3) array.  M = len(V_locs) + len(bottom_run_bones)
-            (T30 left = 17 + 9 = 26 control points).  Order:
-            traversal-order around the closed loop, starting at
-            V_loc index 0.
+            ( + 2 if wheel_radius is provided and bottom-run is
+            non-empty).  T30 left without wrap = 17 + 9 = 26
+            control points; with wrap = 28.  Order: traversal-
+            order around the closed loop, starting at V_loc index
+            0.
 
         Phase A2 builds the binding; this method is the explicit
         bridge to Phase A3 so the runtime never has to know about
@@ -746,6 +954,95 @@ class TrackSplineSide:
                               if cur is not None
                               else np.asarray(bind_pos, dtype=np.float64))
 
+        # Build optional wheel-wrap tangent anchors for the first
+        # and last bottom-run bones.  See the docstring `wheel_radius`
+        # arg for the rationale.  Geometry: the wheel hub sits
+        # `wheel_radius` Y above each Track_<side>i ground bone.
+        # The anchor goes on the wheel circle at the 9 o'clock /
+        # 3 o'clock position relative to the hub -- i.e. shifted
+        # `+R` in Y AND `+/-R` in the OUTWARD chassis-local Z
+        # direction (whichever way points away from the bottom
+        # run at that end).  This places one extra control point
+        # such that the CR tangent at the end Track_<side>i bone
+        # is parallel to the bottom-run direction (= horizontal
+        # under bind), so the rendered pad sits flat on the
+        # ground at the wheel contact instead of inheriting the
+        # steep chord-tangent from the V_loc-above wraparound.
+        wrap_first: Optional[np.ndarray] = None
+        wrap_last: Optional[np.ndarray] = None
+        first_ground_idx = -1
+        last_ground_idx = -1
+        if (wheel_radius is not None
+                and wheel_radius > 0.0
+                and len(bottom_pts) >= 2):
+            R = float(wheel_radius)
+            # Per Coffee 2026-05-09 ("it isn't part of the spline,
+            # it is a clamp to stop the spline from bending in to
+            # the front wheel.. it need to be at the next point
+            # so it anchors the front idler wheel"): some chassis
+            # author an extra Track_<side>i bone as an anti-
+            # collision CLAMP above the front wheel (T30: front
+            # clamp at Y=+0.261).  That bone STAYS in the spline
+            # control list -- removing it would let the CR dive
+            # into the wheel -- but it must NOT be the source
+            # for the wheel-wrap tangent anchor.  Walk inward
+            # from each end past any non-ground (Y > tol) clamp
+            # bones; the FIRST true-ground bone found from each
+            # end is the source for that end's wrap anchor.
+            GROUND_Y_TOL = 0.10
+            n_bp = len(bottom_pts)
+            for i in range(n_bp):
+                if abs(float(bottom_pts[i][1])) < GROUND_Y_TOL:
+                    first_ground_idx = i
+                    break
+            for i in range(n_bp - 1, -1, -1):
+                if abs(float(bottom_pts[i][1])) < GROUND_Y_TOL:
+                    last_ground_idx = i
+                    break
+
+            # First-end anchor: based at bottom_pts[first_ground_idx].
+            # Outward direction = sign of chord-to-next-inward
+            # ground bone, so the anchor pushes AWAY from the
+            # bottom-run interior (toward whatever clamps + V_loc
+            # come before).
+            if (first_ground_idx >= 0
+                    and first_ground_idx + 1 < n_bp):
+                src = bottom_pts[first_ground_idx]
+                nxt = bottom_pts[first_ground_idx + 1]
+                dz = float(src[2] - nxt[2])
+                sign = 1.0 if dz >= 0.0 else -1.0
+                wrap_first = np.array(
+                    [src[0], src[1] + R, src[2] + sign * R],
+                    dtype=np.float64)
+
+            # Last-end anchor: based at bottom_pts[last_ground_idx].
+            if (last_ground_idx > 0
+                    and last_ground_idx < n_bp):
+                src = bottom_pts[last_ground_idx]
+                prv = bottom_pts[last_ground_idx - 1]
+                dz = float(src[2] - prv[2])
+                sign = 1.0 if dz >= 0.0 else -1.0
+                wrap_last = np.array(
+                    [src[0], src[1] + R, src[2] + sign * R],
+                    dtype=np.float64)
+
+        # Build the bottom-run sub-sequence with wheel-wrap anchors
+        # placed BETWEEN any clamp bones and the first / last
+        # actual ground bone:
+        #   [clamp..., wrap_first, ground_first, ..., ground_last,
+        #    wrap_last, clamp...]
+        # When there are no clamps the wrap anchors land at the
+        # very ends, identical to the pre-clamp-aware behaviour.
+        bottom_seq: List[np.ndarray] = []
+        for i, pt in enumerate(bottom_pts):
+            if (wrap_first is not None
+                    and i == first_ground_idx):
+                bottom_seq.append(wrap_first)
+            bottom_seq.append(pt)
+            if (wrap_last is not None
+                    and i == last_ground_idx):
+                bottom_seq.append(wrap_last)
+
         # Walk V_loc indices in source order, splicing bottom-run
         # points after the gap-after index.  Bone-driven V_loc
         # positions: V_loc.world = bone.world + offset (where
@@ -764,10 +1061,10 @@ class TrackSplineSide:
                     out.append(self.vloc_positions[i].copy())
             else:
                 out.append(self.vloc_positions[i].copy())
-            # Splice the bottom-run synthesised points right after
-            # the gap-after V_loc.
+            # Splice the bottom-run sub-sequence (with anchors
+            # already in place) right after the gap-after V_loc.
             if i == b.bottom_run_after_idx:
-                out.extend(bottom_pts)
+                out.extend(bottom_seq)
         return np.asarray(out, dtype=np.float64)
 
     # ------------------------------------------------------------------
@@ -892,7 +1189,29 @@ class TrackSplineLoader:
             vlocs_dx = parse_track_vlocs(text)
             if not vlocs_dx:
                 return None
-            vlocs = to_chassis_frame(vlocs_dx)
+            unit_scale = detect_unit_scale(text)
+            # Z-flip heuristic per Coffee 2026-05-09 ("t-30 is
+            # ok.. m3 stuart flipped"):
+            #
+            # T30-style .track files declare `<unit>` and ship
+            # `<matrix>` transforms in centimeters.  Positions in
+            # the translation column already match chassis-local
+            # Z (verified at machine precision against teethSync
+            # anchors); no flip needed.
+            #
+            # M3 Stuart-style .track files OMIT `<unit>` and ship
+            # `<position>` triples in metres (no rotation).  Those
+            # positions are authored in a frame mirrored along Z
+            # relative to chassis-local, so they need flipping to
+            # come out the right way around.  Detected here by
+            # `unit_scale != 0.01`: T30 = 0.01 (cm declared), M3
+            # Stuart = 1.0 (no tag).  If a future tank ships
+            # matrices but no unit tag, this rule will mis-flag
+            # it -- in that case promote to a per-tank flag.
+            needs_z_flip = (abs(unit_scale - 0.01) > 1e-9)
+            vlocs = to_chassis_frame(
+                vlocs_dx, unit_scale=unit_scale,
+                flip_z=needs_z_flip)
             return TrackSplineSide(
                 vlocs, side=side_name,
                 alpha=alpha, samples_per_seg=samples_per_seg)

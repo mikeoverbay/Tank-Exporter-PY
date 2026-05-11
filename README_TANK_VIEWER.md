@@ -77,22 +77,25 @@ python tankExporterPy.py "C:\path\A14_T30.xml"
 
 | Input | Action |
 |-------|--------|
-| **Right-click drag** | Orbit camera |
-| **Middle-click drag** | Pan camera |
+| **Left-click drag** | Orbit camera (yaw / pitch) |
+| **Right-click drag** | Pan on the XZ ground plane |
+| **Right-click + Shift drag** | Lift / drop the look-at point (Y) |
+| **Middle-click** | Show look-at crosshair (no movement) |
 | **Scroll wheel** | Zoom in / out (or scroll the tree when the cursor is over it) |
 | **Left-click (tree)** | Expand a nation, or open the load dialog for a tank |
 | **F2** | Toggle wireframe |
+| **F3** | Manual recorder toggle — start / stop a per-frame physics + timer capture to `test_runs/manual_<tank>_<ts>.json` (no auto-circle, no time limit) |
+| **F8** | Toggle the track NURB spline overlay (yellow = LEFT, cyan = RIGHT) |
 | **N** | Toggle normal map |
 | **R** | Reset camera to fit the loaded mesh |
 | **C** | Cycle camera mode: orbit / driver-side chase / commander-POV |
 | **H** | Toggle wheel-state highlight (red contact / green hanging; gated by Debug) |
 | **O** | Toggle auto-circle drive (steady arc at current speed step) |
-| **W / S** | Drive forward (hold) |
-| **Z / X** | Drive backward (hold) |
+| **W** | Drive forward (hold) |
+| **S** | Drive backward (hold) |
 | **A / D** | Turn the chassis left (CCW) / right (CW) |
 | **Q / E** | Legacy yaw aliases (same effect as A / D) |
 | **0..9** | Speed step: `0` = stopped, `1` = per-tank max kph from gameplay XML, `9` = creep (0.5 kph) |
-| **Shift + drag** | Lift / drop the look-at point |
 | **ESC** | Quit |
 
 (F1 is reserved for the help overlay.)

@@ -2887,31 +2887,219 @@ class VehicleXMLLoader:
                 'terrainResistance', 'repairTime',
             })
 
+            # ---- Track-pair pad pattern (track NURB spline input) -
+            # The numbers we need live in TWO different spots in
+            # the chassis XML:
+            #
+            #   <splineDesc><trackPair><segmentLength>0.133  -- pad
+            #       chord pitch (m).  Authoritative pad spacing
+            #       per Coffee 2026-05-08 (don't derive from R).
+            #
+            #   <physicalTracks><left><segmentsCount>234     -- pad
+            #       count around the WHOLE closed loop (= both
+            #       sides).  Pads-per-side = segmentsCount / 2.
+            #
+            # Used by the F8 spline overlay to render at the
+            # gameplay-XML pad count instead of any hardcoded
+            # constant.  Best-effort -- mod tanks that ship a
+            # non-standard chassis XML may omit either field; the
+            # render path skips the overlay when segmentsCount is
+            # missing rather than guessing.
+            for tp_el in best_chassis.iter('trackPair'):
+                sl = tp_el.findtext('segmentLength')
+                if sl:
+                    try:
+                        info['chassis']['segmentLength'] = float(sl.strip())
+                        break
+                    except ValueError:
+                        pass
+            # segmentsCount lives under <physicalTracks><left>
+            # (or <right>; they're identical).  Iterate all
+            # descendants in case the artist nested it differently.
+            for sc_el in best_chassis.iter('segmentsCount'):
+                if sc_el.text:
+                    try:
+                        info['chassis']['segmentsCount'] = int(
+                            sc_el.text.strip())
+                        break
+                    except ValueError:
+                        pass
+
+            # ---- physicalTracks.springsLength (sag budget) -------
+            # Per-region MAX SLACK the track ribbon can bow in,
+            # in metres.  Two motion variants (forwardMovement,
+            # backwardMovement) carry slightly different values
+            # because track tension shifts depending on direction
+            # of travel.  We keep both for completeness; the
+            # render path averages them when both are present.
+            #
+            # Used by `Viewer._track_current_bone_positions` to
+            # clamp wheel-residual sag at the bottom run -- a
+            # wheel that droops by 6 cm shouldn't drag the track
+            # spline 6 cm down; the track can only sag by
+            # `bottom` metres (about 1.9 cm on T30).  The wheel
+            # itself can still travel its full envelope; just
+            # the SPLINE doesn't follow it past its slack budget.
+            #
+            # Other regions (top / front / back) are parsed for
+            # future use (top-run catenary sag between rollers,
+            # etc.) but the current renderer only consumes
+            # `bottom`.
+            spring_lengths = {}
+            for sl_el in best_chassis.iter('springsLength'):
+                # Use the FIRST `springsLength` block we find.
+                for direction_tag in ('forwardMovement',
+                                       'backwardMovement'):
+                    dir_el = sl_el.find(direction_tag)
+                    if dir_el is None:
+                        continue
+                    bucket = {}
+                    for region in ('back', 'top', 'front', 'bottom'):
+                        text = dir_el.findtext(region)
+                        if text:
+                            try:
+                                bucket[region] = float(text.strip())
+                            except ValueError:
+                                pass
+                    if bucket:
+                        spring_lengths[direction_tag] = bucket
+                if spring_lengths:
+                    break
+            if spring_lengths:
+                info['chassis']['springsLength'] = spring_lengths
+                # Convenience scalar -- bottom-run sag (the only
+                # value the renderer currently uses).  Average of
+                # forward / backward when both present.  Falls
+                # back to whichever side does have a value.
+                fb = spring_lengths.get(
+                    'forwardMovement', {}).get('bottom')
+                bb = spring_lengths.get(
+                    'backwardMovement', {}).get('bottom')
+                vals = [v for v in (fb, bb) if v is not None]
+                if vals:
+                    info['chassis']['track_spring_bottom'] = (
+                        sum(vals) / len(vals))
+
+            # ---- Track-pad mesh references (Phase C input) -------
+            # `<splineDesc><trackPair>` carries up to six `.model`
+            # refs per side.  Pad patterns:
+            #   * single-piece (most rigs): segmentModelLeft / Right.
+            #   * shoe + connector (T30 with duckbills):
+            #     segmentModel + segment2Model.
+            #   * inter-pad link (some heavy tanks):
+            #     linkLeft / linkRight.
+            # These are BigWorld-packed `.model` files; the existing
+            # mesh-load chain in loaders.py / viewer.py resolves a
+            # .model to its sibling .primitives_processed +
+            # .visual_processed, so the runtime can later spawn a
+            # Mesh per ref and instance-render it at each spline
+            # pad transform (Phase C; not wired yet).
+            #
+            # Stored as a dict so a missing pattern (single-piece
+            # tanks won't have segment2*) doesn't fail downstream
+            # consumers -- they iterate over what's present.
+            #
+            # `segmentOffset` / `segment2Offset` (per-pattern
+            # along-the-spline offset, used to align the connector
+            # vs the shoe on alternating-pattern rigs) are pulled
+            # alongside.  Float metres.
+            track_models = {}
+            for tp_el in best_chassis.iter('trackPair'):
+                for key in ('segmentModelLeft', 'segmentModelRight',
+                            'segment2ModelLeft', 'segment2ModelRight',
+                            'linkLeft', 'linkRight'):
+                    txt = tp_el.findtext(key)
+                    if txt and key not in track_models:
+                        track_models[key] = txt.strip()
+                for key in ('segmentOffset', 'segment2Offset'):
+                    txt = tp_el.findtext(key)
+                    if txt and key not in track_models:
+                        try:
+                            track_models[key] = float(txt.strip())
+                        except ValueError:
+                            pass
+                # Keep iterating across LOD trackPair blocks until
+                # we've collected at least one segmentModel.  Some
+                # tanks declare the path only on the highest-LOD
+                # block.
+                if 'segmentModelLeft' in track_models:
+                    break
+            if track_models:
+                info['chassis']['track_segment_models'] = track_models
+
             # ---- Suspension envelope (TankPhysics input) -------
-            # `<groundNodes>` carries one or more `<group>` blocks
-            # with `<minOffset>` / `<maxOffset>` per group.  In
-            # practice every tank uses the SAME envelope across
-            # left / right groups, so we just grab the first
-            # group's values and treat them as the chassis-wide
-            # envelope.  groundNodes is nested deep inside
-            # `<tracks><trackPair><trackDebris><physicalParams>`
-            # on most tanks, hence the descendant-search.
+            # `<groundNodes>` carries one or more `<group>` blocks,
+            # each with its own `<template>`/`<startIndex>`/`<count>`
+            # +`<minOffset>` / `<maxOffset>`.  A tank can ship per-
+            # group envelopes (Stuart's L vs R differ by 0.1 mm in
+            # minOffset; T30 splits Track_L0..L7 from Track_L8 into
+            # separate groups so the auxiliary tensioner's envelope
+            # COULD be different even though it currently isn't).
+            #
+            # Per Coffee 2026-05-10 ("yes" to per-wheel envelopes):
+            # we parse every group, expand each to its bone names,
+            # and build a `ground_node_envelopes` dict:
+            #     bone_name -> (min_offset, max_offset).
+            # Consumers that only want a single chassis-wide value
+            # still get `info['chassis']['minOffset']` / `maxOffset`
+            # set to the first group's values (backwards compat;
+            # spline-overlay clamp + TankPhysics keep working).
+            #
+            # groundNodes is usually nested deep inside
+            # `<tracks><trackPair><trackDebris><physicalParams>`,
+            # hence the descendant search.
             gn_el = best_chassis.find('.//groundNodes')
             if gn_el is not None:
-                first_group = gn_el.find('group')
-                if first_group is not None:
-                    mn = first_group.findtext('minOffset')
-                    mx = first_group.findtext('maxOffset')
+                envelopes = {}
+                first_min = None
+                first_max = None
+                for g in gn_el.findall('group'):
+                    template = (g.findtext('template') or '').strip()
+                    if not template:
+                        continue
+                    is_left = ((g.findtext('isLeft') or '')
+                               .strip().lower() == 'true')
+                    side = 'L' if is_left else 'R'
                     try:
-                        if mn:
-                            info['chassis']['minOffset'] = float(mn.strip())
+                        count = int((g.findtext('count')
+                                      or '0').strip())
                     except ValueError:
-                        pass
+                        count = 0
+                    si_t = (g.findtext('startIndex') or '').strip()
                     try:
-                        if mx:
-                            info['chassis']['maxOffset'] = float(mx.strip())
+                        start_idx = int(si_t) if si_t else 0
                     except ValueError:
-                        pass
+                        start_idx = 0
+                    mn_t = g.findtext('minOffset')
+                    mx_t = g.findtext('maxOffset')
+                    try:
+                        mn = float((mn_t or '0').strip())
+                    except ValueError:
+                        mn = None
+                    try:
+                        mx = float((mx_t or '0').strip())
+                    except ValueError:
+                        mx = None
+                    if mn is None or mx is None:
+                        continue
+                    # Capture FIRST group's values for the
+                    # chassis-wide back-compat keys.
+                    if first_min is None:
+                        first_min = mn
+                        first_max = mx
+                    # Expand template to per-bone names with
+                    # the same Track_L<i> convention used by
+                    # `wheel_roles['ground_bones_*']`.
+                    for i in range(count):
+                        bone = f'{template}{start_idx + i}'
+                        envelopes[bone] = (mn, mx)
+                if envelopes:
+                    info['chassis']['ground_node_envelopes'] = (
+                        envelopes)
+                if first_min is not None:
+                    info['chassis']['minOffset'] = first_min
+                if first_max is not None:
+                    info['chassis']['maxOffset'] = first_max
 
             # ---- Main road wheel radius (TankPhysics input) ----
             # `<wheelGroups>` has one block per "kind of wheel"
@@ -2927,6 +3115,15 @@ class VehicleXMLLoader:
             if wg_el is not None:
                 best_radius = None
                 best_count  = -1
+                # Per Coffee 2026-05-09 ("bands between the end
+                # WD wheels and the closest W_"): also store a
+                # per-wheel-name radius dict so the spline
+                # stretch-net can constrain pads against
+                # sprocket / idler at THEIR actual radii (the
+                # WD_ wheels are larger than the road wheel).
+                # Key = bone name as authored ('WD_L0_BlendBone',
+                # etc.), value = group radius in metres.
+                wheel_radii: dict = {}
                 for wg in wg_el.findall('wheelGroup'):
                     names = [n.text.strip() for n in wg.findall('wheelName')
                              if n.text]
@@ -2939,6 +3136,8 @@ class VehicleXMLLoader:
                         rad = None
                     if rad is None:
                         continue
+                    for nm in names:
+                        wheel_radii[nm] = rad
                     # Prefer groups whose names look like W_<L|R><i>.
                     is_road = all(re.match(r'^W_[LR]\d+$', n) for n in names)
                     score   = (len(names) * 2) if is_road else len(names)
@@ -2947,6 +3146,112 @@ class VehicleXMLLoader:
                         best_radius = rad
                 if best_radius is not None:
                     info['chassis']['groupRadius_road'] = best_radius
+                if wheel_radii:
+                    info['chassis']['wheel_radii'] = wheel_radii
+
+            # ---- Wheel roles (XML-driven; replaces heuristics) -
+            # Per Coffee 2026-05-09 ("is there nothing to tell us
+            # in the xml files for the tank?  yes please"): the
+            # gameplay XML's `<wheels>` block names every wheel's
+            # ROLE explicitly.  No more sort-by-Z + Y-band hacks.
+            #
+            # Five categories, each per side L/R:
+            #   * drive_sprockets : `<wheel><isLeading>true</...`
+            #   * idlers          : lone `<wheel>` (no isLeading)
+            #   * road_wheels     : `<group><template>W_<side>`
+            #                        expanded to W_<side>0..N-1
+            #   * return_rollers  : `<group><template>WD_<side>`
+            #                        expanded with <startIndex>
+            #   * ground_bones    : `<groundNodes><group><template>
+            #                        Track_<side>` expanded
+            #
+            # Stored as a dict keyed by category, each side as a
+            # list of bone names.  Empty lists mean "this chassis
+            # didn't author that role" -- callers should handle
+            # gracefully (e.g. M3 Stuart has 0 idlers under this
+            # rule because W_L4 is a single non-leading wheel
+            # which IS the idler; we treat any single non-leading
+            # `<wheel>` as the idler).
+            roles = {
+                'drive_sprockets_L': [], 'drive_sprockets_R': [],
+                'idlers_L':          [], 'idlers_R':          [],
+                'road_wheels_L':     [], 'road_wheels_R':     [],
+                'return_rollers_L':  [], 'return_rollers_R':  [],
+                'ground_bones_L':    [], 'ground_bones_R':    [],
+            }
+            wheels_el = best_chassis.find('.//wheels')
+            if wheels_el is not None:
+                # Singular <wheel> entries: drive sprocket if
+                # <isLeading>true</isLeading>, idler otherwise.
+                for w in wheels_el.findall('wheel'):
+                    nm = (w.findtext('name') or '').strip()
+                    if not nm:
+                        continue
+                    is_left = (w.findtext('isLeft') or '').strip(
+                                ).lower() == 'true'
+                    is_lead = (w.findtext('isLeading') or '').strip(
+                                ).lower() == 'true'
+                    side = 'L' if is_left else 'R'
+                    if is_lead:
+                        roles[f'drive_sprockets_{side}'].append(nm)
+                    else:
+                        roles[f'idlers_{side}'].append(nm)
+                # <group> entries: arrays of wheels expanded by
+                # template + count + optional startIndex.
+                for g in wheels_el.findall('group'):
+                    template = (g.findtext('template') or '').strip()
+                    if not template:
+                        continue
+                    is_left = (g.findtext('isLeft') or '').strip(
+                                ).lower() == 'true'
+                    side = 'L' if is_left else 'R'
+                    try:
+                        count = int((g.findtext('count') or '0').strip())
+                    except ValueError:
+                        count = 0
+                    si_t = (g.findtext('startIndex') or '').strip()
+                    try:
+                        start_idx = int(si_t) if si_t else 0
+                    except ValueError:
+                        start_idx = 0
+                    expanded = [f'{template}{start_idx + i}'
+                                for i in range(count)]
+                    # Heuristic to bucket the group: WD_-prefixed
+                    # template = return rollers; W_-prefixed =
+                    # road wheels.  (Drive sprockets / idlers are
+                    # always declared via singular <wheel> tags.)
+                    if template.startswith('WD_'):
+                        roles[f'return_rollers_{side}'].extend(
+                            expanded)
+                    elif template.startswith('W_'):
+                        roles[f'road_wheels_{side}'].extend(expanded)
+            # Ground bones from <groundNodes>.  Format is the same
+            # template + count expansion as the <wheels><group>
+            # blocks.  Used to drive suspension physics.
+            gn_el2 = best_chassis.find('.//groundNodes')
+            if gn_el2 is not None:
+                for g in gn_el2.findall('group'):
+                    template = (g.findtext('template') or '').strip()
+                    if not template:
+                        continue
+                    is_left = (g.findtext('isLeft') or '').strip(
+                                ).lower() == 'true'
+                    side = 'L' if is_left else 'R'
+                    try:
+                        count = int((g.findtext('count') or '0').strip())
+                    except ValueError:
+                        count = 0
+                    si_t = (g.findtext('startIndex') or '').strip()
+                    try:
+                        start_idx = int(si_t) if si_t else 0
+                    except ValueError:
+                        start_idx = 0
+                    expanded = [f'{template}{start_idx + i}'
+                                for i in range(count)]
+                    roles[f'ground_bones_{side}'].extend(expanded)
+            # Always store the dict, even when partially empty,
+            # so consumers can rely on the keys being present.
+            info['chassis']['wheel_roles'] = roles
 
             # ---- Track thickness (TankPhysics input) -----------
             # Two source fields, in order of preference:

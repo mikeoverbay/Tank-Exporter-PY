@@ -32,6 +32,31 @@ tankExporterPy/
                         (IQ technique), sand-diffuse texture loader
                         (mip-chain + 16x anisotropic), tiled detail-
                         displacement layer
+    track_pads.py       Track-pad mesh load (Phase C step 2 of the
+                        track-physics roadmap).  `TrackPadMesh` parses
+                        a `.primitives_processed` for one segment-shoe
+                        / segment2-connector / link mesh, bakes
+                        positions + indices + a flat per-vertex tint
+                        into a `_make_pos_color_vao` VAO, and exposes
+                        `render(color_shader, model, view, proj)` for
+                        a single-instance debug draw.  No PBR, no
+                        textures, no skinning -- just enough to prove
+                        the load chain works.  Step-3 instanced
+                        renderer with a per-pad transform attrib +
+                        proper pad shader replaces this.
+    recorder.py         F3 manual recorder + 1-Turn auto-test snapshot
+                        helpers.  `build_recorder_frame(viewer, ...)`
+                        is the shared per-frame snapshot used by every
+                        recorder kind; the rest is `start / capture /
+                        finalize / save_json` per kind.  Module-level
+                        functions take the active Viewer as their first
+                        arg and read / write `_turn_test_*` /
+                        `_manual_record_*` fields on it.  Viewer keeps
+                        thin `_*` forwarder methods so existing call
+                        sites (button handlers, render hooks, the
+                        zigzag step which delegates back to
+                        `_build_recorder_frame`) don't change.  Split
+                        out of viewer.py in 1.113.0.
     tank_physics.py     Per-wheel-on-terrain rigid-body suspension.
                         Auto-extracts wheel rigs from any tank's chassis
                         bones (`from_chassis_meshes`); classifies each

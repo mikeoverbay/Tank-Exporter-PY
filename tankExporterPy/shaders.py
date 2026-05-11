@@ -378,6 +378,46 @@ class ParticleShader:
         glUniform1f(glGetUniformLocation(self.program, name), value)
 
 
+class PadShader:
+    """Instanced track-pad shader (Phase C step 3 of the
+    track-physics roadmap).
+
+    Source: shaders/pad.vert + shaders/pad.frag.  The vert reads
+    a per-instance mat4 transform from attribute locations 9..12
+    (a mat4 split across 4 vec4 attributes; locations 5/6 stay
+    free for the existing `iii` / `ww` skin attribs even though
+    pads don't skin).
+
+    Uniforms:
+        u_chassis_pose : mat4 -- the tank's render-pose chassis
+                         matrix.  Same matrix the standard mesh
+                         shader's `model` is built from at the
+                         tank-load-applied bind level.  Fed once
+                         per frame.
+        u_view, u_proj : standard view/proj.
+        u_color        : vec4 -- flat tint applied per-pad.
+                         Commit 1 keeps this constant; later
+                         commits will sample diffuse / normal
+                         maps and replace this knob.
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/pad.vert')
+        fs = load_shader_file('shaders/pad.frag')
+        self.program = _compile_program(vs, fs, 'Pad shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, m):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, m)
+
+    def set_vec4(self, name, r, g, b, a):
+        glUniform4f(glGetUniformLocation(self.program, name),
+                    r, g, b, a)
+
+
 class UIShader:
     """2D shader for menu bar: solid color or sampled text texture."""
 

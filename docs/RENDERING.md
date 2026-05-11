@@ -159,6 +159,33 @@ Initial window 1024×576 (banner aspect 1672×941).
 * **FPS counter**: rolling average maintained in `_frame_dt`,
   surfaced via the bottom panel.
 
+### Per-section frame timers (`Viewer._frame_timers`, 1.107.0+)
+
+`render()` clears `self._frame_timers = {}` at the top of every
+frame and populates per-section CPU wall-clock costs (in ms)
+inline using `time.perf_counter()` deltas.  Sections currently
+timed:
+
+| Key | Wraps |
+|-----|-------|
+| `frame_dt_in` | `dt` actually passed to `tank_physics.update()` (post 1ms clamp) |
+| `physics_update` | `tank_physics.update()` |
+| `mesh_pose_apply` | per-mesh `model_matrix = chassis_pose @ bind` loop |
+| `emitters` | `_update_emitters_for_chassis_pose` |
+| `picker_pass` | `picker.update_pass` (offscreen FBO render) |
+| `skybox` | `skybox.render` |
+| `terrain` | `terrain.render` |
+| `spline_overlay` | F8 NURB control loop + CR + line strip |
+| `ui` | `ui.render` (2-D overlay) |
+| `frame_total` | full CPU-side `render()` cost before `pygame.display.flip()` |
+
+The F3 manual recorder (`docs/PHYSICS.md` "F3 manual recorder")
+copies this dict into every captured frame as `frame_timers_ms`,
+so an offline pass can localise dt-spike causes to specific
+sections.  Inline timing is cheap (a few `perf_counter()` calls
+amount to ~hundreds of ns total) and runs unconditionally --
+no toggle needed.
+
 ---
 
 ## When in doubt about a render pass

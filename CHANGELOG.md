@@ -7,7 +7,420 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-09
+
+### Recorder split out of viewer.py (1.113.0)
+
+`viewer.py` crossed 13.4k lines in 1.112; the recorder block
+(F3 manual + 1-Turn snapshot/capture/finalize/save_json) was
+~880 self-contained lines that don't touch GL state.  Moved
+to a new module:
+
+    tankExporterPy/recorder.py   628 lines
+
+Module-level functions take the active `Viewer` as their first
+arg and read / write the same `_turn_test_*` / `_manual_record_*`
+fields the methods used to operate on -- mechanical extraction,
+no behaviour change.
+
+`Viewer` keeps thin `_*` forwarder methods so every existing
+call site (button handlers, render hooks, the zigzag step which
+delegates back to `_build_recorder_frame`) is untouched.
+
+Net: viewer.py 13360 -> 12535 (-825 lines).  Smoke-tested:
+
+  * 9 forwarder methods on Viewer all resolve.
+  * 9 module functions in recorder all resolve.
+  * `recorder.build_recorder_frame(viewer, ...)` and
+    `viewer._build_recorder_frame(...)` produce frame dicts
+    with identical keys (41 top-level + 10 wheels on T30).
+
+The zigzag recorder still lives on `Viewer` -- its
+finite-state-machine over driving phases tangles deeply with
+the drive code and earns its own follow-up extraction (next
+candidates per Coffee 2026-05-09: hud.py for status overlay /
+mini-map / contact-trail FIFO; track_spline_overlay.py for
+the F8 render block).
+
+`ARCHITECTURE.md` File Map updated.
+
+---
+
 ## 2026-05-08
+
+### Spline Z-flip fix verified by `<teethSyncs>` engine data (1.111.0)
+
+Coffee asked me to verify the spline / wheel alignment by
+generating the engine-XML tooth positions and comparing them
+to V_loc positions.  Confirmed a real bug: V_locs were being
+loaded **Z-unflipped** but the chassis-bone frame is
+**Z-negated** relative to the .track file's authored frame.
+
+Symptom: spline appeared to drape correctly because the V_loc
+set is Z-symmetric (front <-> rear cluster), but the whole
+spline was rotated 180 deg about Y.  Lean-pitch (squat under
+accel / dive under brake) was being drawn with the wrong sign
+at each end -- "spline sinks at rear under accel, front under
+brake".
+
+Verification (`cust_tools/plot_t30_spline_math.py`):
+
+  * For each drive wheel (WD_L0 rear, WD_L9 front), tooth k=0
+    sits at `(wheel_Y - R*sin(startAngle), wheel_Z -
+    R*cos(startAngle))` on the outer track surface.
+  * Z UNFLIPPED: best-match d = 4.7 cm; first-tangent V_loc
+    on the wrong end of the tank.
+  * Z NEGATED:  WD_L0 tooth k=2 -> V_loc31 at **1 mm**, WD_L9
+    tooth k=12 -> V_loc19 at **14 mm**.  All 15 teeth align
+    with adjacent V_locs at 24-deg spacing.  Machine-precision
+    match -- impossible by chance.
+
+Fix in `track_spline.to_chassis_frame()`: `flip_z=True` is now
+the default.
+
+Side observations from the math:
+
+  * WD_ = "Wheel Drive" (asset-naming).  Both end wheels are
+    drive wheels.  CLAUDE.md's "lowest idx = drive sprocket,
+    highest = idler" was loose -- on T30 WD_L0 has 5.9 %
+    tooth height, WD_L9 has 1.3 % (sprocket-vs-near-flush
+    front guide), but both engage teeth.
+  * Middle WD_L1..WD_L7 are return rollers (R=0.19 m, sit at
+    Y=+1.05 under the top run).
+  * `<wheelGroup><groupRadius>` is the outer track-surface
+    radius, NOT the pitch radius.  Pitch radius (for engin-
+    eering-correct per-pad spacing) =
+    `segmentLength / (2 * sin(pi / teethCount))`.  T30 = 0.320 m
+    for both drive wheels.  Difference vs outer = tooth height.
+
+Three verification PNGs saved to `<root>/math_images/`:
+
+  * `T30_spline_zflip_compare.png`     -- before / after side-by-side
+  * `T30_drive_wheel_teeth_zoom.png`   -- per-wheel tooth + V_loc overlay
+  * `T30_wrap_test_all_wheels.png`     -- all 18 LEFT wheels with circles
+
+Also extended `to_chassis_frame()` with a `flip_z` kwarg so
+the standalone probe scripts (`_plot_t30_*.py`) that were
+written against the pre-fix convention can opt out
+(`flip_z=False`).
+
+`docs/TRACK_PHYSICS.md` "Coordinate-frame conversion" section
+rewritten to reflect the verified convention.
+
+### Spline pad count from gameplay XML, no hardcoded fallback (1.110.1)
+
+Per Coffee 2026-05-08: "no hardcoded spline descriptors; get
+it from the visual or tank def."  The two `NURB_PADS = 64`
+sites in `viewer.py` are gone.  Replaced with
+`Viewer._resolve_pads_per_side()` which reads
+`segmentsCount` from the gameplay XML (parsed by
+`VehicleXMLLoader.parse_info` into
+`info['chassis']['segmentsCount']`) and returns
+`segmentsCount // 2`.
+
+Plumbing:
+
+* `VehicleXMLLoader.parse_info` now pulls `<segmentLength>`
+  and `<segmentsCount>` out of `<tracks><trackPair>` and
+  stashes them on `info['chassis']`.  Best-effort: missing
+  fields don't fail the parse.
+* `Viewer._resolve_pads_per_side()` returns `segmentsCount //
+  2` from the active tank's chassis info (sanity-bounded to
+  [4, 500] per side -- anything outside that is a malformed
+  XML).  Returns 0 when the XML didn't supply a count.
+* The rigid-pad cache builder + the spline render block both
+  call `_resolve_pads_per_side()` and skip rendering when it
+  returns 0 -- no hardcoded fallback.  Mod tanks that ship a
+  non-standard chassis XML simply won't render the F8 spline
+  overlay; the rest of the viewer is unaffected.
+
+T30 supplies `<segmentsCount>234</segmentsCount>` so it now
+renders at 117 pads / side.  The `[track_spline]` print at
+load time will surface the resolved value.
+
+### Spline golden-rule clamp + status overlay + mini-map + stable recording filename (1.110.0)
+
+Big batch of UX + correctness work driven by Coffee's "golden
+rules" list 2026-05-08.
+
+#### Spline golden-rule clamp (rules 1-3)
+
+> 1. Spline can NEVER sink below terrain.
+> 2. Spline can only sag to wheel max-hang length.
+> 3. Spline can NEVER go above max-retract height.
+
+Symptom: spline sank into terrain at the rear under accel
+(squat) and at the front under brake (dive).  The lean-pitch
+target during longitudinal-G transients hits ~9 deg, which
+when applied as a chassis_render rotation around chassis-local
+origin pulls the bottom-run pads at chassis-local Z = +/- 2.6 m
+through the ground by ~10-25 cm.
+
+Fix in the spline render block: at tank load, cache a rigid
+(no-residual) per-pad chassis-local position set by running
+the augmented control loop + CR + resample with the BIND bone
+dict (one CR pass per side, ~2 ms once).  Each frame the
+deflected pads are computed as before (~3 ms), but their
+WORLD Y is then clamped:
+
+* Lower bound = max(terrain_y_at_pad_xz, rigid_world_y + ext_cap)
+* Upper bound = rigid_world_y + comp_cap
+
+`ext_cap` (negative) and `comp_cap` (positive) come from the
+suspension envelope on the active TankPhysics instance.
+Terrain-Y lookup is `Terrain.sample_heights(xs, zs)`, called
+once per side with the full pad xz array.
+
+Per-side terrain-Y lookup time published into `_frame_timers`
+as `terrain_y_lookup_spline` so the F3 recorder picks it up.
+
+#### Status overlay -- Heading / XYZ / Speed (per frame)
+
+Three-line live readout in the upper-left, drawn every frame
+under the existing physics-timer line:
+
+    Heading:   123.4 deg
+    XYZ:    +12.34   +0.45   -7.89
+    Speed:   +5.67 m/s  ( +20.4 kph)
+
+Heading = `tp.yaw_deg mod 360`, [0, 360).  XYZ = `tp.pos`.
+Speed = `tp.cur_forward_mps` (the ACTUAL drive-layer ramped
+speed, NOT the speed-step selector value, per Coffee's
+"current speed not selected speed" instruction).
+
+Cached by formatted text -- rebuilds on any value change at
+~1-2 ms / rebuild.  Amber tint to read against any terrain
+colour.  See `Viewer._render_tank_status_overlay`.
+
+#### Bottom-left mini-map
+
+160 x 160 pixel top-down mini-map at the bottom-left of the
+scene viewport (just right of the info panel, just above the
+console).  Draws:
+
+* Dark-olive background, amber border.
+* Centre crosshair + 'N' label at the top edge.
+* Yellow dot at tank world XZ.
+* Red-orange line from the dot in the chassis-forward direction.
+
+Map extent comes from `terrain.world_size` (default 40 m so
+[-20, +20] m on both X and Z).  Tank pixel position is clamped
+to stay visible if the tank drives off the terrain extent.
+
+Rendered each frame to a fresh pygame surface, uploaded as a
+texture, drawn as one quad.  Cache key is `(pixel_x, pixel_y,
+heading_deg_int)` so a stationary tank doesn't re-upload --
+zero-cost when parked.  See `Viewer._render_minimap`.
+
+#### F3 recording: stable filename + rotating backup + sweep
+
+Per Coffee: "pick a name and stick to it.  Back up if useful
+for cross-reference."
+
+* Save path is now `test_runs/manual_<tank>_latest.json` --
+  always overwrites.
+* Before overwrite, the existing `_latest` is renamed to
+  `manual_<tank>_prev.json` so the last two runs are always
+  available for A-B comparison.
+* On F3 START, sweep `test_runs/manual_*.json` and delete any
+  timestamped variants left over from older versions.  The
+  `_latest` and `_prev` files for the current tank are
+  preserved; turn-test / zigzag recordings are NOT touched.
+
+### Y-band filter tightened: T30 idler no longer treated as a road wheel (1.109.0)
+
+The F3 manual recorder (1.107) caught its first real bug.
+Coffee reported "it is using the damn idler as a weight wheel
+again!!".  The recording confirmed: T30 was reporting
+**18 wheels** (9 per side) when the true road-wheel count is
+8 per side.  The extra slot per side was a drive-sprocket /
+idler that the chassis artist named with a `W_` prefix
+instead of `WD_` -- so the auto-extract's name filter took
+it at face value, and the Y-band post-pass's 15 cm tolerance
+was too loose to catch it.
+
+Per-wheel state distribution from the recording (T30, ~10 s
+of driving with terrain on, suspension on):
+
+| slot | bone | HANG % | mean delta_y |
+|------|------|-------:|-------------:|
+| 0-7  | W_L0..W_L7    | 8-19 %  | -2 to -23 mm  |
+| **8**| **W_L8**      | **68 %**| **-137 mm**   |
+| 9-16 | W_R0..W_R7    | 8-29 %  | -8 to -107 mm |
+| **17**| **W_R8**     | **97 %**| **-139 mm**   |
+
+W_L8 / W_R8 sit at chassis-local Y = 0.533 / 0.566 -- about
+105 mm above the eight real road wheels at Y = 0.421-0.430.
+That's outside the ground-contact band, so on flat terrain
+they HANG (delta_y ~ -14 cm, well below ext_cap).  But on
+the 3-32 % of frames they DID touch terrain (uneven ground
+lifting their world Y up to the wheel), they entered the
+plane fit and yanked the chassis pose.
+
+Fix in `from_chassis_meshes`:
+
+* `Y_BAND` tightened from 0.15 m to 0.06 m.
+
+Real road wheels span only 7 mm on T30, ~10 mm on T110E4.
+60 mm is wide enough for any legitimate suspension geometry
+variation but tight enough to catch T30's 105 mm gap.
+Bourrasque (smallest non-road gap = 232 mm) and Hotchkiss
+EBR (all wheels at the same Y) are unchanged.  Verified by
+re-running the filter on the T30 recording's wheel set:
+W_L8 and W_R8 drop, the eight real road wheels per side
+remain.
+
+This is a clean single-constant tweak; no algorithmic
+change.  Long-term we should pull `<wheelGroups>` from the
+gameplay XML and respect the artist-declared road-wheel set
+directly, but that's a bigger change.
+
+### Vectorised track-spline math -- 12x faster overlay (1.108.0)
+
+Coffee reported "fps is shit ~21, way down before spline" --
+the F8 NURB overlay was the culprit, and the fix was a pure
+numpy vectorisation of the two hot functions.  Output is
+**bit-identical** to the previous implementation (max abs
+diff vs reference: 0.000e+00).
+
+Microbenchmark on a T30-shape control loop (26 ctrl points x
+64 samples per segment, both sides per frame):
+
+| Function | Before | After | Speedup |
+|----------|-------:|------:|--------:|
+| `centripetal_catmull_rom_closed` | 17.66 ms | 1.45 ms | 12.2x |
+| `resample_uniform`               |  0.59 ms | 0.12 ms |  5.0x |
+| **per-frame total (both sides)** | **36.51 ms** | **3.13 ms** | **11.7x** |
+
+That's ~33 ms / frame returned to the budget.  At 60 fps
+(16.7 ms / frame) the spline alone was busting frame time
+twice over -- explains the 27 fps cap from spline math
+alone, plus normal scene work driving it down to the
+reported ~21 fps.
+
+#### Why so much faster
+
+Both functions had per-sample Python loops doing tiny numpy
+operations on 3-element vectors -- the per-call dispatch
+overhead of numpy dwarfed the actual arithmetic.  T30 case:
+26 segments x 64 samples x 6 ops = 9984 numpy calls per side
+per frame, x 2 sides = 19968 dispatched ops.
+
+Fix in both functions: lift the inner per-sample loop to
+broadcast `(samples_per_seg,)` weight vectors against the
+`(dim,)` control points, computing every sample in one numpy
+call per stage.  Output array assembly via
+`np.concatenate(out_segments)` instead of Python list of
+3-vectors.  `resample_uniform` already used `np.searchsorted`
+but called it inside a Python loop -- moved it outside so the
+whole `targets` array is looked up in one call.
+
+The closed-loop CR's per-segment knot-time computation
+(`np.linalg.norm` of 4 chord vectors) is left as a Python
+loop -- only `n` iterations and the broadcast-friendly inner
+loop is what was costing the time.
+
+#### Verification
+
+`tankExporterPy/track_spline.py` has a docstring noting the
+vectorisation; the functions' contracts (signatures, return
+types, shape invariants) are unchanged.  Reference-CR parity
+test:
+
+* CR through P[i] for every i (segment-start invariant): OK
+* CR vs an obviously-correct slow reference: max diff 0.0
+* `resample_uniform` pad tangents are unit vectors
+* Total closed-loop length matches old behaviour
+
+### F3 manual recorder + per-section frame timers (1.107.0)
+
+Built to diagnose the chassis-oscillation symptom Coffee
+reported after the track NURB overlay was added in 1.105
+("oscillating and not settling after spline").  No physics
+math was changed; this rev is pure instrumentation.
+
+#### F3 = manual record toggle (was 1-Turn)
+
+Press `F3` to start a recording, `F3` again to stop and write
+`test_runs/manual_<tank>_<ts>.json`.  Unlike the 1-Turn /
+zig-zag tests, the manual recorder does NOT force auto-circle,
+does NOT reset the tank pose on start, and does NOT auto-stop
+at any duration -- the user drives normally and we capture
+every frame.
+
+The 1-Turn auto-test keeps its "1-Turn Test" button in the
+Tools group; it just no longer has a hotkey.  Same for
+zig-zag (still on its own button).
+
+#### Per-section frame timers
+
+`Viewer._frame_timers` (a fresh dict cleared at the top of every
+`render()`) accumulates per-section CPU wall-clock costs in
+milliseconds.  The recorder snapshots a copy per frame.
+Sections currently timed:
+
+* `frame_dt_in`     -- the dt actually passed to physics, post-1ms-clamp.
+* `physics_update`  -- `tank_physics.update()` wall time.
+* `mesh_pose_apply` -- the per-mesh `model_matrix = chassis_pose @ bind` loop.
+* `emitters`        -- `_update_emitters_for_chassis_pose`.
+* `picker_pass`     -- triangle-picker FBO render.
+* `skybox`, `terrain`           -- self-explanatory.
+* `spline_overlay`  -- the F8 NURB pass (the suspect).
+* `ui`              -- 2-D overlay.
+* `frame_total`     -- full CPU-side render() cost before flip().
+
+Sustained dt-spike correlation against `spline_overlay` is the
+fastest read on whether the F8 overlay was destabilising the
+inertia integrator (omega_n ~ 14 rad/s gives an explicit-Euler
+stability ceiling of ~143 ms; safe at 60 fps but not at 5 fps).
+
+#### Expanded per-frame snapshot
+
+`_build_recorder_frame` is the shared helper now used by both
+the 1-Turn / zig-zag tests AND the F3 manual recorder.  In
+addition to the pose / wheel state already captured in 1.103,
+each frame now carries every signal that can plausibly enter
+the solver / integrator / classifier feedback loop:
+
+Top-level:
+* `target_pitch_with_lean_deg`, `target_roll_with_lean_deg` --
+  the actual integrator targets (= solver target + lean offsets).
+  The values the second-order spring is chasing.
+* `e_pitch_deg`, `e_roll_deg`, `e_y_m` -- spring error terms.
+  Persistent non-decay across frames = the integrator is
+  fighting an input that keeps changing under it.
+* `lift_needed_m` -- render-side terrain-floor lift this frame
+  (>0 = the floor pushed the chassis up so a wheel didn't
+  penetrate; >0 every frame = wheel can't reach ground).
+* `state_changes_count` -- number of wheels whose classifier
+  state flipped this frame.  Sustained >0 = chattering.
+* `track_spline_active`, `track_test_dy_m` -- spline overlay
+  context.
+* `cur_forward_mps_input`, `auto_circle_active` -- drive-layer
+  context.
+* `frame_timers_ms` -- copy of the per-section frame timers.
+
+Per-wheel (`wheels[i]`):
+* `delta_y` -- unclamped pre-envelope delta the classifier reads.
+* `state_prev_code`, `state_changed` -- classifier transition
+  detection.  Lets offline analysis filter for "frames where
+  wheels flipped".
+* `hyst_dist_to_flip_m` -- signed distance (m) from current
+  `delta_y` to the threshold that would flip this wheel's
+  state next frame, accounting for hysteresis.  Small positive
+  values (`< 0.005`) for many consecutive frames is the
+  signature of a wheel chattering at the hysteresis edge.
+
+Plumbing in `tank_physics.py`: `update()` writes
+`self.last_delta_y` post-classifier; `_step_pose_integrator()`
+writes `_last_target_*_with_lean`, `_last_e_*`, and
+`_last_lift_needed_m`.  No solver / integrator behaviour
+changed -- only added field assignments.
+
+Output JSON metadata also echoes the integrator constants
+(`omegan_pitch/roll/y_rad_s`, `zeta`, `mass_ref_kg`) and the
+classifier hysteresis margin so the offline analyser doesn't
+have to hunt them down in source.
 
 ### Track NURB Y-lift fix + manual deflection test (1.106.0)
 

@@ -229,10 +229,59 @@ After each `update()` call:
 | `last_wheel_state` | (N,) | int code: CONTACT / HANGING / OVER_COMPRESSED.  Drives the wheel-highlight shader path. |
 | `last_residual_y` | (N,) | Pre-damping plane-fit residual.  For diagnostics. |
 | `smoothed_residual_y` | (N,) | Asymmetric-damped Y, fed to the bone matrix array each frame. |
+| `last_delta_y` | (N,) | Unclamped pre-envelope delta the classifier reads.  Sits inside `[ext_cap, comp_cap]` for CONTACT, below `ext_cap` for HANGING, above `comp_cap` for OVER_COMP.  Read by the F3 recorder to compute hysteresis-edge proximity. |
+
+After `_step_pose_integrator()` the inertia spring also
+publishes telemetry for the F3 recorder:
+
+| Field | Meaning |
+|-------|---------|
+| `_last_target_pitch_with_lean` | Solver pitch + longitudinal-lean offset (the integrator target). |
+| `_last_target_roll_with_lean` | Solver roll  + lateral-lean offset.  |
+| `_last_e_pitch_deg`, `_last_e_roll_deg`, `_last_e_y_m` | Per-axis spring error terms.  Persistent non-decay across frames is the canonical signature of a feedback-loop oscillation. |
+| `_last_lift_needed_m` | How far the render-side terrain floor pushed the chassis up this frame so the worst wheel still fit within `comp_cap`.  >0 every frame = a wheel is fighting the floor. |
 
 The Debug + Susp checkbox combo on the right panel surfaces these
 visually (contact stars, droop / compression colouring, residual
 length).
+
+---
+
+## F3 manual recorder (1.107.0+)
+
+Press F3 in the viewer to start a manual recording, F3 again
+to stop and write `test_runs/manual_<tank>_<ts>.json`.  Unlike
+the 1-Turn / zig-zag automated tests, the manual recorder does
+NOT force auto-circle, does NOT reset the tank pose on start,
+and does NOT auto-stop -- the user drives normally and every
+frame is captured.
+
+Each captured frame includes:
+
+* Pose: target + render `pitch_deg / roll_deg / pos_y` (so
+  solver spikes can be told apart from integrator-induced
+  oscillation -- target stable + render rings = oscillation).
+* Integrator: `target_*_with_lean_deg`, `e_pitch_deg`,
+  `e_roll_deg`, `e_y_m`, `lift_needed_m`.
+* Per-wheel: `delta_y` (unclamped), `state_code`,
+  `state_prev_code`, `state_changed`, `hyst_dist_to_flip_m`,
+  raw + smoothed residual.
+* Frame timers: `frame_dt_in`, `physics_update`,
+  `mesh_pose_apply`, `picker_pass`, `skybox`, `terrain`,
+  `spline_overlay`, `ui`, `frame_total` (all in ms).
+* Drive context: `cur_forward_mps_input`, `auto_circle_active`,
+  `track_spline_active`, `track_test_dy_m`.
+* `state_changes_count` -- number of wheels whose classifier
+  state flipped this frame (sustained >0 = chattering).
+
+JSON metadata also echoes the integrator constants and
+classifier hysteresis margin so the offline analyser doesn't
+have to hunt them down.
+
+The shared snapshot helper is `Viewer._build_recorder_frame`;
+the 1-Turn auto-test (`_turn_test_capture_frame`) and zig-zag
+test capture call into it as well so any field added here
+shows up in all three recordings.
 
 ---
 

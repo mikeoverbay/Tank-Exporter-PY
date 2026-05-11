@@ -488,6 +488,17 @@ class TankPhysics:
         # Per-tank parsing of the XML field can override later.
         self.track_thickness = float(track_thickness)
 
+        # Per-tank lift to raise the chassis by HALF a track-pad's
+        # height, so the pads' lowest face contacts the terrain
+        # rather than the rubber-band-thickness line.  Set by the
+        # viewer at tank load (after pad meshes load) from the
+        # measured pad bbox; left at 0 for tanks without per-pad
+        # mesh data so the original physics behaviour is unchanged
+        # in that case.  Added to the wheel-center target Y in
+        # `update()` and the render-side terrain floor in
+        # `_step_pose_integrator`.
+        self.pad_lift = 0.0
+
         # World pose state -- translation + rotation (pitch X, roll Z).
         # Yaw is user-driven and exposed separately so external
         # controls (camera / keyboard) can steer the tank without
@@ -530,6 +541,32 @@ class TankPhysics:
         # state if the user toggles physics off / on mid-session.
         self.smoothed_residual_y = np.zeros(len(self.wheels),
                                              dtype=np.float64)
+        # Per-wheel UNCLAMPED contact-classifier delta (target - rigid
+        # Y for the target chassis pose).  This is the raw "wheel
+        # wants to compress (+) or extend (-)" amount the classifier
+        # reads each frame BEFORE the envelope clamp.  Exposed for
+        # the F3 manual recorder so it can compute hysteresis-edge
+        # proximity per wheel (`d - (ext_cap +/- HYST)` etc.) and
+        # flag frames where a wheel is sitting on the threshold of
+        # flipping CONTACT <-> HANGING <-> OVER_COMP.  Populated by
+        # `update()` immediately after the classifier runs.
+        self.last_delta_y = np.zeros(len(self.wheels),
+                                      dtype=np.float64)
+        # Integrator telemetry.  Snapshotted at the END of
+        # `_step_pose_integrator()` so external diagnostics can read
+        # the EFFECTIVE pitch / roll target the inertia spring is
+        # chasing (= solver target + lateral / longitudinal lean
+        # offsets) plus the per-axis error terms (`e_p`, `e_r`,
+        # `e_y`) the spring is integrating.  These are the inputs
+        # to the second-order ODE step; non-zero values that fail
+        # to decay over multiple frames are the canonical signature
+        # of an oscillation feedback loop.
+        self._last_target_pitch_with_lean = 0.0
+        self._last_target_roll_with_lean  = 0.0
+        self._last_e_pitch_deg            = 0.0
+        self._last_e_roll_deg             = 0.0
+        self._last_e_y_m                  = 0.0
+        self._last_lift_needed_m          = 0.0   # render-floor lift this frame
         # Bone names that were accepted as road wheels during
         # auto-extract.  Set by `from_chassis_meshes`; left empty
         # for the legacy `for_t110e4()` factory (which doesn't have
@@ -731,7 +768,8 @@ class TankPhysics:
                             max_offset=+0.08,
                             track_thickness=0.016,
                             mass_kg=30000.0,
-                            max_yaw_rate_dps=60.0):
+                            max_yaw_rate_dps=60.0,
+                            wheel_roles=None):
         """Build a TankPhysics rig by walking already-loaded chassis
         sub-meshes (the `Mesh` objects in `Viewer.meshes` whose
         `component == 'chassis'`).  Discovers wheel groups by
@@ -825,6 +863,62 @@ class TankPhysics:
         # vs identity per bone.
         wheels_left  = []
         wheels_right = []
+
+        # ---- XML-driven fast path -------------------------------
+        # Per Coffee 2026-05-09 ("is there nothing to tell us in
+        # the xml files for the tank? yes please"): if the caller
+        # provided `wheel_roles` (parsed from the gameplay XML's
+        # `<wheels>` block), use it to filter `key_to_pts`
+        # directly -- no Y-band hack, no WD_drop hack, no shape
+        # heuristic.  road_wheels_L / road_wheels_R are the
+        # AUTHORITATIVE list of which bones are weight-bearing
+        # road wheels for suspension physics; sprockets, idlers,
+        # and return rollers are excluded by virtue of being in
+        # OTHER role lists.  Bone-palette names sometimes carry a
+        # `_BlendBone` suffix; allow both forms.
+        xml_path_used = False
+        if wheel_roles:
+            allowed_L = set(wheel_roles.get('road_wheels_L') or [])
+            allowed_R = set(wheel_roles.get('road_wheels_R') or [])
+            # Also accept the `_BlendBone` suffix form some chassis
+            # palettes use.
+            allowed_L |= {n + '_BlendBone' for n in list(allowed_L)}
+            allowed_R |= {n + '_BlendBone' for n in list(allowed_R)}
+            if allowed_L or allowed_R:
+                xml_path_used = True
+                for key, pts in key_to_pts.items():
+                    if key not in allowed_L and key not in allowed_R:
+                        continue
+                    arr = np.asarray(pts, dtype=np.float64)
+                    cx = float(arr[:, 0].mean())
+                    cy = float(arr[:, 1].mean())
+                    cz = float(arr[:, 2].mean())
+                    tup = (cx, cy, cz, key)
+                    if key in allowed_L:
+                        wheels_left.append(tup)
+                    else:
+                        wheels_right.append(tup)
+                # XML-driven path is authoritative -- skip the
+                # heuristic blocks below entirely.  Sort each
+                # side front-to-rear by ascending Z (chassis
+                # convention: front = -Z).
+                wheels_left.sort (key=lambda t: t[2])
+                wheels_right.sort(key=lambda t: t[2])
+                print(f"[tank_physics] XML-driven wheel pick: "
+                      f"L={len(wheels_left)}, R={len(wheels_right)} "
+                      f"(road_wheels from <wheels> block)")
+        if xml_path_used:
+            # Skip the heuristic chain by jumping straight to the
+            # post-processing that builds the TankPhysics instance.
+            # Mirrors the tail of the heuristic path below; updates
+            # there should be reflected here.
+            return cls._build_from_wheel_tuples(
+                wheels_left, wheels_right,
+                radius=radius,
+                min_offset=min_offset, max_offset=max_offset,
+                track_thickness=track_thickness,
+                mass_kg=mass_kg,
+                max_yaw_rate_dps=max_yaw_rate_dps)
         for key, pts in key_to_pts.items():
             arr = np.asarray(pts, dtype=np.float64)
             cx, cy, cz = (float(arr[:, 0].mean()),
@@ -905,19 +999,35 @@ class TankPhysics:
 
         # Y-band post-pass.  Some chassis carry "wheel-shaped"
         # decorative bones that sit ABOVE the actual road-wheel
-        # band -- typically the drive sprocket (rear, cy ~ 0.75 on
-        # Bourrasque) and idler (front, cy ~ 0.63).  These pass the
-        # name + shape filter on the way through but they don't
-        # bear weight against the ground -- the track does, sagging
-        # between road wheels.  Reject anything more than 15 cm
-        # above the LOWEST accepted wheel on the same side.
+        # band -- typically the drive sprocket (rear) and idler
+        # (front).  These pass the name + shape filter on the way
+        # through but they don't bear weight against the ground --
+        # the track does, sagging between road wheels.  Reject
+        # anything more than `Y_BAND` above the LOWEST accepted
+        # wheel on the same side.
         #
-        # On rigs where every wheel sits at the same Y (Hotchkiss
-        # EBR -- all wheels at cy = 0.619), this is a no-op.  On
-        # rigs with mixed heights (Bourrasque road wheels at 0.395,
-        # WD_ sprocket / idler at 0.627 / 0.749), the WD_ entries
-        # fall outside the 15 cm band and get dropped.
-        Y_BAND = 0.15
+        # Tightened from 0.15 -> 0.06 m on 2026-05-08 because T30
+        # has `W_L8` / `W_R8` (drive-sprocket-or-idler that the
+        # artist named with a `W_` prefix instead of `WD_`) sitting
+        # at Y = 0.533 / 0.566 vs the eight real road wheels at
+        # Y = 0.421 .. 0.430 -- a 10.5 cm gap that fell INSIDE the
+        # old 15 cm band.  The F3 manual recorder caught it: those
+        # two slots reported HANGING 68 % / 97 % of frames with
+        # delta_y ~14 cm below the envelope (idler hovers above
+        # ground) but on the 3-32 % of frames they DID touch they
+        # entered the plane fit and yanked the chassis pose
+        # (Coffee's "using the damn idler as a weight wheel"
+        # complaint, 2026-05-08).
+        #
+        # 0.06 m is wide enough for legitimate suspension-geometry
+        # variation across real road wheels (T30 spans 7 mm,
+        # T110E4 spans ~10 mm) but tight enough to catch T30's
+        # 105 mm misnamed-idler gap.  Bourrasque (road wheels at
+        # 0.395, WD_ sprocket / idler at 0.627 / 0.749) still
+        # works -- its smallest gap is 232 mm, far past 60 mm.
+        # Hotchkiss EBR (all wheels at cy = 0.619) is unchanged
+        # (gap = 0).
+        Y_BAND = 0.06
         if wheels_left:
             min_y = min(w[1] for w in wheels_left)
             wheels_left  = [w for w in wheels_left  if w[1] <= min_y + Y_BAND]
@@ -982,6 +1092,47 @@ class TankPhysics:
         # which palette entries correspond to wheels we ACTUALLY
         # accepted (drops a tracked tank's WD_ idlers / sprockets
         # without breaking the Hotchkiss EBR's WD_ road wheels).
+        inst.wheel_bone_names = names_left + names_right
+        return inst
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def _build_from_wheel_tuples(cls, wheels_left, wheels_right, *,
+                                  radius, min_offset, max_offset,
+                                  track_thickness, mass_kg,
+                                  max_yaw_rate_dps):
+        """Build a TankPhysics from already-validated `(x, y, z,
+        name)` tuples.  Used by the XML-driven fast path in
+        `from_chassis_meshes`; mirrors the post-processing tail of
+        the heuristic path.  Names are attached to
+        `wheel_bone_names` so `bone_matrix_array` can look up
+        per-wheel deflection.
+        """
+        names_left  = [w[3] for w in wheels_left]
+        names_right = [w[3] for w in wheels_right]
+        wl = [(w[0], w[1], w[2]) for w in wheels_left]
+        wr = [(w[0], w[1], w[2]) for w in wheels_right]
+        if not wl or not wr:
+            # Fall through to the T110E4 fallback to keep behaviour
+            # consistent with the heuristic path's empty-extract
+            # case.  Should be vanishingly rare on the XML path.
+            d = T110E4_WHEELS
+            wl_fb = [(x, y, -z) for (x, y, z) in d['wheels_left']]
+            wr_fb = [(x, y, -z) for (x, y, z) in d['wheels_right']]
+            return cls(wl_fb, wr_fb,
+                       radius=d['radius'],
+                       min_offset=d['min_offset'],
+                       max_offset=d['max_offset'],
+                       track_thickness=track_thickness,
+                       mass_kg=mass_kg,
+                       max_yaw_rate_dps=max_yaw_rate_dps)
+        inst = cls(wl, wr,
+                   radius=radius,
+                   min_offset=min_offset,
+                   max_offset=max_offset,
+                   track_thickness=track_thickness,
+                   mass_kg=mass_kg,
+                   max_yaw_rate_dps=max_yaw_rate_dps)
         inst.wheel_bone_names = names_left + names_right
         return inst
 
@@ -1275,6 +1426,15 @@ class TankPhysics:
         e_p = target_pitch_with_lean - self._render_pitch_deg
         e_r = target_roll_with_lean  - self._render_roll_deg
         e_y = float(self.pos[1])     - self._render_pos_y
+        # Snapshot for the F3 recorder.  Cheap (six float assigns)
+        # and lets the recorder distinguish "solver target moved"
+        # from "integrator hasn't caught up" -- the classic
+        # signatures of solver / integrator divergence.
+        self._last_target_pitch_with_lean = float(target_pitch_with_lean)
+        self._last_target_roll_with_lean  = float(target_roll_with_lean)
+        self._last_e_pitch_deg            = float(e_p)
+        self._last_e_roll_deg             = float(e_r)
+        self._last_e_y_m                  = float(e_y)
         a_p = (omegan_p * omegan_p * e_p
                - 2.0 * zeta * omegan_p * self.omega_pitch_dps)
         a_r = (omegan_r * omegan_r * e_r
@@ -1328,8 +1488,13 @@ class TankPhysics:
                     dtype=np.float64)
             else:
                 ty_r = np.zeros(len(self.wheels), dtype=np.float64)
-            # Render-XZ wheel-centre target Y (terrain + r + tt).
-            target_y_r = ty_r + self.radius + self.track_thickness
+            # Render-XZ wheel-centre target Y (terrain + r + tt
+            # + pad_lift -- mirrors the solver-side target so the
+            # render-side terrain floor doesn't fight the new
+            # pad-thickness offset).  `getattr` default keeps
+            # older TankPhysics instances safe.
+            target_y_r = (ty_r + self.radius + self.track_thickness
+                          + float(getattr(self, 'pad_lift', 0.0)))
             # required = target_y_at_render_xz - comp_cap - ly_post_rx
             # but ly_post_rx is just `wy_r - chassis_y` (since
             # chassis pos translates uniformly).  So
@@ -1346,6 +1511,11 @@ class TankPhysics:
                 # so the integrator doesn't push back through.
                 self._render_pos_y += lift_needed
                 self._render_vy     = 0.0
+                self._last_lift_needed_m = lift_needed
+            else:
+                self._last_lift_needed_m = 0.0
+        else:
+            self._last_lift_needed_m = 0.0
 
     @staticmethod
     def _mat4_rotate_y(rad):
@@ -1448,7 +1618,14 @@ class TankPhysics:
         # face of the track ribbon (not the wheel hub) is what
         # rests on the ground.  Without this, the track sinks
         # into the terrain by its own thickness.
-        target_centre = ty + self.radius + self.track_thickness
+        # +pad_lift: raises the wheel-centre target by half a
+        # pad's height so pads (centered on the spline at chassis-
+        # local hub_y - radius - track_thickness) touch terrain
+        # with their bottom face instead of penetrating it.
+        # `getattr` default 0 keeps older TankPhysics instances
+        # (constructed before the field landed) safe.
+        target_centre = (ty + self.radius + self.track_thickness
+                         + float(getattr(self, 'pad_lift', 0.0)))
         self.last_terrain_y = ty
         self.last_target_y  = target_centre
 
@@ -1466,6 +1643,12 @@ class TankPhysics:
         ])
         rigid_y_in = (m_in @ local_h.T).T[:, 1]
         delta = target_centre - rigid_y_in
+        # Snapshot the unclamped delta for the F3 manual recorder.
+        # The recorder reads this to compute hysteresis-edge
+        # proximity per wheel (`d - (ext_cap +/- HYST)` etc.) so a
+        # frame where a wheel is sitting on the threshold of
+        # flipping CONTACT <-> HANGING shows up in the trace.
+        self.last_delta_y = delta.copy()
         # `delta` sign convention here (NOT the post-flip shader
         # convention): +ve = wheel needs to RISE to meet terrain
         # (compression).  -ve = wheel needs to DROP (extension).
@@ -1994,7 +2177,8 @@ class TankPhysics:
             else:
                 ty_r = None
             if ty_r is not None:
-                target_centre = ty_r + self.radius + self.track_thickness
+                target_centre = (ty_r + self.radius + self.track_thickness
+                                 + float(getattr(self, 'pad_lift', 0.0)))
 
         # Clean sign: +ve = wheel needs to RISE (UP, compression).
         # The shader-side sign flip is applied inside

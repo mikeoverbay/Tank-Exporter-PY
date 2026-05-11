@@ -162,16 +162,18 @@ void main()
     vec3  lit     = base * tint * (0.30 + 0.78 * lambert);
 
     // ---- Distance fog --------------------------------------------------
-    // Exponential falloff to a soft sky-tone so the terrain reads as
-    // "stretching to a horizon" rather than a hard-edged tabletop.
-    // fog_k tuned for a 40-m world -- far edges land at ~30-40 %
-    // faded, which is enough to cue depth without washing the
-    // foreground out.
-    vec3  fog_color = vec3(0.66, 0.71, 0.78);
-    float dist      = length(v_world_pos - u_eye);
-    float fog_k     = 0.025;
-    float fog       = 1.0 - exp(-dist * fog_k);
-    vec3  result    = mix(lit, fog_color, fog);
+    // BYPASSED 1.113.5 per Coffee 2026-05-09 -- fog interferes with
+    // the mini-map heightmap visual + corner-matching work.  Restore
+    // by un-commenting the mix() below when the spline / track work
+    // wraps up.  Original fog_k=0.025 over 40-m world was tuned to
+    // fade far edges to ~30-40 % sky tone.
+    //
+    // vec3  fog_color = vec3(0.66, 0.71, 0.78);
+    // float dist      = length(v_world_pos - u_eye);
+    // float fog_k     = 0.025;
+    // float fog       = 1.0 - exp(-dist * fog_k);
+    // vec3  result    = mix(lit, fog_color, fog);
+    vec3  result = lit;
 
     FragColor = vec4(result, 1.0);
 }

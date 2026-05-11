@@ -30,7 +30,8 @@ import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
-                            K_a, K_d, K_s, K_x, K_z, K_F2, K_F3, K_F4, K_F8,
+                            K_a, K_d, K_s, K_F2, K_F3, K_F4, K_F8, K_F9,
+                            K_F10,
                             K_LEFT, K_RIGHT, K_BACKSPACE,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
@@ -609,6 +610,13 @@ class Viewer:
         self.shader          = ShaderProgram()      # WoT PBR
         self.color_shader    = SimpleColorShader()  # debug lines / spheres
         self.imported_shader = ImportedShader()     # FBX-import simple shader
+        # Instanced track-pad shader (Phase C step 3).  Built once
+        # at startup; the per-tank `TrackPadRenderer` instances
+        # dispatch through this shader.  Independent of the main
+        # mesh shader so adding pads doesn't risk regressing the
+        # tank PBR path.
+        from .shaders import PadShader as _PadShader
+        self.pad_shader      = _PadShader()
         # Surface-normal debug-line shader (vert + geom + frag).
         # Driven by the right-panel "Normals" slider; length = 0
         # disables the pass entirely.  Built once at startup; cheap
@@ -676,9 +684,80 @@ class Viewer:
         # state + binding live below; toggled by F8 (default on
         # while the rig is being developed -- flip to False to
         # silence once visuals land in Phase C).
-        self.track_lines = LineBatch(line_width=1.0)
+        # Per Coffee 2026-05-10 ("make the spline we line size
+        # bigger"): bumped from 1.0 to 2.5 to match `hp_lines`
+        # so the spline trace reads clearly against the chassis
+        # mesh below.  Syntax: `LineBatch(line_width=<float>)` --
+        # the value is fed to `glLineWidth` per draw call.
+        self.track_lines = LineBatch(line_width=2.5)
+        # Per Coffee 2026-05-10 ("homie looks good on paper.
+        # remove drawing xml tracks and F9 binding to flip
+        # them"): the homie wheel-tangent chain is now the
+        # only chain math.  Flag retained as a constant True
+        # so any leftover read-sites (back-compat) keep working
+        # without conditional branches.
+        self._use_homie_chain = True
         self._track_left = None         # type: Optional[TrackSplineSide]
         self._track_right = None
+
+        # ---- Pin-axis debug line batch ------------------------------
+        # Per Coffee 2026-05-09 "pin rotation point on segments is
+        # off.. Draw lines at the hinge pins out .1cm out each side
+        # from pin holes (spline seg node location.)".  One short
+        # line per track pad, drawn along the pad's local X axis
+        # (= cross-track pin direction) at the pad CENTRE -- which
+        # is currently the rotation pivot point chosen by
+        # `track_pads.build_oriented_transforms`.  The line extends
+        # `bbox.half_x + 0.001 m` (= half pad width + 1 mm) to each
+        # side of the pad centre so the stub pokes out beyond the
+        # pad mesh's left and right faces and stays visible from
+        # any camera angle.  Bright magenta to keep it distinct
+        # from the F8 spline overlay's per-side yellow / cyan.
+        self._pin_axis_lines = LineBatch(line_width=2.0)
+        # (v1.118.17 had a `_last_pad_lines` LineBatch here for
+        # the blue 3-D cross at pad #(N-1); removed in v1.118.37
+        # per Coffee 2026-05-10 "remove first seg blue markers"
+        # now that the chain closure is visibly correct.)
+        # (v1.118.21 had a `_face_outline_lines` overlay here.
+        # Removed in 1.118.22 per Coffee "In seg shader, draw
+        # x - face in red, + face in green" -- the pad.frag
+        # now tints +X / -X faces directly, no Python overlay
+        # needed.)
+
+        # ---- Contact-point trail (FIFO) -----------------------------
+        # Per Coffee 2026-05-09: ring buffer of recent wheel-on-terrain
+        # contact points.  Each frame, every wheel classified as
+        # CONTACT or OVER_COMPRESSED pushes its world XYZ onto the
+        # deque; oldest points roll out when capacity is reached.
+        # Visualised as small blue spheres in the post-tank overlay
+        # pass.  Diagnostic for "is the chassis settling on the
+        # right plane" + "where did each wheel actually touch
+        # ground" without having to read the per-wheel JSON
+        # recorder.
+        from collections import deque as _deque
+        self._contact_filo_size = 200
+        self._contact_filo = _deque(maxlen=self._contact_filo_size)
+        # Sample-rate throttle for the FIFO push.  Every Nth physics
+        # frame we push (8 wheels per push at full coverage, so a
+        # period of 12 gives ~5 Hz at 60 fps).  Per Coffee
+        # 2026-05-09: don't push every frame -- the trail compresses
+        # to a 0.2 s smear; every-12th gives a useful trail window
+        # at 200 points.
+        self._contact_filo_period = 12
+        self._contact_filo_phase  = 0
+        # Don't push if the tank is parked (per Coffee 2026-05-09):
+        # otherwise a stationary tank floods the buffer with 200
+        # copies of the same 8 wheel positions, drowning out any
+        # actual driven trail.  Threshold = 0.05 m/s (= 0.18 kph;
+        # below the noise floor of the speed-ramp output).
+        self._contact_filo_speed_min = 0.05  # m/s
+        # Lazy-built on first use (needs GL context).  Tiny low-poly
+        # sphere so 100 instanced draws stay cheap (~32 verts each).
+        self._contact_sphere = None
+        self._contact_sphere_radius = 0.05  # m (5 cm; 0.5 mm requested
+                                            # would be sub-pixel at any
+                                            # camera distance, bumped
+                                            # to a visible size).
         # Bind-pose chassis-local bone positions, keyed by name.
         # Snapshot once at load via
         # `parse_chassis_bone_world_positions` and then mutated
@@ -687,8 +766,152 @@ class Viewer:
         # stays at bind, so the snapshot doubles as the
         # bind-pose dict for the no-op path).
         self._track_chassis_bones_bind = {}
-        self._show_track_spline = bool(
-            self._cfg.get('show_track_spline', True))
+        # Rigid (no-residual) per-side pad chassis-local positions
+        # cached at tank load.  Used by the spline render block to
+        # clamp deflected pads against the four golden rules:
+        #   1. spline never sinks below terrain
+        #   2. spline only sags to the wheel's max-extension cap
+        #   3. spline never rises past the wheel's max-compression cap
+        # Each frame the cached chassis-local pads are transformed
+        # through `chassis_matrix()` to get the per-pad rigid world
+        # Y; the deflected pads are then clamped against that
+        # `[rigid - ext_cap, rigid + comp_cap]` envelope (and
+        # additionally floored at terrain Y).
+        self._track_left_rigid_pads = None   # type: Optional[np.ndarray]
+        self._track_right_rigid_pads = None  # type: Optional[np.ndarray]
+        # Per-side rigid (no-residual) pad TANGENTS, parallel to
+        # rigid_pads.  Used by the instanced pad renderer to
+        # orient each pad along the spline.  Cached at tank load
+        # alongside positions; static for the life of the tank
+        # since the bind-pose spline doesn't change.
+        self._track_left_rigid_tans = None
+        self._track_right_rigid_tans = None
+        # Per-side per-FRAME pad positions + tangents -- these
+        # carry the live wheel residuals so pads physically
+        # follow chassis pitch / roll / suspension deflection.
+        # Populated by the F8 spline overlay block in `render()`
+        # (it already runs centripetal-CR + resample on the
+        # deflected control loop).  Read by the instanced pad
+        # renderer so it doesn't have to repeat the work.
+        # `None` until the first frame the spline draws (= every
+        # frame for a tank with spline data).
+        self._track_left_pad_pos  = None
+        self._track_left_pad_tan  = None
+        self._track_right_pad_pos = None
+        self._track_right_pad_tan = None
+        # Per-tank resolved track-pad mesh paths -- populated at
+        # load by `_resolve_track_pad_paths` (Phase C step 1).  Maps
+        # `<segmentModelLeft|segmentModelRight|segment2ModelLeft|
+        # segment2ModelRight|linkLeft|linkRight>` to {'primitives',
+        # 'visual', 'model_zip'} dicts.  Empty until a tank with
+        # track_segment_models in its chassis XML is loaded.
+        self._track_pad_paths = {}
+        # GPU-resident pad meshes (Phase C step 2) keyed by the
+        # same strings as `_track_pad_paths` above.  Each value is
+        # a list of `Mesh` objects loaded via `track_pads.
+        # load_pad_meshes`.  Populated by `_load_track_pad_meshes`
+        # after paths resolve; freed on tank reload.
+        self._track_pad_meshes = {}
+        # Phase C step 3: one `TrackPadRenderer` per side of each
+        # pattern (segmentModelLeft -> 1 renderer per Mesh in the
+        # pattern's mesh list, etc.).  Populated by
+        # `_build_track_pad_renderers` after step-2 mesh loads.
+        # Per-frame: `_update_track_pad_renderers` recomputes
+        # transforms from the current spline state and uploads.
+        # `_render_track_pad_instanced` issues the draw calls.
+        # Stays empty for tanks without spline data or pad
+        # meshes.
+        self._track_pad_renderers = {}   # key -> list[TrackPadRenderer]
+        # Spline overlay forced ON during track-physics development
+        # (per Coffee 2026-05-08: "unbind its visibility to any
+        # keys.  on all the time until it is done").  Field stays
+        # for read-only consumers (recorder snapshot, etc.) but
+        # the F8 key handler is a no-op below and the cfg key is
+        # ignored.  Flip back to a real toggle when Phase D parks
+        # the rubber-band track and the spline becomes the visible
+        # default.
+        self._show_track_spline = True
+        # Per Coffee 2026-05-10 ("add F8 to hide pads"): bound
+        # to F8 in `handle_input` -- toggles instanced pad
+        # render at the entry of `_render_track_pad_instanced`.
+        # Default True so a fresh load shows pads; flip with
+        # F8 when investigating chain math (the spline
+        # overlay alone is enough to verify positions without
+        # the pad mesh on top).
+        self._show_track_pads = True
+        # Per Coffee 2026-05-10 ("draw only left track and
+        # spline" -> "now render right segments and spline"):
+        # one-sided debug mode flag retained for ad-hoc R-side
+        # mute, but default is back to True so both sides
+        # render normally.  Gates `_render_track_pad_body`
+        # (skips 'Right' renderer keys) and the spline-overlay
+        # loop (skips the R entry) when set False.
+        self._show_right_track = True
+        # Per Coffee 2026-05-10 ("F10 switch to ortho view of
+        # left side centered on rear drive axle"): when True,
+        # `_anchored_view_matrix` returns a chassis-locked
+        # side view from outside the L track looking inward,
+        # and `_resolve_projection_matrix` returns an
+        # orthographic projection sized to fit the L-track
+        # bounds.  F10 toggles back to the normal perspective
+        # view.  Tank must be loaded with a drive sprocket
+        # bone for ortho to engage; otherwise toggle prints a
+        # warning and stays in perspective.
+        self._ortho_left_mode = False
+        # World width covered by the ortho projection's
+        # vertical extent (Y).  Auto-fit to the tank's bbox
+        # at the time F10 is pressed.  Default fallback if
+        # bbox is unavailable.
+        self._ortho_left_half_h = 2.5
+        # Chassis-local center the ortho view orbits.  Set on
+        # F10 press to the rear-drive-sprocket bone position
+        # (in chassis-local coordinates); the view tracks the
+        # tank as it moves / rotates because we transform this
+        # local point through `chassis_matrix` each frame.
+        self._ortho_left_center_local = None
+        # Per Coffee 2026-05-10 ("try rotating the segs the
+        # clockwise as seen from left side" -> "can we trig
+        # that out regardless of location in the chain?"):
+        # the constant rotation was the wrong tool -- replaced
+        # in v1.118.40 by a per-pad curvature-derived up
+        # (bisector-outward).  Knob retained at 0.0 for any
+        # remaining nudge needs; non-zero values still rotate
+        # every pad by the constant around pad-local +X.
+        self._seg_rotation_deg = 0.0
+        # Per Coffee 2026-05-10 ("can you try and match the
+        # track speed to ground speed so the tracks are
+        # moving?"): accumulated arc-length offset along the
+        # chain loop (metres).  Each frame we add
+        # `tp.cur_forward_mps * dt` to it and feed it to
+        # `compute_homie_chain` as `s_offset`, which shifts
+        # every pad's arc-length sampling position around the
+        # closed loop.  The result is pads appear to flow
+        # along the loop in real time -- bottom run moves
+        # rearward when the tank drives forward, top run
+        # moves forward, wraparounds shift accordingly.
+        # Per-side because L and R can move at different
+        # speeds during yawing (one track drives forward,
+        # the other reverses) -- not used today but ready
+        # for it.
+        self._track_chain_s_offset_L = 0.0
+        self._track_chain_s_offset_R = 0.0
+        # Per Coffee 2026-05-10 ("alt key down.. drag rectangle
+        # area on screen.  release of alt key copies area to
+        # clipboard"): screenshot-rectangle state.
+        #   * `_alt_rect_start` -- (x, y) where the user clicked
+        #     LMB with ALT held; None when not in a drag.
+        #   * `_alt_rect_end`   -- current cursor (x, y) during
+        #     the drag and frozen at LMB-up.
+        #   * `_alt_held_prev`  -- ALT state at previous frame's
+        #     handle_input; used to detect the keyup edge.
+        #   * `_pending_alt_capture` -- (x, y, w, h) set when
+        #     ALT release fires; consumed at the END of the
+        #     NEXT render (so the overlay isn't in the
+        #     captured image).
+        self._alt_rect_start      = None
+        self._alt_rect_end        = None
+        self._alt_held_prev       = False
+        self._pending_alt_capture = None
         # Manual wheel test-deflection bias added to every wheel's
         # spline-overlay residual (NOT to the real physics
         # residuals).  Held by RIGHT-arrow (drop, +droop = -dy) /
@@ -1046,11 +1269,13 @@ class Viewer:
         #
         # `camera_mode` is NOT persisted and is touched by EXACTLY
         # TWO sites (per 2026-05-08 user rule):
-        #   * `load_vehicle` (the tank-tree pick path)  -> reset to 1
+        #   * `load_vehicle` (the tank-tree pick path)  -> reset to 0
         #   * the `C` key handler in handle_input       -> cycle (mod 3)
-        # The assignment below is the ctor's once-only initial value;
-        # the runtime never touches camera_mode anywhere else.
-        self.camera_mode    = 1
+        # Mode numbering: 0 = orbit / free cam, 1 = driver-side
+        # chase, 2 = commander POV.  Default is now 0 (orbit) per
+        # Coffee 2026-05-09 -- starting in chase put new users in
+        # an over-the-shoulder view before they'd seen the tank.
+        self.camera_mode    = 0
         self._N_CAMERA_MODES = 3
 
         # Commander head rotation (mode 2 only).  Driven by LEFT-drag
@@ -1075,9 +1300,16 @@ class Viewer:
         #                          tank front = -Z chassis-local)
         #   _chase_pitch_deg    -> elevation above the chassis Y plane
         #   _chase_distance     -> zoom
-        self._chase_yaw_deg   = 0.0
-        self._chase_pitch_deg = 25.0
-        self._chase_distance  = 6.0
+        # Cam-1 chase orbits the turret-HP look-at.  Defaults
+        # land the eye 15 m off the chassis +X (right side),
+        # perpendicular to chassis Z, level with the look-at.
+        # Per Coffee 2026-05-09: "chase cam.. 90 degrees to
+        # tank's Z .. zoom of 15".  Mouse drag rotates the
+        # eye in chassis-local from there ("kid looking out
+        # window").
+        self._chase_yaw_deg   = 90.0
+        self._chase_pitch_deg = 0.0
+        self._chase_distance  = 15.0
 
         # ---- 1-Turn auto-test recorder ---------------------------------
         # Drives the tank in a full 360-degree auto-circle at speed
@@ -1095,6 +1327,46 @@ class Viewer:
         self._turn_test_btn               = None
         self._turn_test_prev_speed_step   = 0
         self._turn_test_prev_auto_circle  = False
+
+        # ---- F3 manual recorder ---------------------------------------
+        # Press F3 to start recording, F3 again to stop + write JSON.
+        # Same per-frame snapshot as the auto-tests (wheel state /
+        # residuals / classification / integrator errors / per-section
+        # frame timers) but driven by the user's own driving input --
+        # no auto-circle, no fixed duration, no tank-pose reset on
+        # start.  Built to diagnose oscillation / non-settling
+        # observed after the track NURB overlay was added (1.105+):
+        # captures everything that could plausibly enter the
+        # solver/integrator feedback loop so an offline pass can
+        # localise where the oscillation enters.
+        # See `_on_manual_record_clicked`, `_manual_record_capture_frame`,
+        # `_manual_record_save_json`.
+        self._manual_record_active        = False
+        self._manual_record_frames        = []
+        self._manual_record_t_accum_s     = 0.0
+        # Parallel to `tp.last_wheel_state` from the PREVIOUS captured
+        # frame; lets the snapshot flag transitions per wheel.
+        self._manual_record_prev_states   = None
+        self._manual_record_dt_min_ms     = float('inf')
+        self._manual_record_dt_max_ms     = 0.0
+
+        # ---- Per-section frame timers ---------------------------------
+        # Two-buffer scheme so the F3 recorder always reads a complete
+        # frame's worth of timers (its hook fires inside the physics
+        # block, before terrain / spline / ui populate theirs).
+        #   * `_frame_timers`          -- current frame's accumulator.
+        #     Cleared at the top of every render() call.
+        #   * `_frame_timers_complete` -- previous frame's complete
+        #     snapshot.  Read by the recorder.
+        # See the two-buffer comment at the top of `render()` for
+        # the exact promotion timing.
+        # Sections currently timed:
+        #   physics_update, mesh_pose_apply, emitters, picker_pass,
+        #   skybox, terrain, spline_overlay, ui, frame_total
+        # plus `frame_dt_in` (the dt actually passed to physics, in ms,
+        # post-clamp).
+        self._frame_timers: dict = {}
+        self._frame_timers_complete: dict = {}
 
         # ---- Zig-zag terrain-sweep test --------------------------------
         # Drives the tank in a boustrophedon ("ox-turn" / lawnmower)
@@ -1982,32 +2254,16 @@ class Viewer:
         self._pick_tri_btn = pick_btn
         x       += 70 + self.ui.BUTTON_SPACING
 
-        # 1-Turn Test: drive the tank in a full 360-degree auto-circle
-        # at speed step 1 (per-tank top speed), recording per-frame
-        # chassis pose + per-wheel state to a JSON file under
-        # test_runs/.  Auto-stops on completion and restores prior
-        # speed-step + auto-circle state.  See _on_turn_test_clicked.
-        turn_btn = self.ui.add_button(
-            _('1-Turn Test'), x, y, 90, h, active=False,
-            action=self._on_turn_test_clicked)
-        turn_btn.accent_color = _theme.c1()
-        turn_btn.theme_slot   = 'c1'
-        self._turn_test_btn   = turn_btn
-        x       += 90 + self.ui.BUTTON_SPACING
-
-        # Zig-zag terrain sweep: drives the tank back-and-forth
-        # across the full terrain in straight strips, with stops
-        # + 180-deg turns at each end.  Captures full per-frame
-        # pose + flags "nasty plane change" events so the user
-        # can find wild-pose locations on the map.  See
-        # `_on_zigzag_test_clicked`.
-        zig_btn = self.ui.add_button(
-            _('Zig-Zag'), x, y, 70, h, active=False,
-            action=self._on_zigzag_test_clicked)
-        zig_btn.accent_color = _theme.c1()
-        zig_btn.theme_slot   = 'c1'
-        self._zigzag_btn     = zig_btn
-        x       += 70 + self.ui.BUTTON_SPACING
+        # Per Coffee 2026-05-10 ("remove 1-turn test and zig-zag
+        # from render window.. dont touch the other code.  just
+        # the buttons in the window"): the two recorder kicks
+        # used to live as buttons here; removed from the UI but
+        # `_on_turn_test_clicked` / `_on_zigzag_test_clicked` and
+        # the whole recorder pipeline stay in source for the
+        # future-keybinding revival.  `_turn_test_btn` and
+        # `_zigzag_btn` stay None (defensive `is not None`
+        # checks elsewhere make this a no-op for `.active`
+        # writes during a recording session).
 
         # ---- Extract group (top of the left panel) ----------------
         # Three buttons that operate on the user's res_mods tree:
@@ -2716,15 +2972,206 @@ class Viewer:
 
     def _toggle_mesh_window(self):
         """Bar-button action: show / hide the persistent mesh-visibility
-        window.  Position the window to the right of the info panel the
-        first time it opens; subsequent opens preserve its current spot."""
+        window.  Position the window below the Heading / XYZ / Speed
+        status overlay the first time it opens; subsequent opens
+        preserve its current spot.
+
+        Per Coffee 2026-05-10 ("make sure the window is below the last
+        line of text.. we have a physics timer, heading, XYZ and speed.
+        it needs to be below speed info"): the overlay stack from top
+        is `_render_physics_timer_overlay` (y=8, h~22) ->
+        `_render_tank_status_overlay` (y=34, h=cached on
+        `_status_overlay_cache`).  We anchor mw.y just below the
+        cached status overlay height; falls back to a sensible
+        constant when the cache isn't populated yet.
+        """
         mw = self.ui.mesh_window
         if not mw.active:
-            # Anchor to the right of the info panel (or the spine, when the
-            # panel is collapsed), just below the bar.
-            mw.x = self.ui.info_left_inset(self.INFO_PANEL_W) + 16
-            mw.y = self.ui.BAR_HEIGHT + 16
+            mw.x = self.INFO_PANEL_W + 10
+            cache = getattr(self, '_status_overlay_cache', None)
+            if cache is not None and len(cache) >= 4:
+                status_bottom_y = 34 + int(cache[3]) + 6
+            else:
+                # Three Consolas-16 bold lines come out at ~22 px
+                # each on most platforms.  3 * 22 = 66 puts us
+                # just below the speed line even when the cache
+                # is cold.
+                status_bottom_y = 34 + 66 + 6
+            mw.y = status_bottom_y
         mw.toggle()
+
+    # ==================================================================
+    # ALT-rect screenshot to clipboard
+    # ==================================================================
+
+    def _render_alt_rect_overlay(self):
+        """Draw the thin cyan selection rectangle while the user
+        is sweeping out an ALT+LMB drag.  Called every frame
+        from the tail of `render()`; no-op when no drag is in
+        progress.  Per Coffee 2026-05-10 ("alt key down.. drag
+        rectangle area on screen").
+        """
+        if (self._alt_rect_start is None
+                or self._alt_rect_end is None):
+            return
+        x0, y0 = self._alt_rect_start
+        x1, y1 = self._alt_rect_end
+        x = min(x0, x1)
+        y = min(y0, y1)
+        w = abs(x1 - x0)
+        h = abs(y1 - y0)
+        if w < 1 or h < 1:
+            return
+        ui = self.ui
+        if not hasattr(ui, 'shader') or not hasattr(ui, 'quad_vao'):
+            return
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        ui.shader.use()
+        ui.shader.set_mat4(
+            'projection', ui._ortho(self.width, self.height))
+        ui.shader.set_int('u_use_tex', 0)
+        ui.shader.set_vec4('u_color', 0.0, 0.90, 1.00, 0.85)
+        glBindVertexArray(ui.quad_vao)
+        # 1 px outline thickness so the cyan border is minimal
+        # if the user keeps the drag visible while releasing
+        # ALT.  Capture is queued for the NEXT frame anyway --
+        # this is just a live drag guide.
+        T = 1
+        ui._draw_quad(x,         y,          w, T)  # top
+        ui._draw_quad(x,         y + h - T,  w, T)  # bottom
+        ui._draw_quad(x,         y,          T, h)  # left
+        ui._draw_quad(x + w - T, y,          T, h)  # right
+        glBindVertexArray(0)
+
+    def _capture_alt_rect_to_clipboard(self, x, y, w, h):
+        """Read the back-buffer rectangle at (x, y, w, h) (screen
+        coords, top-left origin), convert to a PIL Image, and
+        push it to the Windows clipboard as CF_DIB.  Per Coffee
+        2026-05-10 ("release of alt key copies area to
+        clipboard").
+        """
+        # OpenGL Y origin is BOTTOM-left; screen coords are
+        # TOP-left.  Convert.
+        gl_y = int(self.height - (y + h))
+        if gl_y < 0 or x < 0 or x + w > self.width or y < 0:
+            self.log(
+                f"alt-rect: out of screen bounds, skipped",
+                color=(255, 180, 120))
+            return
+        # Read pixels in RGB.  Tightly-packed (4-byte alignment
+        # default would mis-stride 24-bit rows on odd widths).
+        glPixelStorei(GL_PACK_ALIGNMENT, 1)
+        data = glReadPixels(int(x), int(gl_y), int(w), int(h),
+                             GL_RGB, GL_UNSIGNED_BYTE)
+        glPixelStorei(GL_PACK_ALIGNMENT, 4)   # restore default
+        # OpenGL rows are bottom-up; flip vertically so the
+        # PIL image matches screen orientation.
+        from PIL import Image
+        img = Image.frombytes('RGB', (int(w), int(h)), data)
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+        self._copy_pil_image_to_windows_clipboard(img)
+        self.log(
+            f"alt-rect: {int(w)}x{int(h)} copied to clipboard",
+            color=(120, 220, 180))
+
+    def _copy_pil_image_to_windows_clipboard(self, image):
+        """Push a PIL Image to the Windows clipboard as CF_DIB
+        (= 'image' clipboard format).  Pure stdlib + PIL via
+        ctypes -- no pywin32 dependency.
+
+        Recipe:
+        1. Save image as BMP into an in-memory buffer.
+        2. Strip the 14-byte BMP FILE header to get the raw
+           DIB (the format CF_DIB expects).
+        3. Allocate a moveable global memory block, copy the
+           DIB bytes in.
+        4. OpenClipboard / EmptyClipboard / SetClipboardData /
+           CloseClipboard.
+        Wrapped in try/except so a clipboard failure on a
+        weird WSL / Wine / locked-session environment just
+        logs instead of crashing the viewer.
+
+        Per Coffee 2026-05-10 ("access violation writing
+        0x0000000000000020"): MUST declare argtypes/restype
+        on EVERY ctypes call.  Default ctypes assumes
+        int=32-bit for both args and return values; on x64
+        Windows HANDLE / LPVOID are 64-bit pointer-sized.
+        Without explicit types, GlobalAlloc returns a
+        TRUNCATED 32-bit handle (high bits chopped) which
+        then crashes GlobalLock / SetClipboardData with an
+        AV at the wrong address.
+        """
+        import io
+        import ctypes
+        from ctypes import wintypes
+        bmp_io = io.BytesIO()
+        image.convert('RGB').save(bmp_io, 'BMP')
+        bmp_bytes = bmp_io.getvalue()
+        bmp_io.close()
+        if len(bmp_bytes) < 14:
+            self.log("clipboard: BMP encode produced no data",
+                     color=(255, 180, 120))
+            return
+        dib_data = bmp_bytes[14:]
+        CF_DIB        = 8
+        GMEM_MOVEABLE = 0x0002
+        user32   = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        # ---- argtypes / restype declarations (x64 safe) ----
+        user32.OpenClipboard.argtypes  = [wintypes.HWND]
+        user32.OpenClipboard.restype   = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype  = wintypes.BOOL
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype  = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [
+            wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype  = wintypes.HANDLE
+        kernel32.GlobalAlloc.argtypes  = [
+            wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype   = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes   = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype    = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype  = wintypes.BOOL
+        kernel32.GlobalFree.argtypes   = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.restype    = wintypes.HGLOBAL
+
+        if not user32.OpenClipboard(None):
+            self.log("clipboard: OpenClipboard failed",
+                     color=(255, 180, 120))
+            return
+        try:
+            user32.EmptyClipboard()
+            n = len(dib_data)
+            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, n)
+            if not h_mem:
+                self.log("clipboard: GlobalAlloc failed",
+                         color=(255, 180, 120))
+                return
+            p_mem = kernel32.GlobalLock(h_mem)
+            if not p_mem:
+                kernel32.GlobalFree(h_mem)
+                self.log("clipboard: GlobalLock failed",
+                         color=(255, 180, 120))
+                return
+            ctypes.memmove(p_mem, dib_data, n)
+            kernel32.GlobalUnlock(h_mem)
+            # SetClipboardData TRANSFERS ownership of h_mem to
+            # the clipboard on success; we must NOT GlobalFree
+            # it afterward.
+            if not user32.SetClipboardData(CF_DIB, h_mem):
+                # Set failed -- we still own the block, free
+                # it to avoid a leak.
+                kernel32.GlobalFree(h_mem)
+                self.log("clipboard: SetClipboardData failed",
+                         color=(255, 180, 120))
+        finally:
+            user32.CloseClipboard()
 
     def _on_info_panel_toggled(self):
         """Callback registered with UIManager.on_info_toggle.  Fires after
@@ -2738,12 +3185,24 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] config save (info_panel_collapsed) failed: {exc}")
 
-    def _populate_mesh_window(self):
-        """Refresh the mesh-window's row list to match self.meshes.  All
-        rows reset to visible -- mirrors the Mesh.visible default after
-        every load.  Called from the end of load_vehicle / load_mesh.
+    # Sentinel row indices used by the mesh-visibility window for
+    # the two "virtual" rows that toggle track-system flags instead
+    # of a Mesh.visible.  Per Coffee 2026-05-10 ("make sure the
+    # meshes window that hides and shows tank parts is set for
+    # segments and splines").  Negative so they can't collide with
+    # any real `enumerate(self.meshes)` index.
+    _MESH_ROW_TRACK_SEGS    = -1
+    _MESH_ROW_TRACK_SPLINES = -2
 
-        Display-name fallback chain:
+    def _populate_mesh_window(self):
+        """Refresh the mesh-window's row list to match self.meshes plus
+        two virtual rows for the homie track system.  Real mesh rows
+        reset to visible; track-system rows mirror the current flag
+        values (`_show_track_pads`, `_show_track_spline`) so the
+        checkboxes are in sync with the runtime state at the moment
+        the window opens.
+
+        Display-name fallback chain (real meshes only):
             1. mesh.identifier  -- WoT material identifier (native loads
                                    only; e.g. 'tank_hull_01')
             2. mesh.name        -- primitive-group / imported-object name
@@ -2758,10 +3217,35 @@ class Viewer:
                      or getattr(mesh, 'name', '')
                      or f'mesh_{i}')
             rows.append((i, f'#{i:>2}  {label}'))
+        # Virtual rows for the track system -- segments + splines.
+        rows.append(
+            (self._MESH_ROW_TRACK_SEGS,    'Track Segments'))
+        rows.append(
+            (self._MESH_ROW_TRACK_SPLINES, 'Track Splines'))
         mw.populate(rows, self.ui._make_tex)
+        # populate() always reset visible=True; sync the virtual
+        # rows back to their flag values so the checkbox state
+        # matches what the renderer is actually doing.
+        for row in mw.rows:
+            if row.mesh_index == self._MESH_ROW_TRACK_SEGS:
+                row.visible = bool(
+                    getattr(self, '_show_track_pads', True))
+            elif row.mesh_index == self._MESH_ROW_TRACK_SPLINES:
+                row.visible = bool(
+                    getattr(self, '_show_track_spline', True))
 
     def _on_mesh_visibility_toggled(self, mesh_index, new_visible):
-        """Mesh-window callback: mirror the checkbox state onto the Mesh."""
+        """Mesh-window callback: dispatch the checkbox state onto the
+        right target.  Real mesh indices (>= 0) flip `Mesh.visible`;
+        the two virtual sentinel indices flip the track-system
+        rendering flags.
+        """
+        if mesh_index == self._MESH_ROW_TRACK_SEGS:
+            self._show_track_pads = bool(new_visible)
+            return
+        if mesh_index == self._MESH_ROW_TRACK_SPLINES:
+            self._show_track_spline = bool(new_visible)
+            return
         if 0 <= mesh_index < len(self.meshes):
             self.meshes[mesh_index].visible = bool(new_visible)
 
@@ -3495,6 +3979,51 @@ class Viewer:
         ('turret',  'Turret'),
         ('gun',     'Gun'),
     )
+    # Per Coffee 2026-05-10 ("we need to add a check box to
+    # extract it from the pkg files like the other tank parts"):
+    # track-segment pad meshes aren't loaded into `self.meshes`
+    # (they live behind the instanced-pad renderer), so the
+    # `_COMPONENT_ORDER`-driven count-by-mesh logic in
+    # `_show_extract_picker` can't see them.  We handle them as
+    # an EXTRA dialog row, sourced directly from
+    # `_pending_chassis_info['track_segment_models']` +
+    # `_track_pad_paths`.  Same key shows up in
+    # `_on_extract_clicked` under a dedicated branch.
+    _TRACK_SEG_KEY    = 'tracks'
+    _TRACK_SEG_LABEL  = 'Track Segments'
+    # Per Coffee 2026-05-10 ("do the same for the tank def file
+    # that is in scripts.pkg"): the gameplay XML
+    # (`scripts/item_defs/vehicles/<nation>/<basename>.xml`) is
+    # the master tank definition.  It's not on `self.meshes`
+    # either, so it gets its own dialog row sourced from
+    # `_loaded_tank_xml_zip` (captured by `load_vehicle`).
+    _TANK_DEF_KEY    = 'tank_def'
+    _TANK_DEF_LABEL  = 'Tank Definition (scripts.pkg XML)'
+
+    def _enumerate_track_segment_pkg_paths(self):
+        """Walk `_pending_chassis_info['track_segment_models']` and
+        return the list of `.model` pkg-internal paths to extract.
+
+        Filters to string values ending in `.model` (skips the
+        float-tuple offset entries that share the dict --
+        `segmentOffset`, `segment2Offset`).  Preserves dict-order
+        so the user sees segmentModelLeft / segmentModelRight /
+        segment2ModelLeft / segment2ModelRight / linkLeft /
+        linkRight in declaration order in any UI listing.
+
+        Returns:
+            list[(key, model_zip)] tuples.  Empty list when no
+            chassis is loaded or the tank has no track segments
+            declared (= non-tracked vehicle, or chassis XML
+            missing `<trackPair>`).
+        """
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        tsm = ci.get('track_segment_models') or {}
+        out = []
+        for k, v in tsm.items():
+            if isinstance(v, str) and v.endswith('.model'):
+                out.append((k, v))
+        return out
 
     def _classify_meshes_by_component(self):
         """Return {component_key: [Mesh, ...]} for every mesh in the
@@ -3921,102 +4450,1453 @@ class Viewer:
     # ------------------------------------------------------------------
     # Track NURB spline -- per-frame chassis-local bone positions.
     # ------------------------------------------------------------------
+    def _resolve_pads_per_side(self):
+        """Return the per-side pad count for the F8 NURB spline
+        overlay, sourced from the gameplay XML's `<trackPair>`
+        block.
+
+        Per Coffee 2026-05-10 ("we have 1/2 the tracks we need.
+        dont split the count in the XML files"): `segmentsCount`
+        is the PER-SIDE pad count, NOT the total across both
+        sides.  Earlier code divided by 2 and produced half the
+        expected pads per track; that's removed -- we now read
+        the value verbatim.
+
+        Returns:
+            int: pads-per-side (= `segmentsCount`), or 0 when
+                 the XML data isn't available.
+        """
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        seg_cnt = ci.get('segmentsCount')
+        if seg_cnt is None:
+            return 0
+        try:
+            n = int(seg_cnt)
+        except Exception:
+            return 0
+        # Sanity bound -- a track can plausibly have 30-500 pads
+        # per side.  Anything outside that is a malformed XML or
+        # parse glitch; bail rather than render a broken overlay.
+        if n < 4 or n > 500:
+            return 0
+        return n
+
+    def _resolve_track_pad_paths(self):
+        """Resolve every track-pad `.model` ref from the chassis XML
+        to its sibling `.primitives_processed` + `.visual_processed`
+        and cache the result on `self._track_pad_paths`.
+
+        Reads `_pending_chassis_info['track_segment_models']` (the
+        dict the gameplay-XML parser drops there at tank load:
+        `segmentModelLeft`, `segmentModelRight`, `segment2ModelLeft`,
+        `segment2ModelRight`, `linkLeft`, `linkRight`).  Reuses the
+        existing `VehicleXMLLoader._entry` resolution chain (.model
+        binary -> canonical visual base -> .primitives_processed +
+        .visual_processed in res_mods, or PKG fallback) so every
+        path-tweak the loader knows about (BWXML decode, magic-
+        header sniffing, res_mods override) applies for free.
+
+        Output stored on the viewer:
+            self._track_pad_paths = {
+                'segmentModelLeft': {
+                    'primitives': '<abs path or None>',
+                    'visual':     '<abs path or None>',
+                    'model_zip':  '<original .model path>',
+                },
+                ...
+            }
+
+        Per Coffee 2026-05-09: Phase C step 1 -- validate the load
+        chain.  Renderer wiring lands in a separate commit.
+        """
+        from .loaders import VehicleXMLLoader as _VXL
+        self._track_pad_paths = {}
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        tsm = ci.get('track_segment_models')
+        if not tsm:
+            print('[track_pads] no track_segment_models on this tank;'
+                  ' skipping pad-mesh resolution')
+            return
+        # res_mods root (= where the user's modded copies of the
+        # .model files would live).  Same source the rest of the
+        # vehicle loader uses.
+        res_mods = (self._cfg.get('res_mods') or '').strip()
+        for key, value in tsm.items():
+            # Skip the float offset entries (segmentOffset /
+            # segment2Offset); only iterate path strings.
+            if not isinstance(value, str) or not value.endswith('.model'):
+                continue
+            try:
+                entry = _VXL._entry(
+                    label=key, model_path=value,
+                    res_mods_root=res_mods, offset=(0.0, 0.0, 0.0),
+                    pkg_extractor=self._pkg_extractor)
+            except Exception as exc:
+                print(f"[track_pads] {key} resolve failed: {exc}")
+                continue
+            self._track_pad_paths[key] = {
+                'primitives': entry.get('primitives'),
+                'visual':     entry.get('visual'),
+                'model_zip':  value,
+            }
+            prim_ok = '+' if entry.get('primitives') else '-'
+            vis_ok  = '+' if entry.get('visual') else '-'
+            print(f'[track_pads] {key}: prim={prim_ok}  vis={vis_ok}  '
+                  f'model={value}')
+
+    def _load_track_pad_meshes(self):
+        """Load every track-pad `.primitives_processed` referenced by
+        `self._track_pad_paths` into a list of GPU-ready `Mesh`
+        objects, using the same primitives_processed +
+        visual_processed pipeline the chassis / hull / turret / gun
+        loaders use.  Result lands on `self._track_pad_meshes` as
+        `{key: list[Mesh]}`.
+
+        For step-2 validation, the FIRST loaded pad pattern's
+        meshes are also appended to `self.meshes` so they draw
+        through the standard mesh-draw loop with full PBR
+        materials at chassis-local origin (single static pad,
+        riding `chassis_pose` because every pad mesh's
+        `bind_model_matrix` is identity).  Step 3's instanced
+        renderer will move the meshes OUT of `self.meshes` and
+        draw them per-pad-transform.
+
+        Tank reload safety: `_clear_scene` clears `self.meshes`
+        before this routine fires, so previously-attached pads
+        are released by the same path as hull / turret / gun.
+        Pad meshes carry `component = 'track_pad'` so future
+        filtering (e.g. for the instanced render) can pull them
+        back out cleanly.
+        """
+        self._track_pad_meshes = {}
+        if not self._track_pad_paths:
+            return
+        from . import track_pads as _tp
+        try:
+            self._track_pad_meshes = _tp.load_pad_mesh_set(
+                self, self._track_pad_paths,
+                component_tag='track_pad')
+        except Exception as exc:
+            print(f'[track_pads] mesh load failed: {exc}')
+            import traceback
+            traceback.print_exc()
+            return
+        # Phase C step 3: pads do NOT go on `self.meshes` (would
+        # stack at chassis origin and double-draw).  Instead build
+        # an instanced renderer per pattern; each renderer will
+        # issue ONE `glDrawElementsInstanced` per Mesh per frame
+        # to place all N pads in their correct chassis-local
+        # positions.  Source meshes stay on `self._track_pad_meshes`
+        # so the Compare console writer can still inspect them.
+        self._build_track_pad_renderers()
+        # Plumb the pad's bbox half-extent into the physics solver
+        # as `pad_lift`, so the chassis sits HIGH enough that pads
+        # (centred on the spline at chassis-local hub_y - r - t)
+        # contact terrain with their bottom face.  Computed from
+        # the loaded pad-mesh bboxes (max extent across all loaded
+        # patterns / 2 -- one half-extent because the pad mesh is
+        # symmetric around its local origin).
+        self._derive_pad_lift_from_meshes()
+
+    def _derive_pad_lift_from_meshes(self):
+        """Set `tank_physics.pad_lift` from the loaded pad-mesh
+        bboxes.  `pad_lift = max(bbox.y_extent / 2)` across every
+        loaded pad pattern -- enough vertical clearance to sit the
+        worst-case (thickest) pad's bottom face on terrain.
+
+        Falls back to 0 if no pad meshes loaded -- physics then
+        behaves exactly as before this rev.
+        """
+        if self.tank_physics is None:
+            return
+        pad_dict = getattr(self, '_track_pad_meshes', None) or {}
+        if not pad_dict:
+            self.tank_physics.pad_lift = 0.0
+            return
+        worst_half = 0.0
+        for pad_meshes in pad_dict.values():
+            for m in pad_meshes:
+                if m.positions is None or len(m.positions) == 0:
+                    continue
+                pos = np.asarray(m.positions, dtype=np.float32)
+                y_ext = float(pos[:, 1].max() - pos[:, 1].min())
+                worst_half = max(worst_half, 0.5 * y_ext)
+        self.tank_physics.pad_lift = float(worst_half)
+        if worst_half > 0:
+            print(f'[track_pads] pad_lift = {worst_half:.4f} m '
+                  f'(half of max pad bbox Y-extent; raises chassis '
+                  f'so pad bottom contacts terrain)')
+
+    def _build_track_pad_renderers(self):
+        """Build one `TrackPadRenderer` per loaded pad Mesh.  Sized
+        to `pads_per_side` (= `segmentsCount / 2`) so the per-frame
+        update never has to grow the instance VBO.
+        """
+        # Free any leftover renderers from the previous tank.
+        for ren_list in (self._track_pad_renderers or {}).values():
+            for r in ren_list:
+                try:
+                    r.cleanup()
+                except Exception:
+                    pass
+        self._track_pad_renderers = {}
+        if not self._track_pad_meshes:
+            return
+        pads_per_side = max(1, int(self._resolve_pads_per_side() or 1))
+        from . import track_pads as _tp
+        n_renderers = 0
+        for key, mesh_list in self._track_pad_meshes.items():
+            if not mesh_list:
+                continue
+            # Reasonable upper bound on instances -- the worst
+            # case is "every pad is this pattern", which is
+            # `pads_per_side` for a single-pattern tank.  Pads
+            # with shoe + connector alternate so each pattern
+            # only fills HALF of pads_per_side, but we still
+            # allocate the full size so a future tweak to the
+            # alternation rule doesn't blow the VBO.
+            renderers = []
+            for mesh in mesh_list:
+                try:
+                    r = _tp.TrackPadRenderer(
+                        source_mesh=mesh,
+                        max_instances=pads_per_side)
+                    renderers.append(r)
+                    n_renderers += 1
+                except Exception as exc:
+                    print(f'[track_pads] renderer build failed '
+                          f'for {key}: {exc}')
+            if renderers:
+                self._track_pad_renderers[key] = renderers
+        if n_renderers:
+            print(f'[track_pads] built {n_renderers} instanced '
+                  f'renderer(s) across '
+                  f'{len(self._track_pad_renderers)} pattern(s)')
+
+    def _render_track_pad_instanced(self, view, proj):
+        """Per-frame instanced draw of every loaded pad pattern.
+
+        Commit-2 behaviour (Coffee 2026-05-09 "next but carefully"):
+            * Transforms now ORIENT each pad along the spline
+              tangent, not just translate it.  Pad-local -Z is
+              taken as the forward axis (post the Z-flip we apply
+              at pad load); a full orthonormal frame
+              `[right | up | forward | translation]` is built per
+              pad from `(pad_pos, pad_tan)` cached at tank load.
+            * Tangent-degenerate fallback: if a pad's tangent is
+              parallel to chassis-Y (theoretical edge case; the
+              real-track wraparound bends are well-conditioned),
+              `build_oriented_transforms` clamps the cross product
+              and the pad falls back to a stable axis-aligned
+              orientation rather than producing NaNs.
+            * Translation-only fallback path is preserved at
+              `build_position_only_transforms` for A/B debugging.
+
+        Per-frame cost (T30 numbers):
+            117 pads/side x 2 sides x 2 patterns = 468 instances
+            ~30 KB of mat4 data uploaded per frame
+            4 instanced draw calls
+        """
+        if not self._track_pad_renderers:
+            return
+        if self.tank_physics is None:
+            return
+        # F8 visibility gate (Coffee 2026-05-10 "add F8 to hide
+        # pads").  Skip the entire instanced-pad pipeline when
+        # off -- saves the per-frame chain rebuild + xform pass
+        # too, since the body call below is what kicks them off.
+        if not getattr(self, '_show_track_pads', True):
+            return
+        # Hardened against numpy / GL errors per Coffee 2026-05-09
+        # "crash as soon as load is done" -- a bad frame (e.g.
+        # shape mismatch on the very first post-load tick or a
+        # missing attribute) shouldn't tear down the whole render.
+        # Log once + skip future frames until the cause clears.
+        try:
+            self._render_track_pad_body(view, proj)
+        except Exception as exc:
+            if not getattr(self, '_track_pad_err_logged', False):
+                self.log(f"track-pad render error: "
+                         f"{type(exc).__name__}: {exc}",
+                         color=(255, 180, 120))
+                import traceback
+                traceback.print_exc()
+                self._track_pad_err_logged = True
+
+    def _render_track_pad_body(self, view, proj):
+        from . import track_pads as _tp
+        chassis = np.asarray(
+            self.tank_physics.chassis_matrix(), dtype=np.float32)
+        tp = self.tank_physics
+        # Per Coffee 2026-05-10 ("split it in to 2 diff functions"):
+        # the stock-spline path and the homie-chain path are now
+        # two parallel methods with identical return shape:
+        #     (L_pos, L_tan, R_pos, R_tan)  each (n_pads, 3) np
+        # The dispatch is a single conditional based on the F9
+        # toggle.  Each method is self-contained -- no override
+        # logic, no fall-through, no shared mutable cache writes.
+        # Per Coffee 2026-05-10 ("remove drawing xml tracks"):
+        # homie is the only chain source for pad render.  Stock
+        # path (`_compute_stock_chain_for_frame`) retained for
+        # diagnostic / offline comparison but no longer called
+        # from runtime.
+        try:
+            left_pos, left_tan, right_pos, right_tan = (
+                self._compute_homie_chain_for_frame(tp))
+        except Exception as exc:
+            self._diag_chain_traceback('pad_dispatch', exc)
+            left_pos = left_tan = right_pos = right_tan = None
+        # Final fallback to bind-pose rigid cache if both
+        # methods returned None (load not finished, etc.).
+        if left_pos is None:
+            left_pos = getattr(self, '_track_left_rigid_pads', None)
+            left_tan = getattr(self, '_track_left_rigid_tans', None)
+        if right_pos is None:
+            right_pos = getattr(self, '_track_right_rigid_pads', None)
+            right_tan = getattr(self, '_track_right_rigid_tans', None)
+        # Build oriented mat4 arrays per side.  If tangents are
+        # missing (older cache, or load failed), fall back to
+        # translation-only so the pads still render somewhere
+        # reasonable instead of dropping.
+        #
+        # Per Coffee 2026-05-09 ("inside out and weird rotation"):
+        # the wheel-aware radial frame produced wrong-side-up
+        # pads at the end wheels.  Reverted to the plain spline-
+        # tangent + centroid-up frame.
+        # `build_wheel_aware_transforms` stays in track_pads.py
+        # for a future cleaner attempt.
+        if left_pos is not None and left_tan is not None:
+            xform_L = _tp.build_oriented_transforms(left_pos, left_tan)
+        elif left_pos is not None:
+            xform_L = _tp.build_position_only_transforms(left_pos)
+        else:
+            xform_L = None
+        if right_pos is not None and right_tan is not None:
+            xform_R = _tp.build_oriented_transforms(right_pos, right_tan)
+        elif right_pos is not None:
+            xform_R = _tp.build_position_only_transforms(right_pos)
+        else:
+            xform_R = None
+
+        # Per Coffee 2026-05-10 ("try rotating the segs the
+        # clockwise as seen from left side"): post-multiply
+        # each per-pad mat4 by Rx(theta), where theta is the
+        # `_seg_rotation_deg` tunable.  This rotates the pad
+        # mesh around its own pad-local +X axis (= the hinge-
+        # pin direction) before segmentOffset places the hinge
+        # on the spline.  Direction convention: from the
+        # ortho-LEFT-side view (camera at chassis -X looking
+        # +X, with chassis +Y up and chassis +Z to the right),
+        # POSITIVE theta = clockwise -- which corresponds to
+        # right-handed positive rotation about pad-local +X.
+        # Applied BEFORE the segmentOffset shift so the hinge
+        # still lands at the spline point regardless of theta.
+        rot_deg = float(getattr(self, '_seg_rotation_deg', 0.0))
+        if rot_deg != 0.0:
+            import math as _math
+            rad = _math.radians(rot_deg)
+            c = _math.cos(rad)
+            s = _math.sin(rad)
+            for xform in (xform_L, xform_R):
+                if xform is None or len(xform) == 0:
+                    continue
+                # Post-multiply by Rx(theta): col0 unchanged,
+                # new col1 = c*col1 + s*col2,
+                # new col2 = -s*col1 + c*col2,
+                # col3 (translation) unchanged.
+                Y = xform[:, 0:3, 1].copy()
+                Z = xform[:, 0:3, 2].copy()
+                xform[:, 0:3, 1] = c * Y + s * Z
+                xform[:, 0:3, 2] = -s * Y + c * Z
+
+        # ---- Per-pad curvature-derived up (Coffee 2026-05-10
+        # "can we trig that out regardless of location in the
+        # chain?" + "that segment flips over") ---------------
+        # For each pad i, compute the angle bisector at P[i]
+        # from its two neighbours -- this points TOWARD the
+        # local curvature centre.  Negate -> OUTWARD up.
+        #
+        #     A = (P[i-1] - P[i]) / |P[i-1] - P[i]|
+        #     B = (P[i+1] - P[i]) / |P[i+1] - P[i]|
+        #     bisector_in = A + B
+        #     up_outward  = -bisector_in / |bisector_in|
+        #
+        # Two passes:
+        #   (1) Compute `up_outward` for every pad where the
+        #       bisector magnitude is sufficient (> 1e-3 --
+        #       basically "any measurable curvature, even
+        #       a fraction of a degree of bend").
+        #   (2) Carry-forward sweep around the closed loop to
+        #       fill in pads where the bisector was below the
+        #       resolution threshold (= dead-straight sections
+        #       between wheels).  Each unfilled pad inherits
+        #       the up of its valid neighbour, so the
+        #       transition arc -> line -> arc is continuous --
+        #       no discrete switch between bisector and
+        #       centroid-radial code paths, which was the
+        #       v1.118.40 bug that caused single pads to
+        #       180-flip as they animated across the boundary.
+        #
+        # Per Coffee 2026-05-10 ("look at Z location in the 3
+        # images" -- one segment in three sequential animation
+        # frames showed a 180-degree flip), the issue was
+        # exactly that v1.118.40 boundary: bi_mag oscillated
+        # around the 0.05 cutoff, the code path switched
+        # between bisector-based and centroid-based up, and
+        # those two could disagree.  Always-bisector +
+        # carry-forward removes the cutoff entirely.
+        for xform, pos in ((xform_L, left_pos),
+                            (xform_R, right_pos)):
+            if (xform is None or pos is None
+                    or len(xform) < 3
+                    or len(pos) != len(xform)):
+                continue
+            N = len(xform)
+            pos_f = np.asarray(pos, dtype=np.float32)
+            # Per Coffee 2026-05-10 ("flipped 28 pad(s)" on
+            # Tiger steady-state, even with chain-walking
+            # validation): the cascading Pass 1.5 was
+            # fundamentally seed-dependent -- if the first
+            # valid pad in iteration happened to have a
+            # bisector in the wrong half-plane, every
+            # downstream comparison cascaded against the
+            # wrong reference and over-invalidated.
+            #
+            # New approach: validate each pad LOCALLY against
+            # the centroid-radial up at the SAME pad.  No
+            # chain propagation.
+            #   1. Compute centroid_3d, then per-pad
+            #      centroid_ups = normalize(pos - centroid)
+            #      with the X component zeroed (chain is in
+            #      YZ -- the side-X is meaningless for
+            #      orientation).  Same direction
+            #      build_oriented_transforms originally used.
+            #   2. Compute bisector outward per pad.  Use it
+            #      only when:
+            #        (a) bisector magnitude > 1e-3 AND
+            #        (b) bisector outward DOT centroid_up >
+            #            0 (same half-plane).
+            #   3. Otherwise fall back to centroid_up
+            #      directly.  Every pad ends up with a
+            #      valid up; no carry-forward pass needed.
+            centroid_3d = pos_f.mean(axis=0)
+            radial = pos_f - centroid_3d
+            radial[:, 0] = 0.0
+            rnrm = np.linalg.norm(radial, axis=1,
+                                   keepdims=True)
+            centroid_ups = (radial
+                            / np.maximum(rnrm, 1e-9)
+                            ).astype(np.float32)
+            ups       = np.zeros((N, 3), dtype=np.float32)
+            up_valid  = np.zeros(N, dtype=bool)
+            fell_back = []
+            for i in range(N):
+                cen = centroid_ups[i]
+                A = pos_f[(i - 1) % N] - pos_f[i]
+                B = pos_f[(i + 1) % N] - pos_f[i]
+                ma = float(np.linalg.norm(A))
+                mb = float(np.linalg.norm(B))
+                if ma < 1e-9 or mb < 1e-9:
+                    ups[i] = cen
+                    up_valid[i] = True
+                    continue
+                bisector_in = (A / ma) + (B / mb)
+                bi_mag = float(np.linalg.norm(bisector_in))
+                if bi_mag < 1.0e-3:
+                    ups[i] = cen
+                    up_valid[i] = True
+                    continue
+                candidate = (-bisector_in / bi_mag).astype(
+                    np.float32)
+                if float(np.dot(candidate, cen)) < 0.0:
+                    # Bisector landed in the wrong half-
+                    # plane vs centroid.  Use centroid.
+                    ups[i] = cen
+                    up_valid[i] = True
+                    fell_back.append(i)
+                    continue
+                ups[i] = candidate
+                up_valid[i] = True
+            # Throttled diagnostic.
+            if fell_back:
+                import time as _t_flip
+                now = _t_flip.monotonic()
+                last_t = getattr(self,
+                                  '_flip_log_t', 0.0)
+                if now - last_t > 1.0:
+                    side_tag = ('L' if xform is xform_L
+                                else 'R' if xform is xform_R
+                                else '?')
+                    s_off_tag = (
+                        self._track_chain_s_offset_L
+                        if side_tag == 'L' else
+                        self._track_chain_s_offset_R)
+                    seen_str = (','.join(
+                        str(k) for k in fell_back[:8])
+                        + ('...' if len(fell_back) > 8
+                           else ''))
+                    print(
+                        f'[flip-detect] side={side_tag}  '
+                        f's_offset={s_off_tag:+.4f}  '
+                        f'fell back to centroid for '
+                        f'{len(fell_back)} pad(s): '
+                        f'{seen_str}')
+                    self._flip_log_t = now
+            # Apply: replace col1 (up) with `new_up`, recompute
+            # col0 (right) = fwd x new_up, re-orthogonalise.
+            for i in range(N):
+                if not up_valid[i]:
+                    continue
+                new_up = ups[i]
+                # fwd_chain = -col2 (pad_forward_axis='-Z').
+                fwd = -xform[i, 0:3, 2]
+                new_right = np.cross(fwd, new_up)
+                nr = float(np.linalg.norm(new_right))
+                if nr < 1e-9:
+                    continue
+                new_right /= nr
+                new_up_o = np.cross(new_right, fwd)
+                xform[i, 0:3, 0] = new_right.astype(np.float32)
+                xform[i, 0:3, 1] = new_up_o.astype(np.float32)
+
+        # Per Coffee 2026-05-10 ("don't flip x on the left
+        # side"): the v1.118.10 X-mirror on L's pad transforms
+        # has been removed.  L and R now both render with the
+        # right-handed `build_oriented_transforms` output
+        # verbatim -- meaning pad-local +X axis points to world
+        # +X on BOTH sides.  For R this is outward (+X gauge);
+        # for L this is inward (the pad mesh's own +X face
+        # points toward the tank centerline).  Acceptable when
+        # the pad mesh is symmetric across its own X plane
+        # (typical WoT track-shoe geometry).
+        #
+        # Per Coffee 2026-05-10 ("it should be the hinge point on
+        # the tracks.. that's the offset we need"): the gameplay
+        # XML's `<trackPair><segmentOffset>` is where the pad
+        # mesh's HINGE PIN sits in pad-local coordinates -- the
+        # axis the pad rotates about as it travels along the
+        # spline.  The spline samples chain positions at uniform
+        # arc-length; what we WANT is for each pad's hinge pin
+        # to land at the sampled position, not for the pad
+        # mesh's local origin to land there.
+        #
+        # Mathematically: we need the pad-local point
+        # `(0, 0, seg_offset)` (the hinge) to map to the spline
+        # position `(p)`.  In `world = xform_local @ pad_local`,
+        # that means `xform_local[:, :, 3]` (= world dest of
+        # pad-local origin) must be shifted by
+        # `-seg_offset * z_axis` so that the hinge ends up at
+        # `p` instead.  The pad mesh body then sits offset
+        # FROM the spline by seg_offset along its forward
+        # direction -- exactly how a real track shoe hangs
+        # off its hinge pin.
+        #
+        # Sign flipped vs the v1.118.30 attempt (which placed
+        # the mesh origin at the spline AND additionally
+        # shifted forward by seg_offset, producing the worst
+        # of both worlds -- pads off the spline AND in the
+        # wrong direction).
+        ci_local = (getattr(self, '_pending_chassis_info',
+                            None) or {})
+        tsm = ci_local.get('track_segment_models') or {}
+        seg_offset = 0.0
+        try:
+            seg_offset = float(tsm.get('segmentOffset', 0.0) or 0.0)
+        except Exception:
+            seg_offset = 0.0
+        if seg_offset != 0.0:
+            if not getattr(self, '_segoff_logged', False):
+                self.log(
+                    f"segmentOffset = {seg_offset:+.4f} m -- "
+                    f"hinge-point offset along pad +Z; pads "
+                    f"shifted by -segmentOffset * z_axis so the "
+                    f"hinge lands on the spline",
+                    color=(180, 220, 255))
+                self._segoff_logged = True
+            # Per Coffee 2026-05-10 ("move that offset the other
+            # direction.. i think its the right one based on dims
+            # of track segment"): flipped back to + (the
+            # v1.118.30 sign).  The user verified visually from
+            # the track-segment mesh dimensions that the hinge
+            # should land in the +z_axis direction from where
+            # the v1.118.31 sign was putting it.
+            if xform_L is not None and len(xform_L) > 0:
+                xform_L[:, 0:3, 3] += (
+                    seg_offset * xform_L[:, 0:3, 2])
+            if xform_R is not None and len(xform_R) > 0:
+                xform_R[:, 0:3, 3] += (
+                    seg_offset * xform_R[:, 0:3, 2])
+        # Per Coffee 2026-05-09 "pads can't penetrate terrain":
+        # compose chassis_pose @ pad_xform on the CPU to get a
+        # world-space mat4 per pad, sample terrain at each pad's
+        # world XZ, and lift the pad's translation Y so its
+        # lowest corner sits at or above terrain.  After clamping,
+        # the world-space transforms go into the instance VBO and
+        # the shader gets identity for `u_chassis_pose` (the
+        # chassis transform is already baked in).
+        identity4 = np.eye(4, dtype=np.float32)
+        # Build world-space transform arrays per side.  Use
+        # `xform_world = chassis @ xform` for each pad, vectorised
+        # via `chassis @ xform.transpose(0, 2, 1)` etc.  Cheaper:
+        # one (4,4) @ (N,4,4) via numpy einsum.
+        def _to_world(xform_local):
+            if xform_local is None or len(xform_local) == 0:
+                return None
+            # chassis (4,4) row-major, xform_local (N,4,4) row-major.
+            # Standard mat-mat: result[n] = chassis @ xform_local[n].
+            return np.einsum('ij,njk->nik', chassis, xform_local
+                              ).astype(np.float32)
+        xform_world_L = _to_world(xform_L)
+        xform_world_R = _to_world(xform_R)
+
+        # Per Coffee 2026-05-10 ("read it, its in arrays.. list
+        # total errors in numbers"): compute the expected
+        # mirror relation between L and R and report the
+        # TOTAL deviation from perfect mirror, per quantity.
+        # Expected:  L_pos = mirror_x(R_pos),
+        #            L_right = mirror_x(R_right),  similarly for
+        #            up and forward axis columns.
+        # mirror_x(v) = (-v.x, v.y, v.z).
+        if not getattr(self, '_xform_dump_logged', False):
+            try:
+                import numpy as _np
+                if (xform_L is not None and xform_R is not None
+                        and len(xform_L) > 0
+                        and len(xform_L) == len(xform_R)):
+                    n = len(xform_L)
+                    # Stack the four columns of each matrix into
+                    # (N, 3) blocks: right (col 0), up (col 1),
+                    # forward (col 2), pos (col 3).
+                    L_right = xform_L[:, 0:3, 0]
+                    L_up    = xform_L[:, 0:3, 1]
+                    L_fwd   = xform_L[:, 0:3, 2]
+                    L_pos   = xform_L[:, 0:3, 3]
+                    R_right = xform_R[:, 0:3, 0]
+                    R_up    = xform_R[:, 0:3, 1]
+                    R_fwd   = xform_R[:, 0:3, 2]
+                    R_pos   = xform_R[:, 0:3, 3]
+
+                    def _mirror_x(arr):
+                        out = arr.copy()
+                        out[:, 0] = -out[:, 0]
+                        return out
+
+                    def _err(L, R, label):
+                        diff = L - _mirror_x(R)
+                        per_pad = _np.linalg.norm(diff, axis=1)
+                        bad = int((per_pad > 1e-3).sum())
+                        return (label, float(per_pad.sum()),
+                                float(per_pad.max()), bad, n)
+
+                    rows = [
+                        _err(L_pos,   R_pos,   'pos    '),
+                        _err(L_right, R_right, 'right  '),
+                        _err(L_up,    R_up,    'up     '),
+                        _err(L_fwd,   R_fwd,   'forward'),
+                    ]
+                    print('\n=== L vs mirror_x(R) error totals ===')
+                    print(f'  {"quantity":<10s}  '
+                          f'{"sum |err|":>11s}  '
+                          f'{"max |err|":>11s}  '
+                          f'{"pads > 1mm":>11s}/{"total":>5s}')
+                    for label, s, m, bad, tot in rows:
+                        print(f'  {label:<10s}  '
+                              f'{s:>11.6f}  '
+                              f'{m:>11.6f}  '
+                              f'{bad:>11d}/{tot:>5d}')
+                self._xform_dump_logged = True
+            except Exception as _exc:
+                print(f"[xform-dump] failed: {_exc}")
+                self._xform_dump_logged = True
+
+        # Per Coffee 2026-05-09 "track can not enter wheel": each
+        # pad must sit at least `radius + track_thickness` from
+        # every wheel hub (measured in world XYZ -- 3-D distance
+        # naturally separates left-side pads from right-side
+        # wheels via the ~3 m X gap between sides).  Wheel hubs
+        # come from `tp.last_wheel_world`, populated by
+        # `tank_physics.update()`.  Wheels are tested in 3-D so a
+        # pad on the wraparound that drifts inside ANY wheel's
+        # circle gets pushed back to the wheel's outer surface.
+        hubs_world = None
+        wheel_clamp_min = None
+        # Per-hub radii array (parallel to hubs_world).  Lets the
+        # stretch-net constrain pads against road wheels at
+        # `tp.radius` AND against drive sprocket / idler at THEIR
+        # larger XML-authored radii in the same loop.  Built up
+        # below alongside hubs_world.
+        hubs_radii = None
+        if (hasattr(tp, 'last_wheel_world')
+                and tp.last_wheel_world is not None
+                and len(tp.last_wheel_world) > 0):
+            # Per Coffee 2026-05-09 ("stop using it on wheels that
+            # are not on the ends"): clamp pads only against the
+            # rearmost + frontmost road wheels per side, not the
+            # middle ones.  Middle-wheel clamping was lifting
+            # pads off the bottom-run line whenever a middle hub
+            # got close in world XYZ; with only the end hubs in
+            # the clamp set the bottom run stays straight, which
+            # is what the user expects to see.
+            #
+            # End indices per side: argmin / argmax of chassis-
+            # local Z within each X-side group.  `tp.wheels` is
+            # parallel to `tp.last_wheel_world`; X sign separates
+            # L (X < 0) from R (X > 0).
+            wheels_local = np.asarray(tp.wheels, dtype=np.float32)
+            world_hubs   = np.asarray(
+                tp.last_wheel_world, dtype=np.float32)
+            keep = []
+            for x_sign in (-1.0, +1.0):
+                if x_sign < 0:
+                    side_mask = wheels_local[:, 0] < 0.0
+                else:
+                    side_mask = wheels_local[:, 0] > 0.0
+                side_idx = np.where(side_mask)[0]
+                if len(side_idx) == 0:
+                    continue
+                side_z = wheels_local[side_idx, 2]
+                rear_i  = int(side_idx[int(np.argmax(side_z))])
+                front_i = int(side_idx[int(np.argmin(side_z))])
+                keep.append(rear_i)
+                if front_i != rear_i:
+                    keep.append(front_i)
+            if keep:
+                hubs_world = world_hubs[np.array(keep, dtype=np.int32)]
+                # `track_thickness` removed from the clamp
+                # threshold per Coffee 2026-05-09 -- pads can sit
+                # on the wheel outer surface (radius), not
+                # radius + ribbon thickness.
+                wheel_clamp_min = float(getattr(tp, 'radius', 0.345))
+                hubs_radii = np.full(
+                    len(hubs_world), wheel_clamp_min,
+                    dtype=np.float32)
+
+                # Per Coffee 2026-05-09 ("bands between the end
+                # WD wheels and the closest W_"): also constrain
+                # pads against the end-most WD_ bones (drive
+                # sprocket + idler).  Hub world position =
+                # chassis_matrix @ chassis-local bind position;
+                # radius = per-bone radius from the gameplay
+                # XML's <wheelGroups>.  Append to the existing
+                # hubs / radii arrays so the same Y-clamp +
+                # Laplacian pass handles them in one shot.
+                wd_extras = self._end_wd_hubs_world(chassis)
+                if wd_extras is not None and len(wd_extras) > 0:
+                    extra_hubs = np.asarray(
+                        [(p[0], p[1], p[2]) for p, _r in wd_extras],
+                        dtype=np.float32)
+                    extra_radii = np.asarray(
+                        [r for _p, r in wd_extras],
+                        dtype=np.float32)
+                    hubs_world = np.concatenate(
+                        [hubs_world, extra_hubs], axis=0)
+                    hubs_radii = np.concatenate(
+                        [hubs_radii, extra_radii], axis=0)
+
+        # Per-side capture of the FIRST renderer's clamped xform
+        # so the pin-axis debug overlay below can draw lines at the
+        # exact rotation pivot the user actually sees rendered.
+        # `ex_for_pins` records the X half-extent of that first
+        # renderer (= half pad width) for the line length.
+        pin_xform_per_side = {'L': None, 'R': None}
+        ex_for_pins = {'L': 0.0, 'R': 0.0}
+
+        # Per Coffee 2026-05-10 (L renders wrong, R renders fine):
+        # one-shot diagnostic so we can SEE exactly which renderer
+        # key gets which xform_world.  Suspected: a key like
+        # "segmentModelLeft_R" or shared ref leaks one side's
+        # transforms into the other.
+        if not getattr(self, '_pad_dispatch_logged', False):
+            keys_found = list(self._track_pad_renderers.keys())
+            print(f"[pad-dispatch] renderer keys: {keys_found}")
+            for k in keys_found:
+                if 'Left' in k:
+                    side = 'L (xform_world_L)'
+                elif 'Right' in k:
+                    side = 'R (xform_world_R)'
+                else:
+                    side = '(none -- skipped!)'
+                print(f"  {k}  ->  {side}")
+            self._pad_dispatch_logged = True
+
+        for key, renderers in self._track_pad_renderers.items():
+            if 'Left' in key:
+                xform_world = xform_world_L
+                side_letter = 'L'
+            elif 'Right' in key:
+                xform_world = xform_world_R
+                side_letter = 'R'
+            else:
+                xform_world = None
+                side_letter = None
+            if xform_world is None or len(xform_world) == 0:
+                continue
+            # One-sided debug mode (Coffee 2026-05-10).
+            if (side_letter == 'R'
+                    and not getattr(self,
+                                     '_show_right_track', True)):
+                continue
+            for r in renderers:
+                # Per-pad terrain clamp.  Lowest corner world Y =
+                # T.y - (ex*|R10| + ey*|R11| + ez*|R12|) using the
+                # pad-local bbox half-extents (per-renderer) and
+                # the world rotation block of each instance's
+                # mat4 (= xform_world[n, 0:3, 0:3]).
+                xform_clamped = xform_world.copy()
+                ex, ey, ez = r.bbox_half_extent
+                # world rotation: rows 0..2, cols 0..2.
+                R10 = np.abs(xform_clamped[:, 1, 0])
+                R11 = np.abs(xform_clamped[:, 1, 1])
+                R12 = np.abs(xform_clamped[:, 1, 2])
+                lowest_offset = ex * R10 + ey * R11 + ez * R12
+                pad_center_y = xform_clamped[:, 1, 3]
+                lowest_y     = pad_center_y - lowest_offset
+                # Sample terrain at each pad's world XZ.
+                if (self.terrain is not None
+                        and hasattr(self.terrain, 'sample_heights')):
+                    wx = xform_clamped[:, 0, 3]
+                    wz = xform_clamped[:, 2, 3]
+                    terrain_y = np.asarray(
+                        self.terrain.sample_heights(wx, wz),
+                        dtype=np.float32)
+                    # Lift only when lowest corner is BELOW terrain.
+                    needed_lift = np.maximum(
+                        terrain_y - lowest_y, 0.0)
+                    xform_clamped[:, 1, 3] = pad_center_y + needed_lift
+
+                # Per Coffee 2026-05-10 ("segs are placed wrong
+                # on the yellow spline"): the legacy wheel-disk
+                # push + 50-iter Jacobi Y-relaxation that lived
+                # here was modifying every pad's `xform_clamped
+                # [:, 1, 3]` AFTER the chain had already been
+                # built by `_compute_homie_chain_for_frame`.
+                # Result: pad MESHES rendered at Jacobi-shifted
+                # Y; the yellow spline overlay was drawn from
+                # the un-shifted homie positions; the two
+                # disagreed and the user saw pads floating off
+                # the spline.
+                #
+                # Homie now does the work the wheel-disk push
+                # used to: every pad is placed exactly on the
+                # wheel circumference at every wrap point by
+                # construction.  No Y patch needed.  The
+                # terrain-floor lift above (when the lowest
+                # pad corner would sink below ground) stays --
+                # it's a different rule and the spline overlay
+                # already mirrors it.
+
+                # Capture the FIRST renderer's clamped xform per
+                # side for the pin-axis debug overlay.
+                if (side_letter is not None
+                        and pin_xform_per_side[side_letter] is None):
+                    pin_xform_per_side[side_letter] = xform_clamped.copy()
+                    ex_for_pins[side_letter] = float(ex)
+
+                r.update_transforms(xform_clamped)
+                r.render(self.pad_shader, identity4, view, proj)
+
+        # ---- Pin-axis debug lines ---------------------------------
+        # One short line per pad, drawn along the pad's local +X
+        # axis (= the cross-track hinge pin direction) at the pad
+        # CENTRE -- which is the rotation pivot
+        # `track_pads.build_oriented_transforms` chose.  Length =
+        # `2 * (ex + 0.001) m` so the stub pokes 1 mm out beyond
+        # each pin hole.  Magenta keeps it distinguishable from the
+        # F8 spline overlay's per-side yellow / cyan.
+        try:
+            pin_segs = []
+            PIN_COL = (1.0, 0.0, 1.0)
+            for side, xfm in pin_xform_per_side.items():
+                if xfm is None or len(xfm) == 0:
+                    continue
+                ex = ex_for_pins[side]
+                if ex <= 0.0:
+                    continue
+                # Local +X in world = first column of each mat4.
+                x_axis = xfm[:, 0:3, 0]                  # (N, 3)
+                centre = xfm[:, 0:3, 3]                  # (N, 3)
+                half_len = ex + 0.001
+                p0 = centre - half_len * x_axis
+                p1 = centre + half_len * x_axis
+                for i in range(len(centre)):
+                    pin_segs.append(
+                        (tuple(p0[i].astype(np.float32)),
+                         tuple(p1[i].astype(np.float32)),
+                         PIN_COL))
+            if pin_segs:
+                self._pin_axis_lines.update(pin_segs)
+                glEnable(GL_DEPTH_TEST)
+                self._pin_axis_lines.render(
+                    self.color_shader, view, proj)
+        except Exception as _ex_pin:
+            if not getattr(self, '_pin_axis_err_logged', False):
+                self.log(
+                    f"pin-axis debug error: "
+                    f"{type(_ex_pin).__name__}: {_ex_pin}",
+                    color=(255, 180, 120))
+                self._pin_axis_err_logged = True
+
+        # (v1.118.17 drew a blue 3-D cross at pad #(N-1) on
+        # each side here for chain-closure debugging.  Removed
+        # in v1.118.37 per Coffee 2026-05-10 "remove first seg
+        # blue markers" -- closure is visibly correct now and
+        # the cross was adding noise to the screen.)
+
+    def _end_wd_hubs_world(self, chassis_matrix):
+        """Return [(world_xyz, radius), ...] for the drive sprocket
+        and idler bones per side -- the "end" wheels at the
+        front + rear of each track.  Used as extra constraint
+        hubs for the spline stretch-net per Coffee 2026-05-09
+        ("bands between the end WD wheels and the closest W_").
+
+        XML-driven per Coffee 2026-05-09 ("is there nothing to
+        tell us in the xml files for the tank? yes please"): the
+        roles come straight from
+        `_pending_chassis_info['wheel_roles']`:
+            * `drive_sprockets_<L|R>` = engine-driven wheels
+              (`<isLeading>true</isLeading>` in <wheels>)
+            * `idlers_<L|R>` = lone non-leading single wheels
+        No Z-sort heuristic; if the XML doesn't list a role we
+        skip it.  Per-bone radius from the same `wheel_radii`
+        dict the loader already builds.
+
+        Hub world position = `chassis_matrix @ bone_chassis_local`.
+        These wheels are bolted to the chassis frame (no
+        suspension deflection), so the bind-pose chassis-local
+        position is correct every frame.
+        """
+        bind = getattr(self, '_track_chassis_bones_bind', None)
+        if not bind:
+            return []
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        roles = ci.get('wheel_roles') or {}
+        wheel_radii = ci.get('wheel_radii') or {}
+        if not roles or not wheel_radii:
+            return []
+        # Collect every drive-sprocket + idler name across both
+        # sides.  Drive sprocket names from XML are typically
+        # `WD_<side><i>`; idler names can be either `WD_<side><N>`
+        # (T30) or `W_<side><N>` (M3 Stuart's W_L4).  Both are
+        # handled the same way here -- look up by name.
+        wanted = []
+        for k in ('drive_sprockets_L', 'drive_sprockets_R',
+                  'idlers_L', 'idlers_R'):
+            for nm in roles.get(k, []):
+                wanted.append(nm)
+        if not wanted:
+            return []
+        out = []
+        chassis = np.asarray(chassis_matrix, dtype=np.float64)
+        for nm in wanted:
+            # Bone position lookup (try plain name then
+            # `_BlendBone` suffix some palettes use).
+            p_local = bind.get(nm)
+            if p_local is None:
+                p_local = bind.get(nm + '_BlendBone')
+            if p_local is None:
+                continue
+            # Radius lookup, same try-both pattern.
+            r = wheel_radii.get(nm)
+            if r is None:
+                r = wheel_radii.get(nm + '_BlendBone')
+            if r is None:
+                continue
+            p_h = np.array(
+                [float(p_local[0]),
+                 float(p_local[1]),
+                 float(p_local[2]),
+                 1.0], dtype=np.float64)
+            p_w = (chassis @ p_h)[:3]
+            out.append(((float(p_w[0]),
+                         float(p_w[1]),
+                         float(p_w[2])),
+                        float(r)))
+        return out
+
+    def _pad_wheel_hubs_chassis_local(self, side: str,
+                                       wheel_radius: float) -> np.ndarray:
+        """Return a chassis-local bind-pose hub array for the
+        END road wheels (rearmost + frontmost) on the requested
+        side -- shape `(2, 3)`, or `(1, 3)` if there's only one
+        wheel on this side, or `(0, 3)` if no binding is loaded.
+
+        Per Coffee 2026-05-09 "we only want to apply seg rotation
+        at end wheels": middle bottom-run pads stay aligned with
+        the spline tangent (= flat horizontal between wheels) so
+        a middle wheel deflecting up doesn't tilt its pad off the
+        rest of the bottom run.  Only the rearmost / frontmost
+        wheels get the radial frame, which is what wraps the
+        end-wheel pads around the wheel circumference.
+
+        Each entry = `Track_<side>i.bind_pos + (0, wheel_radius, 0)`
+        -- the WoT convention is `Track_<side>i` is the ground
+        contact and the wheel hub sits exactly `wheel_radius`
+        metres above.  Pulled from `bottom_run_bones[0]` and
+        `[-1]` (the post-Z-sort extremes).
+
+        Returns an empty `(0, 3)` array when no spline / binding
+        is available (e.g. tank load in progress, binding parse
+        failed).  Caller treats that as "skip the radial frame
+        and use the tangent fallback".
+        """
+        side_letter = 'L' if str(side).upper().startswith('L') else 'R'
+        spline = (self._track_left if side_letter == 'L'
+                  else self._track_right)
+        if (spline is None or spline.binding is None
+                or not spline.binding.bottom_run_bones):
+            return np.zeros((0, 3), dtype=np.float32)
+        bones = spline.binding.bottom_run_bones
+        if len(bones) >= 2:
+            picks = [bones[0], bones[-1]]
+        else:
+            picks = [bones[0]]
+        out = np.zeros((len(picks), 3), dtype=np.float32)
+        for i, (_name, bind_pos) in enumerate(picks):
+            out[i, 0] = float(bind_pos[0])
+            out[i, 1] = float(bind_pos[1]) + float(wheel_radius)
+            out[i, 2] = float(bind_pos[2])
+        return out
+
+    def _diag_chain(self, tag, *args):
+        """One-shot diagnostic logger so a failing chain-method
+        call shows up in the log + stdout exactly once per
+        session, instead of silently returning None forever."""
+        flag = f'_chain_diag_{tag}'
+        if getattr(self, flag, False):
+            return
+        msg = f"[chain-diag {tag}] " + " ".join(str(a) for a in args)
+        print(msg)
+        try:
+            self.log(msg, color=(220, 200, 120))
+        except Exception:
+            pass
+        setattr(self, flag, True)
+
+
+    def _compute_stock_chain_for_frame(self, tp):
+        """Build the engine's stock Catmull-Rom track chain for
+        the current frame.  Returns
+            (left_pos, left_tan, right_pos, right_tan)
+        each (n_pads, 3) float32 in chassis-local XYZ, or
+        (None, None, None, None) on missing data.
+
+        Pulls the augmented control loop from the tank's
+        `.track`-file `TrackSplineSide`, runs centripetal
+        Catmull-Rom (alpha=1.0 chordal), resamples uniformly
+        to `n_pads`.  Per-frame rebuild from CURRENT bone
+        positions so suspension deflection feeds in.
+
+        Per Coffee 2026-05-10 ("split it in to 2 diff
+        functions"): split out from `_render_track_pad_body`
+        as the parallel of `_compute_homie_chain_for_frame`.
+        Both have identical return shape; the F9 toggle picks
+        one or the other.
+        """
+        left_pos = right_pos = None
+        left_tan = right_tan = None
+        try:
+            from .track_spline import (
+                centripetal_catmull_rom_closed, resample_uniform,
+            )
+        except Exception as exc:
+            self._diag_chain('stock_import_fail', exc)
+            return None, None, None, None
+        n_pads = self._resolve_pads_per_side()
+        if n_pads <= 0:
+            self._diag_chain('stock_no_pads', n_pads)
+            return None, None, None, None
+        try:
+            bones_now = self._track_current_bone_positions(tp)
+        except Exception as exc:
+            self._diag_chain('stock_bones_fail', exc)
+            return None, None, None, None
+        sps = max(16, int(n_pads))
+        try:
+            if self._track_left is None:
+                self._diag_chain('stock_left_none')
+            elif self._track_left.binding is None:
+                self._diag_chain('stock_left_binding_none')
+            else:
+                ctrl = self._track_left.build_augmented_control_loop(
+                    bones_now)
+                if len(ctrl) < 4:
+                    self._diag_chain('stock_left_ctrl_short',
+                                      len(ctrl))
+                else:
+                    dense = centripetal_catmull_rom_closed(
+                        ctrl, samples_per_seg=sps, alpha=1.0)
+                    left_pos, left_tan, _ = resample_uniform(
+                        dense, n_pads)
+                    self._track_left_pad_pos = left_pos
+                    self._track_left_pad_tan = left_tan
+                    self._diag_chain('stock_left_ok',
+                                      'shape', left_pos.shape)
+            if self._track_right is None:
+                self._diag_chain('stock_right_none')
+            elif self._track_right.binding is None:
+                self._diag_chain('stock_right_binding_none')
+            else:
+                ctrl = self._track_right.build_augmented_control_loop(
+                    bones_now)
+                if len(ctrl) < 4:
+                    self._diag_chain('stock_right_ctrl_short',
+                                      len(ctrl))
+                else:
+                    dense = centripetal_catmull_rom_closed(
+                        ctrl, samples_per_seg=sps, alpha=1.0)
+                    right_pos, right_tan, _ = resample_uniform(
+                        dense, n_pads)
+                    self._track_right_pad_pos = right_pos
+                    self._track_right_pad_tan = right_tan
+                    self._diag_chain('stock_right_ok',
+                                      'shape', right_pos.shape)
+        except Exception as exc:
+            self._diag_chain('stock_build_exc',
+                              type(exc).__name__, exc)
+        return left_pos, left_tan, right_pos, right_tan
+
+
+    def _diag_chain_traceback(self, tag, exc):
+        """Like _diag_chain but prints the full traceback so we
+        can locate the exact line that throws.  One-shot per
+        session per tag.
+        """
+        flag = f'_chain_diag_tb_{tag}'
+        if getattr(self, flag, False):
+            return
+        import traceback, sys
+        # Print to BOTH stdout and stderr explicitly, with
+        # newlines and a banner so the traceback can't be lost
+        # in the surrounding terminal noise.
+        banner = ('=' * 60)
+        sys.stdout.write(
+            f"\n{banner}\n[chain-diag-tb {tag}] "
+            f"{type(exc).__name__}: {exc}\n{banner}\n")
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.write(f"{banner}\n")
+        sys.stdout.flush()
+        try:
+            self.log(f"[chain-diag-tb {tag}] "
+                     f"{type(exc).__name__}: {exc}",
+                     color=(255, 110, 110))
+        except Exception:
+            pass
+        setattr(self, flag, True)
+
+
+    def _compute_homie_chain_for_frame(self, tp):
+        """Build the home-brewed wheel-tangent chain for the
+        current frame.  Returns
+            (left_pos, left_tan, right_pos, right_tan)
+        each (n_pads, 3) float32 in chassis-local XYZ, or
+        (None, None, None, None) on missing data.
+
+        Per-frame rebuild from CURRENT bone positions, so as
+        the suspension deflects the chain follows.
+
+        Per Coffee 2026-05-10 ("F9 swaps math"): runtime
+        equivalent of the offline homie pipeline in
+        `cust_tools/plot_wheel_tangent_pies.py` /
+        `plot_homie_tiger.py`.  Lives in `track_homie.py`.
+        """
+        try:
+            from . import track_homie as _th
+        except Exception:
+            return None, None, None, None
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        radii = ci.get('wheel_radii') or {}
+        roles = ci.get('wheel_roles') or {}
+        if not radii or not roles:
+            return None, None, None, None
+        seg_len   = ci.get('segmentLength')
+        seg_count = ci.get('segmentsCount')
+        if not seg_len or not seg_count:
+            return None, None, None, None
+        n_pads = int(seg_count)
+        try:
+            bones = self._track_current_bone_positions(tp)
+        except Exception:
+            return None, None, None, None
+        if not bones:
+            return None, None, None, None
+        # Track gauge from L-wheel median X.
+        # `or` against numpy arrays would trigger
+        # "truth value ambiguous"; use explicit None checks.
+        l_xs = []
+        for nm in radii:
+            if 'L' not in nm:
+                continue
+            b = bones.get(nm)
+            if b is None:
+                b = bones.get(nm + '_BlendBone')
+            if b is None:
+                continue
+            l_xs.append(float(b[0]))
+        if not l_xs:
+            return None, None, None, None
+        l_xs.sort()
+        gauge_x = abs(l_xs[len(l_xs) // 2]) * 2.0
+        # Track-speed integrator (Coffee 2026-05-10 "match the
+        # track speed to ground speed so the tracks are
+        # moving" -> "tracks move backwards").  Per Coffee
+        # 2026-05-10 ("we have DX to GL to deal with..  it
+        # messes your rotations backwards and the tracks move
+        # backwards"): the v1.118.43 sign was based on
+        # chassis-local reasoning that didn't account for the
+        # DX->GL Z-flip applied at primitive-load time
+        # (`flip_z = not has_bones` in loaders.py).  Flipped
+        # to + so pads on the bottom run appear to advance
+        # rearward relative to the rendered tank as it drives
+        # forward.
+        #
+        # NOTE: also fixed a stray `//` Python syntax error in
+        # the comment block above this on the way through.
+        speed_mps = float(getattr(tp, 'cur_forward_mps', 0.0))
+        dt        = float(getattr(self, '_frame_dt', 1.0 / 60.0))
+        self._track_chain_s_offset_L += speed_mps * dt
+        self._track_chain_s_offset_R += speed_mps * dt
+        lp_L, lt_L = _th.compute_homie_chain(
+            bones, radii, roles, side='left',
+            n_pads=n_pads, seg_len=float(seg_len),
+            gauge_x=gauge_x,
+            s_offset=self._track_chain_s_offset_L)
+        lp_R, lt_R = _th.compute_homie_chain(
+            bones, radii, roles, side='right',
+            n_pads=n_pads, seg_len=float(seg_len),
+            gauge_x=gauge_x,
+            s_offset=self._track_chain_s_offset_R)
+        # Per Coffee 2026-05-10 ("pads follow splines well..
+        # they are flipped in Z"): chassis bones are read raw
+        # from the visual hierarchy and live in the un-flipped
+        # bigworld -Z=forward frame (same as skinned chassis
+        # primitives, where `loaders.py` sets `flip_z = not
+        # has_bones`).  But the runtime renderer -- chassis
+        # pose, pad mesh transforms, line-strip overlay -- all
+        # consume `+Z forward` chassis-local space (the frame
+        # V_locs land in after `to_chassis_frame(flip_z=True)`).
+        # Convert here, at the runtime entry point only, so:
+        #   * `_collect_wheels` keeps its native-Z input -- the
+        #     L/R mirror it produces is exact, no asymmetry.
+        #   * Offline plots (`plot_homie_4quad.py`,
+        #     `plot_right_compare.py`) keep calling
+        #     `track_homie.compute_homie_chain` directly and
+        #     get the native-frame output they expect for
+        #     visual layout.
+        #   * Runtime pad meshes + spline overlay get the
+        #     +Z-forward frame the renderer wants.
+        for arr in (lp_L, lt_L, lp_R, lt_R):
+            if arr is not None:
+                arr[:, 2] *= -1.0
+        # Per Coffee 2026-05-10 Option 1 ("we need to rotate
+        # them so opposing hinge out lines up with the next
+        # ones location... 1 lets try it"): overwrite each
+        # pad's tangent with the unit chord vector to the NEXT
+        # pad's position.  In `build_oriented_transforms` the
+        # forward axis is taken from this tangent, so the
+        # pad's local +Z (= -fwd by pad_forward_axis='-Z'
+        # default) now points along the chord -- which makes
+        # the pad's far hinge land on the next pad's near
+        # hinge automatically.  Closed loop: pad N-1's chord
+        # wraps to pad 0.  Magnitudes safe-clamped to 1e-9 so
+        # a degenerate zero-chord pair doesn't NaN out the
+        # whole side.
+        for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
+            if pos is None or tan is None or len(pos) < 2:
+                continue
+            chord = np.roll(pos, -1, axis=0) - pos
+            nrm = np.linalg.norm(chord, axis=1, keepdims=True)
+            chord = chord / np.maximum(nrm, 1e-9)
+            tan[:] = chord.astype(tan.dtype)
+        if (lp_L is not None
+                and not getattr(self, '_homie_log_emitted', False)):
+            self.log(
+                f"[homie] chain ready  L:{len(lp_L)} pads  "
+                f"R:{len(lp_R) if lp_R is not None else '?'} pads  "
+                f"gauge={gauge_x:.3f} m  (rebuilds per frame)",
+                color=(120, 220, 180))
+            # Diagnostic dump per Coffee 2026-05-10 (runtime
+            # homie shape allegedly differs from the offline
+            # plot).  First 3 + middle + last pad on both sides
+            # so we can compare numerically.
+            import numpy as _np
+            for tag, arr in (('L', lp_L), ('R', lp_R)):
+                if arr is None:
+                    continue
+                idxs = [0, 1, 2, len(arr) // 2,
+                        len(arr) - 2, len(arr) - 1]
+                msg = f"[homie {tag}] sample pads:\n"
+                for i in idxs:
+                    msg += (f"  #{i:3d}: "
+                            f"({arr[i, 0]:+.4f}, "
+                            f"{arr[i, 1]:+.4f}, "
+                            f"{arr[i, 2]:+.4f})\n")
+                print(msg)
+            self._homie_log_emitted = True
+        return lp_L, lt_L, lp_R, lt_R
+
+
     def _track_current_bone_positions(self, tp):
         """Return a `{bone_name: chassis_local_xyz}` dict for the
-        current frame, suitable for
-        `TrackSplineSide.build_augmented_control_loop()`.
+        current frame.  Bind positions plus per-wheel suspension
+        residuals on every road-wheel bone, plus the manual
+        `_track_test_dy` bias on the Track_<side>i ground nodes.
 
-        Strategy:
-          * Start from the bind-pose dict captured at vehicle
-            load (`self._track_chassis_bones_bind`).  Most chassis
-            bones don't deflect with terrain (`Track_VT_*`,
-            `Track_VD_*`, `WD_*`, `HP_*`, etc.) so they're
-            already correct in chassis-local space.
-          * Override `Track_<side><i>` ground-contact bones with
-            the chassis-local Y where the OUTER track surface
-            actually lives, plus the wheel residual.
+        Per Coffee 2026-05-10 ("we have the right splines now ..
+        make sure we are using this to calculating the rotation
+        and flex in the track segments"): the homie chain is now
+        rebuilt every frame from CURRENT (deflected) bone
+        positions, so the pads naturally:
+          * REPOSITION as wheels move up / down with the
+            suspension (a deflected wheel rises / sinks; the
+            chain wrapping it follows)
+          * REORIENT because `build_oriented_transforms` reads
+            the post-flex pad tangents -- pad +Z stays along
+            the chain travel direction even when the wheel
+            below has deflected
+        The wheel-disk push + Jacobi pass in
+        `_render_track_pad_body` is therefore largely redundant
+        and should be retired in a follow-up; it stays as a
+        safety net during the transition.
 
-        The Y-lift fix is the subtle bit.  In bind pose the
-        Track_L<i> bones in `.visual_processed` all sit at
-        Y = 0 -- that's WoT's authoring convention but it is NOT
-        where the visible track ribbon contacts the ground.  The
-        ground-contact surface lives one wheel-radius +
-        track-thickness BELOW the wheel hub, so:
-
-            track_y_local = hub_y_local - radius - track_thickness
-                            + smoothed_residual_y
-
-        For T30 this is +0.448 - 0.345 - 0.029 = +0.074 m -- about
-        7.4 cm above Y = 0.  Without the lift the spline bottom
-        run renders ~7 cm below the terrain (since the chassis
-        integrator sits the chassis with its origin BELOW the
-        terrain so wheels reach down to ground); user reported
-        "spline is in the terrain" 2026-05-08, this is the fix.
-
-        Wheel -> Track_<side><i> mapping: derived from
-        `tp.wheel_bone_names` by name substitution
-        (`W_L0_BlendBone` -> `Track_L0`).  Same indexing the GPU
-        skinning shader's bone matrix array uses, so the NURB
-        spline overlay shows the SAME deformation as the
-        rendered track ribbon.
+        Reverts the 2026-05-09 "static chassis-local path"
+        directive in favour of letting homie do the work the
+        per-pad clamp used to do.
 
         Args:
-            tp: The active `TankPhysics` instance, post-update so
-                `tp.smoothed_residual_y` reflects the current
-                frame's per-wheel Y deflection.
+            tp: The active `TankPhysics` instance.  Read for
+                `last_residual_y` and `wheel_bone_names`.  None
+                falls back to bind poses (useful for tools that
+                exercise the function without a physics tick).
 
         Returns:
             Dict mapping bone names to `np.ndarray((3,))`
             chassis-local positions.  Same keys as
-            `_track_chassis_bones_bind`; values mutated for the
-            wheel-attached subset.
+            `_track_chassis_bones_bind`.
         """
         bind = self._track_chassis_bones_bind
         if not bind:
             return {}
         out = {k: v.copy() for k, v in bind.items()}
-        residuals = getattr(tp, 'smoothed_residual_y', None)
-        names     = getattr(tp, 'wheel_bone_names', None)
-        wheels    = getattr(tp, 'wheels', None)
-        if residuals is None or not names or wheels is None:
-            return out
-        radius          = float(getattr(tp, 'radius', 0.345))
-        track_thickness = float(getattr(tp, 'track_thickness', 0.029))
-        for i, wn in enumerate(names):
-            if i >= len(residuals) or i >= len(wheels):
-                break
-            # 'W_L0_BlendBone' -> 'Track_L0'.  Skip any bone name
-            # that doesn't fit the expected pattern -- safer than
-            # silently corrupting the dict.
-            if not wn.startswith('W_') or '_BlendBone' not in wn:
-                continue
-            track_name = ('Track_'
-                          + wn[len('W_'):].replace('_BlendBone', ''))
-            base = bind.get(track_name)
-            if base is None:
-                continue
-            # Per-wheel hub Y in chassis-local (mesh-local).  Used
-            # instead of a single global lift constant because
-            # different wheels CAN sit at different heights -- T30's
-            # frontmost wheel is at Y = +0.426 while its rear road
-            # wheel is at Y = +0.460 in some chassis variants.
-            hub_y_local = float(wheels[i][1])
-            # `_track_test_dy` is a manual visualization bias --
-            # adds the same offset to every wheel for the spline
-            # overlay so a parked tank shows the bottom run drop
-            # / lift when the user holds LEFT/RIGHT arrows.  Does
-            # NOT enter the physics solver, so wheels-on-ground
-            # state stays correct even while the spline droops.
-            track_y = (hub_y_local - radius - track_thickness
-                       + float(residuals[i])
-                       + float(getattr(self, '_track_test_dy', 0.0)))
-            # Keep base X / Z (wheel-aligned along the track) and
-            # only override Y.  The ground-contact bone's bind X
-            # already matches its sister wheel's X, so we don't
-            # want to use the WHEEL's X here -- there can be a
-            # small per-bone authoring offset.
-            out[track_name] = np.array(
-                [base[0], track_y, base[2]], dtype=np.float64)
+
+        # Resolve a physics bone name to whatever key actually
+        # exists in the bone dict.  Handles the four common
+        # cases:
+        #   exact match     ('W_L1_BlendBone' in dict)
+        #   add suffix      ('W_L1' -> dict has 'W_L1_BlendBone')
+        #   strip suffix    ('W_L1_BlendBone' -> dict has 'W_L1')
+        #   give up         (return None; caller skips)
+        def _resolve(name):
+            if not name:
+                return None
+            if name in out:
+                return name
+            if name + '_BlendBone' in out:
+                return name + '_BlendBone'
+            if (name.endswith('_BlendBone')
+                    and name[:-len('_BlendBone')] in out):
+                return name[:-len('_BlendBone')]
+            return None
+
+        # ---- Suspension residuals on road-wheel bones --------
+        # `tp.last_residual_y[i]` is the per-wheel Y offset the
+        # solver wants applied to the road wheel bone at
+        # `tp.wheel_bone_names[i]`.  Same data the skinning
+        # shader's `bone_matrix_array` uses for visible wheel
+        # deflection.
+        applied_residual_n = 0
+        if (tp is not None
+                and getattr(tp, 'last_residual_y', None) is not None
+                and getattr(tp, 'wheel_bone_names', None)):
+            residual = tp.last_residual_y
+            for i, name in enumerate(tp.wheel_bone_names or []):
+                key = _resolve(name)
+                if key is None:
+                    continue
+                ry = float(residual[i])
+                if ry == 0.0:
+                    continue
+                p = out[key].copy()
+                p[1] = p[1] + ry
+                out[key] = p
+                applied_residual_n += 1
+
+        # ---- Manual test-deflection bias --------------------
+        # Per Coffee 2026-05-10 ("the drawn spline does not flex
+        # or deform"): the older form applied `_track_test_dy`
+        # to `Track_<side>i` ground nodes only, but homie's
+        # chain build keys off the WHEEL bones (`W_<side>i`,
+        # `W_F_<L|R>`, `W_R<i>_<L|R>` -- whatever appears in
+        # `_pending_chassis_info['wheel_radii']`).  When test_dy
+        # missed the wheel bones the chain stayed at bind shape
+        # and the spline never visibly flexed.
+        #
+        # New behaviour: apply test_dy uniformly to BOTH
+        #   * `Track_<side>i` ground nodes (legacy spline path,
+        #     still valid for any consumer that reads them)
+        #   * every wheel-bone name in `wheel_radii` (homie's
+        #     actual input -- this is what makes the chain bend
+        #     in response to LEFT / RIGHT arrows)
+        # The two sets generally don't overlap.
+        test_dy = float(getattr(self, '_track_test_dy', 0.0))
+        applied_test_dy_n = 0
+        track_bones_hit = 0
+        sample_pre_y = None
+        sample_post_y = None
+        sample_key = None
+        if test_dy != 0.0:
+            import re as _re
+            ground_re = _re.compile(r'^Track_[LR]\d+(_BlendBone)?$')
+            for k in list(out.keys()):
+                if ground_re.match(k):
+                    p = out[k].copy()
+                    p[1] = p[1] + test_dy
+                    out[k] = p
+                    track_bones_hit += 1
+            ci = (getattr(self, '_pending_chassis_info', None)
+                  or {})
+            radii_dict = ci.get('wheel_radii') or {}
+            for wn in radii_dict:
+                key = _resolve(wn)
+                if key is None:
+                    continue
+                p = out[key].copy()
+                if sample_pre_y is None:
+                    sample_pre_y = float(bind[key][1])
+                    sample_key = key
+                p[1] = p[1] + test_dy
+                out[key] = p
+                if sample_post_y is None and key == sample_key:
+                    sample_post_y = float(p[1])
+                applied_test_dy_n += 1
+
+        # ---- Diagnostic: throttled per-second dump while
+        # residuals or test_dy are active.  Per Coffee 2026-05-10
+        # ("still no affect on spline"): we have no visibility
+        # into whether the bias is actually flowing into the
+        # bone dict.  This print gives one line per second
+        # showing wheels-touched + a sample (pre, post) Y pair
+        # so the bias is unambiguously visible in the console.
+        active = (applied_residual_n > 0 or test_dy != 0.0)
+        if active:
+            import time as _t
+            now = _t.monotonic()
+            last = getattr(self, '_track_bone_log_t', 0.0)
+            if now - last > 1.0:
+                _ci_log = (getattr(self, '_pending_chassis_info',
+                                    None) or {})
+                _radii_n = len(_ci_log.get('wheel_radii') or {})
+                msg = (f'[track-bones] residuals_applied='
+                       f'{applied_residual_n}  '
+                       f'test_dy={test_dy:+.3f}  '
+                       f'track_bones_hit={track_bones_hit}  '
+                       f'wheel_bones_hit={applied_test_dy_n}  '
+                       f'radii_keys={_radii_n}')
+                if sample_pre_y is not None:
+                    msg += (f'  sample[{sample_key}] '
+                            f'Y: {sample_pre_y:+.4f} -> '
+                            f'{sample_post_y:+.4f}')
+                print(msg)
+                self._track_bone_log_t = now
         return out
 
     # ==================================================================
@@ -4203,6 +6083,371 @@ class Viewer:
         ui.shader.set_int('u_use_tex', 0)
         glBindVertexArray(0)
 
+    # ------------------------------------------------------------------
+    # Per-frame chassis status overlay -- Heading / XYZ / Speed.
+    # ------------------------------------------------------------------
+    def _render_tank_status_overlay(self, width, height):
+        """Three-line live readout in the upper-left, drawn every
+        frame.  Lines, in order:
+
+            Heading: <0..359.9 deg>   (chassis yaw mod 360)
+            X / Y / Z (chassis world position, m)
+            Speed: <m/s> (<kph>)      (drive-layer ACTUAL forward
+                                       speed -- the smoothed ramped
+                                       value, not the speed-step
+                                       selector)
+
+        Cache key is the formatted text -- rebuilds when ANY of the
+        three values changes, which at 60 fps with a moving tank is
+        every frame, ~1-2 ms.
+        """
+        if not pygame.font.get_init():
+            return
+        if self.tank_physics is None:
+            return
+        ui = self.ui
+        if ui is None or not hasattr(ui, 'shader'):
+            return
+        tp = self.tank_physics
+        # Compass heading: 0 .. 359.9 deg, where 0 = chassis-forward
+        # (= -Z in TEPY's convention).  yaw_deg from the integrator
+        # is signed and can wrap, so mod-360 + nudge into [0, 360).
+        heading_deg = float(tp.yaw_deg) % 360.0
+        if heading_deg < 0.0:
+            heading_deg += 360.0
+        # ACTUAL speed (drive-layer ramped m/s), not the speed-step
+        # selector value.  Per Coffee 2026-05-08: speed-step shows
+        # the user's input, not what the tank is actually doing.
+        speed_mps = float(getattr(tp, 'cur_forward_mps', 0.0))
+        speed_kph = speed_mps * 3.6
+        lines = [
+            f"Heading:  {heading_deg:6.1f} deg",
+            f"XYZ: {tp.pos[0]:+8.2f}  {tp.pos[1]:+8.2f}  {tp.pos[2]:+8.2f}",
+            f"Speed:    {speed_mps:+6.2f} m/s  ({speed_kph:+6.1f} kph)",
+        ]
+        text_key = '\n'.join(lines)
+
+        cache = getattr(self, '_status_overlay_cache', None)
+        if cache is None or cache[0] != text_key:
+            font = getattr(self, '_status_overlay_font', None)
+            if font is None:
+                try:
+                    font = pygame.font.SysFont('Consolas', 16, bold=True)
+                except Exception:
+                    font = pygame.font.Font(None, 16)
+                self._status_overlay_font = font
+            # Render each line, then composite into a single
+            # alpha-mask surface.  pygame's `font.render` with
+            # antialiasing produces premultiplied RGBA which the
+            # UI shader's mode-1 path treats as a mask (alpha
+            # only); the on-tint colour comes from `u_color`.
+            surfs = [font.render(line, True, (255, 255, 255))
+                     for line in lines]
+            total_h = sum(s.get_height() for s in surfs)
+            total_w = max(s.get_width() for s in surfs) if surfs else 1
+            combined = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
+            y = 0
+            for s in surfs:
+                combined.blit(s, (0, y))
+                y += s.get_height()
+            data = pygame.image.tostring(combined, 'RGBA', False)
+            tw, th = combined.get_width(), combined.get_height()
+            if cache is not None:
+                try:
+                    glDeleteTextures([cache[1]])
+                except Exception:
+                    pass
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tid)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0,
+                          GL_RGBA, GL_UNSIGNED_BYTE, data)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            self._status_overlay_cache = (text_key, tid, tw, th)
+            cache = self._status_overlay_cache
+
+        _, tid, tw, th = cache
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        ui.shader.use()
+        ui.shader.set_mat4('projection', ui._ortho(width, height))
+        glBindVertexArray(ui.quad_vao)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        ui.shader.set_int('u_tex', 0)
+        ui.shader.set_int('u_use_tex', 1)
+        # Soft amber so it's visually distinct from the grass-green
+        # physics-timer overlay (which sits a few pixels above this
+        # one).
+        ui.shader.set_vec4('u_color', 1.00, 0.82, 0.40, 1.0)
+        # Place under the physics overlay (which lives at y=8 with
+        # height ~22 px); leaves a 4 px gap so the two readouts
+        # don't visually run together.
+        overlay_x = self.INFO_PANEL_W + 10
+        overlay_y = 8 + 22 + 4   # = 34 px
+        ui._draw_quad(overlay_x, overlay_y, tw, th)
+        ui.shader.set_int('u_use_tex', 0)
+        glBindVertexArray(0)
+
+    # ------------------------------------------------------------------
+    # Bottom-left mini-map -- top-down tank position + heading arrow.
+    # ------------------------------------------------------------------
+    def _minimap_terrain_bg(self, map_size_px, world_size):
+        """Build (and cache) a grayscale heightmap render of the
+        loaded terrain at `map_size_px x map_size_px` resolution,
+        matched corner-to-corner to the terrain extent.
+
+        Sampling convention identical to the tank dot in
+        `_render_minimap`:
+            world X = -half  -> pixel X = 0           (left edge)
+            world X = +half  -> pixel X = map_size_px (right edge)
+            world Z = -half  -> pixel Y = 0           (top edge)
+            world Z = +half  -> pixel Y = map_size_px (bottom edge)
+
+        So the four pixel corners line up with the four world-XZ
+        corners of the terrain mesh.  Heights normalised to a
+        per-terrain dynamic range so low ground reads dark and
+        ridges read bright regardless of absolute height_scale.
+
+        Cache key: `(id(self.terrain), map_size_px, world_size)`.
+        Stale on tank reload (terrain object replaced) or on a
+        future runtime resize of the mini-map.
+
+        Returns:
+            pygame.Surface (RGBA) ready to be `.copy()`d into the
+            per-frame minimap.  None if the terrain has no
+            `sample_heights` API or hasn't loaded yet.
+        """
+        if self.terrain is None or not hasattr(self.terrain,
+                                                'sample_heights'):
+            return None
+        cache = getattr(self, '_minimap_terrain_cache', None)
+        key = (id(self.terrain), int(map_size_px), float(world_size))
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        # Build a regular grid of world XZ at every pixel centre.
+        # Pixel X = 0 -> world X = +half; pixel X = map_size_px - 1
+        # -> world X = -half (the X-flip).  Pixel Y = 0 -> Z = -half;
+        # pixel Y = map_size_px - 1 -> Z = +half.
+        n = int(map_size_px)
+        half = float(world_size) * 0.5
+        # +0.5 puts the sample at pixel CENTRE rather than corner.
+        u = (np.arange(n, dtype=np.float64) + 0.5) / n   # 0..1
+        # Standard mapping: pixel X / Z increase from -half to +half.
+        xs_world = u * world_size - half                  # -half..+half
+        zs_world = u * world_size - half                  # -half..+half
+        # Tile into (n*n,) flat arrays for the batched sampler.
+        Xs, Zs = np.meshgrid(xs_world, zs_world, indexing='xy')
+        flat_xs = Xs.ravel()
+        flat_zs = Zs.ravel()
+        try:
+            ys = np.asarray(self.terrain.sample_heights(flat_xs, flat_zs),
+                             dtype=np.float64).reshape(n, n)
+        except Exception as exc:
+            print(f"[minimap] heightmap sample failed: {exc}")
+            return None
+        # Normalise to [0, 255] over the per-terrain min/max.
+        y_lo = float(np.min(ys))
+        y_hi = float(np.max(ys))
+        rng  = max(y_hi - y_lo, 1e-6)
+        gray = ((ys - y_lo) / rng * 255.0).astype(np.uint8)
+        # Tint: sand-coloured low ground, lighter at peaks.  Build
+        # an RGBA surface with the height ramp.  R / G / B = soft
+        # olive-sand palette so the mini-map blends with the in-
+        # scene terrain colour.
+        rgba = np.empty((n, n, 4), dtype=np.uint8)
+        # Base color: dark olive at low, brighter wheat at high.
+        rgba[..., 0] = (40 + gray * (200 - 40) // 255)   # R
+        rgba[..., 1] = (50 + gray * (190 - 50) // 255)   # G
+        rgba[..., 2] = (30 + gray * (140 - 30) // 255)   # B
+        rgba[..., 3] = 220                                # A
+        # pygame.surfarray expects (width, height, channels) i.e.
+        # transposed from numpy's (rows, cols, channels).  Swap.
+        surf = pygame.Surface((n, n), pygame.SRCALPHA)
+        # `pygame.surfarray.pixels3d` is faster but needs locking;
+        # `make_surface` works on a (W, H, 3) RGB array.  We do the
+        # alpha channel via blit_array onto an SRCALPHA target.
+        rgb_for_make = rgba[..., :3].swapaxes(0, 1)        # (W, H, 3)
+        bg = pygame.surfarray.make_surface(rgb_for_make)
+        bg = bg.convert_alpha()
+        # Apply alpha (220) via fill + BLEND_RGBA_MULT so the
+        # mini-map remains slightly translucent on top of the 3D
+        # scene.
+        bg.fill((255, 255, 255, 220),
+                special_flags=pygame.BLEND_RGBA_MULT)
+        surf = bg
+
+        self._minimap_terrain_cache = (key, surf)
+        return surf
+
+    def _render_minimap(self, width, height):
+        """Draw a small square top-down mini-map in the bottom-left
+        of the scene viewport.
+
+        Layout:
+          * Dark olive background, amber border (matches the warm
+            UI palette).
+          * 'N' label at top to anchor the user's mental map.
+          * A bright dot at the tank's world XZ.
+          * A red-orange line from the dot in the chassis-forward
+            direction (heading arrow).
+
+        World -> map mapping:
+          * Map pixel (0,0) = world (-half, -half) (= top-left).
+          * Map pixel (S,S) = world (+half, +half).
+          * X+ -> right, Z+ -> down.  Yaw=0 (chassis-forward = -Z)
+            therefore points UP on the map.
+          * `world_size` comes from `self.terrain.world_size` if a
+            terrain is loaded, else defaults to 40 m.
+
+        Drawn every frame via a fresh pygame surface so the heading
+        / position update in real time.
+        """
+        if not pygame.font.get_init():
+            return
+        if self.tank_physics is None:
+            return
+        ui = self.ui
+        if ui is None or not hasattr(ui, 'shader'):
+            return
+
+        import math
+        MAP_SIZE_PX = 160
+        world_size = float(getattr(self.terrain, 'world_size', 40.0))
+        if world_size <= 0:
+            world_size = 40.0
+        half = world_size * 0.5
+
+        tp = self.tank_physics
+        tx, tz = float(tp.pos[0]), float(tp.pos[2])
+        yaw_rad = math.radians(float(tp.yaw_deg))
+        # World -> map mapping (per Coffee 2026-05-09 confirmation):
+        #   world +X -> pixel +X  (right of map)
+        #   world +Z -> pixel +Y  (bottom of map; -Z = top)
+        # Standard top-down convention.  Heading arrow delta is a
+        # function of yaw only and stays correct because it's
+        # measured FROM the dot, not in absolute screen coords.
+        #
+        # Clamp tank pixel into the map even if the tank drives off
+        # the terrain extent (rare; happens during long zig-zag tests
+        # past the terrain edge).
+        px = (tx + half) / world_size * MAP_SIZE_PX
+        py = (tz + half) / world_size * MAP_SIZE_PX
+        px = max(2, min(MAP_SIZE_PX - 2, int(px)))
+        py = max(2, min(MAP_SIZE_PX - 2, int(py)))
+
+        # Build surface.  pygame.draw is plenty fast for a
+        # 160x160 surface at 60 fps -- ~150 us per frame.
+        # Background is a grayscale heightmap render of the terrain
+        # so the map's four corners VISIBLY match the terrain's four
+        # corners (per Coffee 2026-05-09).  The heightmap surface is
+        # cached against `(terrain object id, MAP_SIZE_PX,
+        # world_size)` so a stationary terrain rebuilds the
+        # background only on first frame after a tank reload.
+        terr_bg = self._minimap_terrain_bg(MAP_SIZE_PX, world_size)
+        if terr_bg is not None:
+            surf = terr_bg.copy()
+        else:
+            surf = pygame.Surface((MAP_SIZE_PX, MAP_SIZE_PX),
+                                   pygame.SRCALPHA)
+            surf.fill((28, 36, 24, 220))
+        # Border
+        pygame.draw.rect(surf, (200, 180, 100, 255),
+                          surf.get_rect(), 2)
+        # Center crosshair (light grey).
+        cx = MAP_SIZE_PX // 2
+        pygame.draw.line(surf, (110, 110, 110, 180),
+                          (cx, 4), (cx, MAP_SIZE_PX - 4), 1)
+        pygame.draw.line(surf, (110, 110, 110, 180),
+                          (4, cx), (MAP_SIZE_PX - 4, cx), 1)
+        # 'N' label at the top edge (= world -Z direction = chassis
+        # forward when yaw=0).
+        font = getattr(self, '_minimap_font', None)
+        if font is None:
+            try:
+                font = pygame.font.SysFont('Consolas', 11, bold=True)
+            except Exception:
+                font = pygame.font.Font(None, 11)
+            self._minimap_font = font
+        n_surf = font.render('N', True, (220, 220, 220))
+        surf.blit(n_surf,
+                  (cx - n_surf.get_width() // 2, 2))
+        # Heading arrow: chassis-forward direction in world is
+        # (sin(yaw), 0, -cos(yaw)) -- yaw=0 -> -Z.  In map pixels
+        # that's (-sin(yaw), -cos(yaw)) -- the X term is sign-
+        # flipped to match the X-flipped tank-position math above
+        # (mini-map convention: world +X renders to the LEFT, so
+        # the heading arrow has to follow the same flip or the
+        # arrow points opposite the tank's visible direction of
+        # travel).
+        arrow_len = 18
+        ex = int(px - math.sin(yaw_rad) * arrow_len)
+        ey = int(py - math.cos(yaw_rad) * arrow_len)
+        pygame.draw.line(surf, (255, 110, 60),
+                          (px, py), (ex, ey), 2)
+        # Dot for tank position (drawn AFTER the arrow so it sits
+        # on top of the arrow's base).
+        pygame.draw.circle(surf, (255, 220, 80, 255), (px, py), 5)
+        pygame.draw.circle(surf, (40, 30, 10, 255),  (px, py), 5, 1)
+
+        # Upload as texture + draw quad.  Cache by (px, py, yaw_int)
+        # so a stationary tank doesn't re-upload every frame.
+        cache_key = (px, py, int(round(math.degrees(yaw_rad))))
+        cache = getattr(self, '_minimap_cache', None)
+        if cache is None or cache[0] != cache_key:
+            data = pygame.image.tostring(surf, 'RGBA', False)
+            tw, th = surf.get_width(), surf.get_height()
+            if cache is not None:
+                try:
+                    glDeleteTextures([cache[1]])
+                except Exception:
+                    pass
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tid)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0,
+                          GL_RGBA, GL_UNSIGNED_BYTE, data)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            self._minimap_cache = (cache_key, tid, tw, th)
+            cache = self._minimap_cache
+
+        _, tid, tw, th = cache
+        # Position: bottom-left of the SCENE area (= just right of
+        # the info panel).  Stays visible above the bottom console
+        # panel.
+        console_h = (self.ui.console.height_for_layout()
+                     if self.ui.console else 0)
+        map_x = self.INFO_PANEL_W + 10
+        map_y = self.height - console_h - MAP_SIZE_PX - 10
+        if map_y < 0:
+            map_y = 0
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        ui.shader.use()
+        ui.shader.set_mat4('projection', ui._ortho(width, height))
+        glBindVertexArray(ui.quad_vao)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        ui.shader.set_int('u_tex', 0)
+        ui.shader.set_int('u_use_tex', 2)   # mode-2 = textured RGBA
+        ui.shader.set_vec4('u_color', 1.0, 1.0, 1.0, 1.0)
+        ui._draw_quad(map_x, map_y, tw, th)
+        ui.shader.set_int('u_use_tex', 0)
+        glBindVertexArray(0)
+
     def _build_hull_box_local(self):
         """Build the chassis-local AABB of every component=='hull'
         mesh.  Cached as `self._hull_box_local` (np.ndarray of shape
@@ -4270,6 +6515,179 @@ class Viewer:
         self.hull_box_lines.update(segs)
         self.hull_box_lines.render(self.color_shader, view, proj)
 
+    # ===================================================================
+    # F10 ortho-LEFT-side view  (Coffee 2026-05-10)
+    # ===================================================================
+
+    def _is_ortho_active(self):
+        """Return True iff the F10 ortho-LEFT-side override is actually
+        engaged THIS frame -- meaning both the toggle flag is set AND
+        we have a centre point to orbit.  Used by the view/projection
+        path AND the mouse dispatcher so they agree on which mode is
+        live.  Without this, mode=True + center=None used to leave
+        the renderer in perspective (graceful fallback) while the
+        mouse handler still took ortho branches that no-op'd --
+        symptom: shift / ctrl modifiers stopped panning in
+        perspective mode.  Per Coffee 2026-05-10 ("i lost my shift
+        and ctrl key modifiers for pan and Y when you added the
+        pan zoom to ortho mode .. they dont work in perspective
+        mode").
+        """
+        return (getattr(self, '_ortho_left_mode', False)
+                and getattr(self,
+                             '_ortho_left_center_local',
+                             None) is not None)
+
+    def _toggle_ortho_left_view(self):
+        """Toggle the F10 ortho-LEFT-side override.
+
+        On entry: read the rear drive sprocket's chassis-local
+        bone position (from `_pending_chassis_info['wheel_roles']
+        ['drive_sprockets_L']` -> `_track_chassis_bones_bind`),
+        stash it in `_ortho_left_center_local`, and flip
+        `_ortho_left_mode = True`.  The view+projection
+        overrides in `_anchored_view_matrix` and the render()
+        projection-resolve site then take over.
+
+        On exit (second press): flip the flag off and let the
+        normal perspective path reassert.
+
+        No-op (with a HUD warning) if the tank isn't loaded yet
+        or the chassis XML didn't declare a drive sprocket -- we
+        need an anchor point to centre the view on.
+        """
+        if getattr(self, '_ortho_left_mode', False):
+            self._ortho_left_mode = False
+            self.log("ortho-L: OFF (perspective restored)",
+                     color=(180, 180, 180))
+            return
+        ci = getattr(self, '_pending_chassis_info', None) or {}
+        roles = ci.get('wheel_roles') or {}
+        sprocket_names = roles.get('drive_sprockets_L') or []
+        bind = getattr(self, '_track_chassis_bones_bind', None)
+        if not sprocket_names or not bind:
+            self.log(
+                "ortho-L: needs a loaded tank with an L drive "
+                "sprocket -- aborting (stayed in perspective)",
+                color=(255, 180, 120))
+            return
+        # Resolve to whatever key actually exists in the bone
+        # dict.  Mirrors the same exact / +_BlendBone / strip
+        # logic `_track_current_bone_positions` uses.
+        wanted = sprocket_names[0]
+        if wanted in bind:
+            key = wanted
+        elif wanted + '_BlendBone' in bind:
+            key = wanted + '_BlendBone'
+        elif (wanted.endswith('_BlendBone')
+              and wanted[:-len('_BlendBone')] in bind):
+            key = wanted[:-len('_BlendBone')]
+        else:
+            self.log(
+                f"ortho-L: drive sprocket '{wanted}' missing "
+                f"from bone dict; aborting",
+                color=(255, 180, 120))
+            return
+        p = bind[key]
+        self._ortho_left_center_local = (
+            float(p[0]), float(p[1]), float(p[2]))
+        # Auto-fit ortho window to ~5 m tall, which encloses
+        # the entire chain (top run + bottom run + wraparound
+        # margins) on every WoT tank we've measured.  Width
+        # scales with aspect at projection-build time so the
+        # tank's length isn't clipped.
+        self._ortho_left_half_h = 2.5
+        self._ortho_left_mode = True
+        self.log(
+            f"ortho-L: ON  centred on {key}  "
+            f"local=({p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f})",
+            color=(120, 220, 180))
+
+    def _ortho_left_view_matrix(self):
+        """Build the view matrix for F10 ortho-LEFT-side mode.
+
+        Camera sits at chassis-local `(-30, 0, 0)` relative to
+        the anchored sprocket and looks back at it -- effectively
+        viewing the L track from outside, perpendicular to the
+        chassis Y/Z plane.  The eye / target / up vectors are
+        all transformed through `chassis_matrix` each frame so
+        the side view tracks the tank as it drives / pitches /
+        rolls / yaws.  Returned matrix follows the standard
+        `s/u/-f` row-major view convention so the shader's
+        `u_proj * u_view * ...` chain stays correct.
+
+        Returns None when there's no tank physics or no captured
+        sprocket position -- caller falls back to perspective.
+        """
+        tp = getattr(self, 'tank_physics', None)
+        cl = getattr(self, '_ortho_left_center_local', None)
+        if tp is None or cl is None:
+            return None
+        chassis = np.asarray(tp.chassis_matrix(), dtype=np.float64)
+        # Anchor (sprocket) in world space.
+        pl = np.array([cl[0], cl[1], cl[2], 1.0], dtype=np.float64)
+        target_w = (chassis @ pl)[:3]
+        # Eye = anchor + chassis_R @ (-30, 0, 0): step 30 m out
+        # in chassis-local -X direction.  Tank can rotate and
+        # the eye orbits with it -- always on the L side.
+        cR = chassis[:3, :3]
+        eye_w = target_w + (cR @ np.array([-30.0, 0.0, 0.0]))
+        up_w  = cR @ np.array([0.0, 1.0, 0.0])
+        # Build right-handed view matrix (s = right, u = up,
+        # -f = -view-dir).
+        f = target_w - eye_w
+        nf = float(np.linalg.norm(f))
+        if nf < 1e-9:
+            return None
+        f /= nf
+        n_up = float(np.linalg.norm(up_w))
+        if n_up < 1e-9:
+            up_w = np.array([0.0, 1.0, 0.0])
+        else:
+            up_w /= n_up
+        s = np.cross(f, up_w)
+        ns = float(np.linalg.norm(s))
+        if ns < 1e-9:
+            # Degenerate (look-dir parallel to up); reseed with
+            # a perpendicular up.
+            up_w = np.array([0.0, 0.0, 1.0])
+            s = np.cross(f, up_w)
+            s /= max(float(np.linalg.norm(s)), 1e-9)
+        else:
+            s /= ns
+        u = np.cross(s, f)
+        view = np.eye(4, dtype=np.float32)
+        view[0, 0:3] = s.astype(np.float32)
+        view[1, 0:3] = u.astype(np.float32)
+        view[2, 0:3] = (-f).astype(np.float32)
+        view[0, 3]   = float(-np.dot(s, eye_w))
+        view[1, 3]   = float(-np.dot(u, eye_w))
+        view[2, 3]   = float( np.dot(f, eye_w))
+        return view
+
+    def _ortho_left_projection_matrix(self):
+        """Build the orthographic projection matrix for F10 mode.
+
+        Half-height comes from `_ortho_left_half_h` (default
+        2.5 m -> 5 m visible vertical).  Half-width scales with
+        aspect so the tank's Z extent fits on screen.  Standard
+        right-handed GL ortho with `[near, far] = [0.1, 200]`.
+        """
+        hh = float(getattr(self, '_ortho_left_half_h', 2.5))
+        if hh <= 0.0:
+            hh = 2.5
+        aspect = (float(self.camera.width)
+                  / max(1.0, float(self.camera.height)))
+        hw = hh * aspect
+        near, far = 0.1, 200.0
+        m = np.zeros((4, 4), dtype=np.float32)
+        m[0, 0] = 1.0 / hw
+        m[1, 1] = 1.0 / hh
+        m[2, 2] = -2.0 / (far - near)
+        m[2, 3] = -(far + near) / (far - near)
+        m[3, 3] = 1.0
+        return m
+
     def _anchored_view_matrix(self):
         """Return the view matrix for the currently-active camera mode.
 
@@ -4284,7 +6702,14 @@ class Viewer:
                              looking straight forward along the tank's
                              visible-front axis (= chassis-local -Z in
                              our convention).
+        F10 toggles an ortho-LEFT-side override (`_ortho_left_mode`)
+        that wins over the per-camera-mode selection -- see
+        `_ortho_left_view_matrix` for the camera placement details.
         """
+        if self._is_ortho_active():
+            ov = self._ortho_left_view_matrix()
+            if ov is not None:
+                return ov
         if self.camera_mode == 0 or self.tank_physics is None:
             return self.camera.get_view_matrix()
 
@@ -4296,44 +6721,71 @@ class Viewer:
         # of the tank lives at chassis-local -Z (the user's repeated
         # convention).  +X is right, -X left.
         if self.camera_mode == 1:
-            # Chassis-locked chase camera.  Both the eye AND the
-            # look-at are computed in chassis-local space, then
-            # transformed by chassis_matrix to world.  Because the
-            # eye offset is relative to the chassis frame (NOT the
-            # world frame), the camera tracks the tank's yaw
-            # automatically -- "looking at the tank's right side"
-            # stays right-of-tank as the tank turns.  Same
-            # "child-out-the-window" rotation behavior we use for
-            # the commander seat.  User request 2026-05-08.
-            #
-            # Driver-position chassis-local: +X side (right; US
-            # tanks like T110E4 put the driver on the right hull),
-            # near front (Z = -2.0), at hatch height (+0.6 Y).
-            driver_local = np.array([+0.7, +0.6, -2.0],
-                                     dtype=np.float64)
-            # Orbit-style offset around the driver in chassis-local
-            # frame.  Same convention as scene.Camera:
-            #   yaw = 0 -> eye on +Z side of center (= BEHIND the
-            #              tank, since tank front = -Z chassis-local)
-            #   pitch>0 -> eye lifted above the XZ plane
-            #   distance -> radial zoom
+            # Cam-1: chassis-locked chase cam orbiting the
+            # turret HP per Coffee 2026-05-09 ("free look with
+            # look-at as it is, my angle needs to change with
+            # the tank's angle.. kid looking out window").
+            # Look-at stays AT the turret hardpoint
+            # (chassis-local); eye orbits around it via
+            # chassis-local yaw / pitch + distance, so when
+            # the user drags the camera the orbit angles live
+            # in chassis-local space -- as the tank yaws, the
+            # eye yaws with it (the "kid looking out the
+            # window" behavior).  Default zoom = 15 m, default
+            # yaw = 90 deg (right side, perpendicular to
+            # chassis Z), pitch = 0 deg.  Mouse drag below
+            # nudges `_chase_yaw_deg` / `_chase_pitch_deg`,
+            # wheel scroll modifies `_chase_distance`.
+            turret_hp_local = None
+            for m in self.meshes:
+                if getattr(m, 'component', '') == 'turret':
+                    bm = getattr(m, 'bind_model_matrix', None)
+                    if bm is None:
+                        bm = getattr(m, 'model_matrix', None)
+                    if bm is not None:
+                        turret_hp_local = (
+                            float(bm[0, 3]),
+                            float(bm[1, 3]),
+                            float(bm[2, 3]))
+                        break
+            if turret_hp_local is None:
+                for m in self.meshes:
+                    if getattr(m, 'component', '') == 'gun':
+                        bm = getattr(m, 'bind_model_matrix', None)
+                        if bm is None:
+                            bm = getattr(m, 'model_matrix', None)
+                        if bm is not None:
+                            turret_hp_local = (
+                                float(bm[0, 3]),
+                                float(bm[1, 3]),
+                                float(bm[2, 3]))
+                            break
+            if turret_hp_local is None:
+                turret_hp_local = (0.0, 1.4, 0.0)
+            # Orbit eye around the look-at in chassis-local.
+            # Convention: yaw = 0 puts eye at +Z (behind the
+            # tank, since visible-front = -Z); yaw = 90 puts
+            # eye at +X (right side); pitch lifts.  Same
+            # convention used by `scene.Camera.get_view_matrix`
+            # so the angles are intuitive when matched against
+            # orbit-cam state.
             cy_ = math.cos(math.radians(self._chase_yaw_deg))
             sy_ = math.sin(math.radians(self._chase_yaw_deg))
             cp_ = math.cos(math.radians(self._chase_pitch_deg))
             sp_ = math.sin(math.radians(self._chase_pitch_deg))
             d   = float(self._chase_distance)
-            eye_local_xyz = driver_local + np.array(
-                [d * cp_ * sy_, d * sp_, d * cp_ * cy_],
-                dtype=np.float64)
-            eye_local    = np.array(
-                [eye_local_xyz[0], eye_local_xyz[1],
-                 eye_local_xyz[2], 1.0], dtype=np.float64)
             target_local = np.array(
-                [driver_local[0], driver_local[1],
-                 driver_local[2], 1.0], dtype=np.float64)
-            # Mirror the chase eye world-position into self.camera
-            # so any consumer that reads self.camera.center / etc.
-            # (debug overlays, etc.) gets a sensible value.
+                [turret_hp_local[0],
+                 turret_hp_local[1],
+                 turret_hp_local[2],
+                 1.0], dtype=np.float64)
+            eye_local = np.array(
+                [turret_hp_local[0] + d * cp_ * sy_,
+                 turret_hp_local[1] + d * sp_,
+                 turret_hp_local[2] + d * cp_ * cy_,
+                 1.0], dtype=np.float64)
+            # Mirror look-at into self.camera so debug overlays
+            # reading self.camera.center get a sensible value.
             target_world_pos = (chassis @ target_local)[:3]
             self.camera.center = target_world_pos.astype(np.float32)
         else:
@@ -4344,40 +6796,11 @@ class Viewer:
             # CHASSIS-LOCAL space -- so "looking left" stays
             # left-of-tank when the tank yaws, exactly the
             # "child looking out a side window" behavior.
-            #
-            # Forward direction at zero head rotation is chassis-
-            # local -Z (visible-front-of-tank convention).  Apply
-            # head yaw around chassis-local +Y, then head pitch
-            # around chassis-local +X, to that forward vector.
             head_yaw   = math.radians(self._head_yaw_deg)
             head_pitch = math.radians(self._head_pitch_deg)
             cy_, sy_ = math.cos(head_yaw),   math.sin(head_yaw)
             cp_, sp_ = math.cos(head_pitch), math.sin(head_pitch)
-            # Forward = -Z, then yaw (around Y) -> tilts in XZ:
-            #   (sin(yaw), 0, -cos(yaw))
-            # Then pitch (around X) -> tilts in YZ:
-            #   X stays, Y = sin(pitch) * (-cos(yaw_part... hmm))
-            # Simplest: build forward = R_yaw * R_pitch * (0, 0, -1).
-            # R_pitch * (0, 0, -1) = (0, sin(pitch) * 1, -cos(pitch))
-            #   wait, R_pitch around X: (x, y*cp - z*sp, y*sp + z*cp)
-            #   so (0, 0, -1) -> (0, -(-1)*sp, -1*cp) = (0, sp, -cp)
-            # R_yaw around Y on (0, sp, -cp):
-            #   (x*cy - (-1)*sy * ..., wait around Y: (x*cy + z*sy, y, -x*sy + z*cy))
-            #   (0*cy + (-cp)*sy, sp, -0*sy + (-cp)*cy)
-            #   = (-cp*sy, sp, -cp*cy)
             fwd = np.array([-cp_ * sy_, sp_, -cp_ * cy_], dtype=np.float64)
-            # Eye position: gun mount in chassis-local space, lifted
-            # ~0.25 m so the camera sits ABOVE the breech / mantlet
-            # rather than inside it.  Pulled from the gun mesh's
-            # `bind_model_matrix` translation column -- that's
-            # `gun_offset_gl` from VehicleXMLLoader (turret pivot +
-            # gun pivot, + chassis_attach_y on Y, with Z negated).
-            # Falls back to the old fixed (0, 1.95, 0) if no gun
-            # mesh is present (e.g. an FBX-only import without a
-            # full vehicle assembly).  User request 2026-05-08:
-            # "i'm short and can see over the imaginary dashboard"
-            # -- the old fixed eye sat too low for tanks with the
-            # turret (and gun) mounted high (T30, T110E4, etc).
             EYE_LIFT_M = 0.25
             gun_world_local = None
             for m in self.meshes:
@@ -4782,6 +7205,47 @@ class Viewer:
                 state=('normal' if present else 'disabled'))
             cb.pack(fill='x', anchor='w')
 
+        # ---- Track Segments row -------------------------------
+        # (Coffee 2026-05-10 "we need to add a check box to
+        # extract it from the pkg files like the other tank
+        # parts").  Sourced from _pending_chassis_info, not
+        # self.meshes, because pad meshes ride the instanced
+        # renderer and aren't on self.meshes.
+        track_segs = self._enumerate_track_segment_pkg_paths()
+        ts_present = len(track_segs) > 0
+        v_ts = tk.BooleanVar(value=ts_present)
+        vars_by_key[self._TRACK_SEG_KEY] = v_ts
+        ts_text = (
+            f"{self._TRACK_SEG_LABEL}    "
+            f"({len(track_segs)} segment"
+            f"{'s' if len(track_segs) != 1 else ''})"
+            if ts_present else
+            f"{self._TRACK_SEG_LABEL}    (none on this tank)")
+        cb_ts = tk.Checkbutton(
+            rows_frame, text=ts_text, variable=v_ts,
+            anchor='w', justify='left',
+            state=('normal' if ts_present else 'disabled'))
+        cb_ts.pack(fill='x', anchor='w')
+
+        # ---- Tank Definition row ------------------------------
+        # (Coffee 2026-05-10 "do the same for the tank def file
+        # that is in scripts.pkg").  Pulls the gameplay XML
+        # captured in `_loaded_tank_xml_zip` at load-time.
+        # Single-file extract, no siblings, no textures.
+        td_zip = getattr(self, '_loaded_tank_xml_zip', None)
+        td_present = bool(td_zip)
+        v_td = tk.BooleanVar(value=td_present)
+        vars_by_key[self._TANK_DEF_KEY] = v_td
+        td_text = (
+            f"{self._TANK_DEF_LABEL}    ({td_zip})"
+            if td_present else
+            f"{self._TANK_DEF_LABEL}    (no tank loaded)")
+        cb_td = tk.Checkbutton(
+            rows_frame, text=td_text, variable=v_td,
+            anchor='w', justify='left',
+            state=('normal' if td_present else 'disabled'))
+        cb_td.pack(fill='x', anchor='w')
+
         # ---- texture toggle -------------------------------------------
         ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
         tex_frame = tk.Frame(win, padx=12, pady=8)
@@ -4877,6 +7341,78 @@ class Viewer:
         total_tex_missing    = 0
 
         for key in chosen:
+            # Track-segments handled separately -- their paths
+            # live in `_pending_chassis_info`, not on
+            # `self.meshes`, so the `_COMPONENT_ORDER` lookup
+            # would throw and the `groups` lookup would be
+            # empty.  Per Coffee 2026-05-10 ("add a check box
+            # to extract it from the pkg files like the other
+            # tank parts").
+            if key == self._TANK_DEF_KEY:
+                # Tank definition XML extract -- single file
+                # from scripts.pkg.  No siblings, no textures.
+                # Per Coffee 2026-05-10 "do the same for the
+                # tank def file that is in scripts.pkg".
+                td_zip = getattr(self, '_loaded_tank_xml_zip',
+                                 None)
+                if not td_zip:
+                    self.log(
+                        f"{self._TANK_DEF_LABEL}: nothing "
+                        f"captured at load -- skipped")
+                    continue
+                # /normal/ -> /crash/ swap doesn't apply here
+                # (the def XML lives outside the per-variant
+                # tree).  Pass through unchanged.
+                n_ok, n_skip = self._extract_one_file(
+                    td_zip, res_mods, allow_overwrite=True)
+                total_parts_copied  += n_ok
+                total_parts_skipped += n_skip
+                self.log(
+                    f"{self._TANK_DEF_LABEL}: "
+                    f"{'copied' if n_ok else 'skipped'} {td_zip}")
+                continue
+
+            if key == self._TRACK_SEG_KEY:
+                track_segs = self._enumerate_track_segment_pkg_paths()
+                if not track_segs:
+                    self.log(
+                        f"{self._TRACK_SEG_LABEL}: nothing on "
+                        f"this tank -- skipped")
+                    continue
+                self.log(
+                    f"{self._TRACK_SEG_LABEL}: "
+                    f"{len(track_segs)} segment(s)")
+                for seg_key, model_zip in track_segs:
+                    # Same /normal/ -> /crash/ swap the other
+                    # components get when loaded damaged.
+                    p = model_zip
+                    if loaded_damaged and '/normal/' in p:
+                        p = p.replace('/normal/', '/crash/')
+                    # Three sibling files share the basename:
+                    # .model, .primitives_processed, .visual_processed.
+                    related = [p,
+                               p.replace('.model',
+                                         '.primitives_processed'),
+                               p.replace('.model',
+                                         '.visual_processed')]
+                    for zp in related:
+                        n_ok, n_skip = self._extract_one_file(
+                            zp, res_mods, allow_overwrite=True)
+                        total_parts_copied  += n_ok
+                        total_parts_skipped += n_skip
+                    if do_textures:
+                        visual_zip = p.replace(
+                            '.model', '.visual_processed')
+                        ok, kept, missing = (
+                            self._extract_textures_for_visual(
+                                f'{self._TRACK_SEG_LABEL} '
+                                f'[{seg_key}]',
+                                visual_zip, res_mods))
+                        total_tex_copied  += ok
+                        total_tex_kept    += kept
+                        total_tex_missing += missing
+                continue
+
             label = dict(self._COMPONENT_ORDER)[key]
             meshes_for_comp = groups.get(key, [])
             if not meshes_for_comp:
@@ -5662,433 +8198,59 @@ class Viewer:
             self.log_clear(status='')
 
     # ------------------------------------------------------------------
+    # ==================================================================
+    # Recording dispatch -- 1-Turn auto-test + F3 manual recorder.
+    # ==================================================================
+    # Implementation lives in `tankExporterPy/recorder.py` (split out
+    # 1.113.0).  These methods stay on Viewer as thin forwarders to
+    # preserve the existing call surface (button handlers, render
+    # hooks, the zigzag step still calls `_build_recorder_frame`).
+    # The recorder module reads / writes the same `_turn_test_*` /
+    # `_manual_record_*` fields on the Viewer instance.
     def _on_turn_test_clicked(self):
-        """Start a 1-Turn auto-test recording.
+        from . import recorder
+        recorder.on_turn_test_clicked(self)
 
-        Drives the tank in a full 360-degree auto-circle at speed
-        step 1 (the per-tank top speed) and captures every frame's
-        chassis pose + per-wheel state to memory.  When the chassis
-        accumulates 360 degrees of yaw, stops the tank, restores the
-        previous speed-step + auto-circle state, and writes the
-        captured data as a JSON file under ``test_runs/`` next to
-        the project root.
-
-        Pre-flight: requires Susp ON + Terrain ON + a tank loaded.
-        If the gates aren't all green, logs a single line and
-        bails -- the button stays inactive.
-
-        UI lock: while the test is running, the button is `active`
-        (wheat border).  Pressing it again mid-test cancels and
-        does NOT save.
-        """
-        # Cancel-mid-test path.
-        if self._turn_test_active:
-            self._turn_test_finalize(write_json=False, reason='cancelled')
-            return
-        # Gate checks.
-        if self.tank_physics is None or not self.meshes:
-            self.log("turn-test: load a tank first.",
-                     color=(255, 160, 160))
-            return
-        if not self.tank_physics_enabled:
-            self.log("turn-test: enable Susp first.",
-                     color=(255, 160, 160))
-            return
-        if not (self.show_terrain and self.terrain):
-            self.log("turn-test: enable Terrain first.",
-                     color=(255, 160, 160))
-            return
-
-        # Snapshot prior state so we can restore on completion.
-        self._turn_test_prev_speed_step  = int(getattr(self, '_speed_step', 0))
-        self._turn_test_prev_auto_circle = bool(getattr(self, '_auto_circle', False))
-
-        # Spawn the tank at a clean known location.  Same prep as
-        # the zig-zag test: origin XZ, all rotations / velocities
-        # zeroed, render-pose + integrators reset.  Without this,
-        # the test would start wherever the user happened to leave
-        # the tank, and the recorder data would carry pre-test
-        # inertia + mismatched chassis pose for the first ~10
-        # frames before the integrator settled.
-        tp = self.tank_physics
-        tp.pos[0]    = 0.0
-        tp.pos[2]    = 0.0
-        tp.yaw_deg   = 0.0
-        tp.pitch_deg = 0.0
-        tp.roll_deg  = 0.0
-        tp.vy        = 0.0
-        tp._render_pos_y     = float(tp.pos[1])
-        tp._render_pitch_deg = 0.0
-        tp._render_roll_deg  = 0.0
-        tp._render_vy        = 0.0
-        tp.omega_pitch_dps   = 0.0
-        tp.omega_roll_dps    = 0.0
-        tp.cur_forward_mps   = 0.0
-        tp._smoothed_a_lat_mps2  = 0.0
-        tp._smoothed_a_long_mps2 = 0.0
-
-        # Force max-speed forward + auto-circle ON.  The drive
-        # logic in handle_input picks these up next frame.
-        self._set_speed_step(1)
-        self._auto_circle = True
-
-        # Reset recorder state.
-        self._turn_test_frames        = []
-        self._turn_test_t_accum_s     = 0.0
-        self._turn_test_start_yaw_deg = float(self.tank_physics.yaw_deg)
-        self._turn_test_last_yaw_deg  = self._turn_test_start_yaw_deg
-        self._turn_test_total_yaw_deg = 0.0
-        self._turn_test_tail_t        = None  # post-360 brake tail timer
-        self._turn_test_active        = True
-        if self._turn_test_btn is not None:
-            self._turn_test_btn.active = True
-
-        self.log_clear(status='1-Turn Test')
-        self.log(
-            f"turn-test: started.  speed=1, auto-circle ON, "
-            f"R={self._auto_circle_radius:.2f} m, "
-            f"top_kph={self._top_speed_kph:.1f}.  "
-            f"Will auto-stop after 360 deg.",
-            color=(180, 220, 255))
+    # ------------------------------------------------------------------
+    def _build_recorder_frame(self, dt, t_accum_s, frame_idx, prev_states=None):
+        from . import recorder
+        return recorder.build_recorder_frame(
+            self, dt, t_accum_s, frame_idx, prev_states)
 
     # ------------------------------------------------------------------
     def _turn_test_capture_frame(self, dt):
-        """Per-frame snapshot.  Called from `render()` immediately
-        after `tank_physics.update()` returns and before the meshes
-        are re-posed for drawing -- so `last_wheel_world`,
-        `last_terrain_y`, `last_target_y`, `last_residual_y`,
-        `last_wheel_state`, and `smoothed_residual_y` all reflect
-        THIS frame's solve.
-
-        Also accumulates the chassis yaw delta + checks the 360-deg
-        completion condition; when reached, calls
-        `_turn_test_finalize` to write the JSON and restore UI
-        state.
-        """
-        if not self._turn_test_active or self.tank_physics is None:
-            return
-        tp = self.tank_physics
-
-        # Wrap-aware yaw delta accumulation.  yaw_deg can wrap from
-        # -180 to +180 (or any 360 boundary depending on the
-        # integrator); wrap by taking the smallest signed delta
-        # mod 360 in (-180, +180].
-        cur_yaw  = float(tp.yaw_deg)
-        d_yaw    = (cur_yaw - self._turn_test_last_yaw_deg + 540.0) % 360.0 - 180.0
-        self._turn_test_total_yaw_deg += d_yaw
-        self._turn_test_last_yaw_deg   = cur_yaw
-
-        # Time accumulator.
-        self._turn_test_t_accum_s += float(dt)
-
-        # Per-wheel snapshot.  We capture BOTH the target-pose-
-        # projected wheel position (`world_xyz` from
-        # `last_wheel_world`, which uses `_chassis_matrix_target`)
-        # AND the rendered (post-skin) wheel position
-        # (`world_xyz_render`, computed inline below from
-        # `chassis_matrix()` (render pose) + the skinning bone-Y
-        # translation).  Plus render-XZ-sampled terrain so the
-        # penetration check uses the terrain UNDER the visible
-        # wheel, not under the target-pose wheel (those XZs differ
-        # when chassis target / render diverge in pitch/roll).
-        STATE_NAMES = {0: 'NONE', 1: 'CONTACT', 2: 'HANGING', 3: 'OVER_COMP'}
-        wheels_out = []
-        n = len(tp.wheels)
-        # Build the render chassis matrix once for this frame.
-        chassis_render = np.asarray(tp.chassis_matrix(), dtype=np.float64)
-        # Pre-sample terrain at every wheel's render-pose XZ in a
-        # single batched call -- much cheaper than per-wheel.
-        if (self.terrain is not None
-                and hasattr(self.terrain, 'sample_heights')):
-            local_h = np.column_stack([
-                tp.wheels[:, 0], tp.wheels[:, 1], tp.wheels[:, 2],
-                np.ones(len(tp.wheels), dtype=np.float64)])
-            world_render_h = (chassis_render @ local_h.T).T
-            terrain_render_y = np.asarray(self.terrain.sample_heights(
-                world_render_h[:, 0], world_render_h[:, 2]),
-                dtype=np.float64)
-        else:
-            terrain_render_y = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            name = (tp.wheel_bone_names[i]
-                    if i < len(tp.wheel_bone_names) and tp.wheel_bone_names[i]
-                    else None)
-            local = tp.wheels[i]
-            wlw   = (tp.last_wheel_world[i]
-                     if i < len(tp.last_wheel_world)
-                     else (0.0, 0.0, 0.0))
-            ty    = (float(tp.last_terrain_y[i])
-                     if i < len(tp.last_terrain_y) else 0.0)
-            tgt   = (float(tp.last_target_y[i])
-                     if i < len(tp.last_target_y) else 0.0)
-            rry   = (float(tp.last_residual_y[i])
-                     if i < len(tp.last_residual_y) else 0.0)
-            sry   = (float(tp.smoothed_residual_y[i])
-                     if hasattr(tp, 'smoothed_residual_y')
-                     and i < len(tp.smoothed_residual_y)
-                     else 0.0)
-            sc    = (int(tp.last_wheel_state[i])
-                     if hasattr(tp, 'last_wheel_state')
-                     and i < len(tp.last_wheel_state)
-                     else 0)
-            # Rendered (visible) wheel-centre position in world.
-            # Mirror of the GPU-skinning formula:
-            #   world = render_chassis @ (lx, ly + bone_y, lz, 1)
-            # Bone Y-translation in the actual GPU path is
-            # `+last_residual_y` (RAW, not smoothed -- per the
-            # 2026-05-08 master-override change in
-            # `bone_matrix_array` Pass 1).  Using `smoothed_residual_y`
-            # here in the recorder produced a phantom 10+ cm
-            # penetration in analysis because the smoothed value
-            # lags the raw one through the asymmetric EMA.
-            local_skinned = np.array(
-                [float(local[0]),
-                 float(local[1]) + rry,
-                 float(local[2]),
-                 1.0], dtype=np.float64)
-            wlw_render = chassis_render @ local_skinned
-            wheels_out.append({
-                'idx':            i,
-                'side':           'L' if i < tp.n_left else 'R',
-                'name':           name,
-                'local_xyz':      [float(local[0]), float(local[1]), float(local[2])],
-                # World wheel-CENTRE in TARGET-pose projection.
-                'world_xyz':      [float(wlw[0]),   float(wlw[1]),   float(wlw[2])],
-                # World wheel-CENTRE in RENDER-pose projection (post-
-                # skin).  This is what the user sees on screen.
-                'world_xyz_render': [float(wlw_render[0]),
-                                     float(wlw_render[1]),
-                                     float(wlw_render[2])],
-                'terrain_y':      ty,
-                # Terrain Y sampled at the RENDER-pose wheel XZ
-                # (the actual visible wheel location).  Use this
-                # for penetration analysis -- `terrain_y` is at
-                # the target-pose XZ which can differ.
-                'terrain_y_render': float(terrain_render_y[i]),
-                'target_y':       tgt,
-                'residual_y':     rry,
-                'smoothed_residual_y': sry,
-                'state_code':     sc,
-                'state':          STATE_NAMES.get(sc, '?'),
-            })
-
-        # `pitch_deg` / `roll_deg` / `pos_y` = TARGET pose (what the
-        # solver computed this frame).  `pitch_render` /
-        # `roll_render` / `pos_y_render` = RENDERED pose (what the
-        # inertia integrator landed on, what the user sees on screen).
-        # Capturing both lets us see the damping behaviour:
-        # post-2026-05-08 the target may briefly spike (e.g., bad
-        # plane fit on a cliff edge) but the render should track
-        # smoothly behind it.
-        self._turn_test_frames.append({
-            'frame':          len(self._turn_test_frames),
-            't_s':            float(self._turn_test_t_accum_s),
-            'dt_s':           float(dt),
-            'yaw_deg':        cur_yaw,
-            'pitch_deg':      float(tp.pitch_deg),         # TARGET
-            'roll_deg':       float(tp.roll_deg),          # TARGET
-            'pitch_render':   float(getattr(tp, '_render_pitch_deg', 0.0)),
-            'roll_render':    float(getattr(tp, '_render_roll_deg',  0.0)),
-            'omega_pitch_dps': float(getattr(tp, 'omega_pitch_dps', 0.0)),
-            'omega_roll_dps':  float(getattr(tp, 'omega_roll_dps',  0.0)),
-            # Lateral-G + centripetal-lean telemetry.
-            'a_lat_mps2':     float(getattr(tp, '_last_a_lat_mps2',   0.0)),
-            'speed_mps':      float(getattr(tp, '_last_speed_mps',    0.0)),
-            'yaw_rate_dps':   float(getattr(tp, '_last_yaw_rate_dps', 0.0)),
-            'lean_target_deg': float(getattr(tp, '_target_lat_lean_roll_deg', 0.0)),
-            # Longitudinal-G + squat/dive telemetry.
-            'a_long_mps2':    float(getattr(tp, '_last_a_long_mps2', 0.0)),
-            'signed_speed_mps': float(getattr(tp, '_last_signed_speed_mps', 0.0)),
-            'pitch_lean_target_deg': float(getattr(tp, '_target_long_lean_pitch_deg', 0.0)),
-            # Smoothed (EMA, 5-frame trailing) accels -- the values
-            # the lean targets are actually computed from.  Compare
-            # against the raw `a_*_mps2` to see how much per-frame
-            # noise the EMA filtered out.
-            'a_lat_smoothed_mps2':  float(getattr(tp, '_smoothed_a_lat_mps2',  0.0)),
-            'a_long_smoothed_mps2': float(getattr(tp, '_smoothed_a_long_mps2', 0.0)),
-            # Pitch-lean gate state -- True when ANY wheel on the
-            # loaded side is over-compressed in the render pose.
-            'gate_rear_over_render':  bool(getattr(
-                tp, '_gate_any_rear_over_render',  False)),
-            'gate_front_over_render': bool(getattr(
-                tp, '_gate_any_front_over_render', False)),
-            'yaw_total_deg':  float(self._turn_test_total_yaw_deg),
-            'pos_x':          float(tp.pos[0]),
-            'pos_y':          float(tp.pos[1]),            # TARGET y
-            'pos_y_render':   float(getattr(tp, '_render_pos_y', 0.0)),
-            'pos_z':          float(tp.pos[2]),
-            'vy_mps':         float(tp.vy),
-            'render_vy_mps':  float(getattr(tp, '_render_vy', 0.0)),
-            'cur_speed_mps_signed': float(getattr(self, '_current_forward', 0.0)),
-            'wheels':         wheels_out,
-        })
-
-        # Completion: total yaw magnitude crossed 360 (auto-circle
-        # winds in one consistent direction so |total_yaw| is the
-        # right metric).
-        #
-        # AFTER the 360 mark hits, we keep recording for a
-        # `BRAKE_TAIL_SECONDS` window so the data captures the
-        # decel + nose-dive event.  The drive logic auto-stops the
-        # tank (sets speed_step=0, _current_forward=0) when
-        # `_turn_test_finalize` runs at the end of the tail; until
-        # then auto-circle stays on at speed 1, producing one extra
-        # frame of full-speed cruise per frame.  Tail window is
-        # short enough not to bloat the recording but long enough
-        # for the brake-dive to fully develop and decay.
-        BRAKE_TAIL_SECONDS = 2.0
-        if abs(self._turn_test_total_yaw_deg) >= 360.0:
-            tail = getattr(self, '_turn_test_tail_t', None)
-            if tail is None:
-                # First frame we crossed 360 -- start the tail
-                # timer + cut the drive INPUT so the tank coasts
-                # to a stop via the existing accel/decel ramp.
-                # IMPORTANT: do NOT directly zero `_current_forward`
-                # / `cur_forward_mps` here -- doing so bypasses the
-                # DRIVE_DECEL ramp and produces a 1283 m/s^2
-                # speed-step artifact (visible as a one-frame
-                # 16.7 -> 0 m/s jump in the 2026-05-08 test).
-                # Setting `_speed_step = 0` makes the next handle_
-                # input frame compute target_forward=0; the ramp
-                # then pulls `_current_forward` toward 0 at
-                # DRIVE_DECEL=10 m/s^2 (~1.67 s from full speed),
-                # which fits comfortably inside the 2 s tail.
-                self._turn_test_tail_t = float(self._turn_test_t_accum_s)
-                self._auto_circle = bool(self._turn_test_prev_auto_circle)
-                try:
-                    self._set_speed_step(0)
-                except Exception:
-                    self._speed_step = 0
-                # _current_forward and cur_forward_mps are LEFT at
-                # their current (cruise) values so the ramp can
-                # naturally decelerate them toward zero.
-            elif self._turn_test_t_accum_s - tail >= BRAKE_TAIL_SECONDS:
-                # Tail window elapsed -- finalize and write.
-                self._turn_test_tail_t = None
-                self._turn_test_finalize(write_json=True, reason='complete')
+        from . import recorder
+        recorder.turn_test_capture_frame(self, dt)
 
     # ------------------------------------------------------------------
     def _turn_test_finalize(self, write_json=True, reason='complete'):
-        """Stop the test, restore prior speed / auto-circle state,
-        and (when `write_json`) write the captured frames to a JSON
-        file under ``<project_root>/test_runs/``."""
-        # Stop the tank, restore prior speed-step + auto-circle.
-        self._auto_circle = bool(self._turn_test_prev_auto_circle)
-        try:
-            self._set_speed_step(0)
-        except Exception:
-            self._speed_step = 0
-        # Hard-stop forward velocity ramp so the tank actually
-        # comes to a halt instead of coasting through the next
-        # frames at the test's max speed.
-        self._current_forward = 0.0
-
-        n_frames = len(self._turn_test_frames)
-        out_path = None
-        if write_json and n_frames > 0:
-            try:
-                out_path = self._turn_test_save_json(reason=reason)
-            except Exception as exc:
-                self.log(f"turn-test: save failed: {exc}",
-                         color=(255, 160, 160))
-                import traceback
-                traceback.print_exc()
-
-        # Reset state + button.
-        self._turn_test_active        = False
-        self._turn_test_frames        = []
-        self._turn_test_total_yaw_deg = 0.0
-        if self._turn_test_btn is not None:
-            self._turn_test_btn.active = False
-
-        if out_path:
-            self.log(f"turn-test: {reason} ({n_frames} frames) -> "
-                     f"{out_path}",
-                     color=(180, 220, 255))
-        else:
-            self.log(f"turn-test: {reason} ({n_frames} frames)",
-                     color=(180, 220, 255))
+        from . import recorder
+        recorder.turn_test_finalize(self, write_json=write_json, reason=reason)
 
     # ------------------------------------------------------------------
     def _turn_test_save_json(self, reason='complete'):
-        """Write the captured run to ``test_runs/<tank>_<ts>.json``
-        with a metadata header."""
-        import os
-        import json
-        from datetime import datetime
-        # Project root (parent of `tankExporterPy/`).
-        proj_root = os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))
-        out_dir   = os.path.join(proj_root, 'test_runs')
-        os.makedirs(out_dir, exist_ok=True)
-        tank_name = (self._active_set.source_tank_name
-                     if (self._active_set is not None
-                         and self._active_set.source_tank_name)
-                     else 'unknown_tank')
-        ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_path  = os.path.join(out_dir,
-                                  f'turn_test_{tank_name}_{ts}.json')
+        from . import recorder
+        return recorder.turn_test_save_json(self, reason=reason)
 
-        tp = self.tank_physics
-        meta = {
-            'schema_version':     1,
-            'kind':               'tank_turn_test',
-            'reason':             reason,
-            'tank':               tank_name,
-            'timestamp':          datetime.now().isoformat(timespec='seconds'),
-            'tepy_version':       __import__(
-                'tankExporterPy', fromlist=['__version__']).__version__,
-            'speed_step':         1,
-            'top_speed_kph':      float(getattr(self, '_top_speed_kph', 50.0)),
-            'auto_circle_radius_m': float(
-                getattr(self, '_auto_circle_radius', 5.0)),
-            'gravity':            float(tp.gravity),
-            'radius_m':           float(tp.radius),
-            'min_offset_m':       float(tp.min_offset),
-            'max_offset_m':       float(tp.max_offset),
-            'track_thickness_m':  float(tp.track_thickness),
-            'mass_kg':            float(tp.mass_kg),
-            'com_local':          [float(c) for c in tp.com_local],
-            'lateral_lean_gain':  float(getattr(tp, 'lateral_lean_gain', 0.0)),
-            'longitudinal_lean_gain': float(getattr(tp, 'longitudinal_lean_gain', 0.0)),
-            'comp_cap_m':         float(-tp.min_offset),
-            'ext_cap_m':          float(-tp.max_offset),
-            'envelope_total_m':   float(tp.max_offset - tp.min_offset),
-            'n_wheels':           int(len(tp.wheels)),
-            'n_left':             int(tp.n_left),
-            'n_right':            int(tp.n_right),
-            'wheel_bone_names':   list(tp.wheel_bone_names),
-            'wheel_local_positions': [
-                [float(w[0]), float(w[1]), float(w[2])]
-                for w in tp.wheels],
-            'state_code_legend':  {
-                '0': 'NONE',
-                '1': 'CONTACT',
-                '2': 'HANGING',
-                '3': 'OVER_COMP',
-            },
-            'frame_count':        int(len(self._turn_test_frames)),
-            'duration_s':         float(self._turn_test_t_accum_s),
-            'final_total_yaw_deg': float(self._turn_test_total_yaw_deg),
-            'sign_convention':    {
-                'residual_y_positive_means': 'wheel rises into hull (compression)',
-                'residual_y_negative_means': 'wheel droops below neutral (extension)',
-            },
-        }
-        # Per-tank config that affects physics interpretation.
-        ci = getattr(self, '_pending_chassis_info', None) or {}
-        if ci:
-            meta['chassis_info_xml'] = {
-                k: (float(v) if isinstance(v, (int, float)) else v)
-                for k, v in ci.items()}
+    # ------------------------------------------------------------------
+    def _on_manual_record_clicked(self):
+        from . import recorder
+        recorder.on_manual_record_clicked(self)
 
-        payload = {
-            'meta':   meta,
-            'frames': self._turn_test_frames,
-        }
-        with open(out_path, 'w', encoding='utf-8') as fh:
-            json.dump(payload, fh, indent=1)
-        return out_path
+    # ------------------------------------------------------------------
+    def _manual_record_capture_frame(self, dt):
+        from . import recorder
+        recorder.manual_record_capture_frame(self, dt)
+
+    # ------------------------------------------------------------------
+    def _manual_record_finalize(self):
+        from . import recorder
+        recorder.manual_record_finalize(self)
+
+    # ------------------------------------------------------------------
+    def _manual_record_save_json(self):
+        from . import recorder
+        return recorder.manual_record_save_json(self)
 
     # ------------------------------------------------------------------
     def _on_zigzag_test_clicked(self):
@@ -6123,6 +8285,36 @@ class Viewer:
 
         self._zigzag_prev_speed_step  = int(getattr(self, '_speed_step', 0))
         self._zigzag_prev_auto_circle = bool(getattr(self, '_auto_circle', False))
+
+        # Auto-fit the zigzag bounds to the loaded terrain extent
+        # so the run covers the whole map (per Coffee 2026-05-09:
+        # "cover whole map. 78m center to edge" -> world_size = 156).
+        # Fall back to the user's stated half-extent if the terrain
+        # object doesn't expose `world_size`.  A small `MARGIN`
+        # keeps the tank from running off the edge during the
+        # 180-deg turn phase.
+        if (self.terrain is not None
+                and hasattr(self.terrain, 'world_size')):
+            half_extent = float(self.terrain.world_size) * 0.5
+        else:
+            half_extent = 78.0
+        MARGIN = 5.0   # m, headroom for the end-of-strip 180 turn
+        bound = max(5.0, half_extent - MARGIN)
+        self._zigzag_z_min = -bound
+        self._zigzag_z_max = +bound
+        self._zigzag_x_start = -bound
+        # Keep strip_width fixed; auto-grow strip_count so the
+        # boustrophedon covers the full lateral span.  Cap at 30
+        # strips so a small map doesn't accidentally request 100s
+        # of passes.
+        lateral_span = 2.0 * bound
+        strip_w = max(1.0, float(self._zigzag_strip_width))
+        self._zigzag_strip_count = max(2, min(30,
+            int(round(lateral_span / strip_w)) + 1))
+        print(f'[zigzag] auto-fit to terrain: '
+              f'half={half_extent:.1f}m bound=+/-{bound:.1f}m '
+              f'strips={self._zigzag_strip_count} '
+              f'strip_width={strip_w:.1f}m')
 
         # Place the tank at strip 0, facing -Z (toward z_min).
         tp = self.tank_physics
@@ -6240,17 +8432,18 @@ class Viewer:
                 if step > abs(delta): step = abs(delta)
                 tp.yaw_deg += step if delta > 0 else -step
         elif self._zigzag_phase == 'shifting':
-            # One-frame teleport laterally by strip_width along
-            # chassis-local +X (perpendicular to the new heading).
-            # tp.yaw_deg is the new heading (0 or 180).
-            # +X chassis-local in world after yaw rotation:
-            #   world_x = cos(yaw)*X_local + sin(yaw)*Z_local
-            # For X_local = strip_width, Z_local = 0:
-            yaw_rad = math.radians(tp.yaw_deg)
-            tp.pos[0] += float(
-                self._zigzag_strip_width * math.cos(yaw_rad))
-            tp.pos[2] += float(
-                self._zigzag_strip_width * (-math.sin(yaw_rad)))
+            # One-frame teleport laterally by strip_width.
+            # Per Coffee 2026-05-09 ("snapping back to the
+            # start row.. should move over like mowing a
+            # lawn"): the shift must be in WORLD +X every
+            # strip, NOT chassis-local +X.  The previous
+            # `strip_width * cos(yaw)` flipped sign at
+            # yaw = 180 deg, so on every odd strip the tank
+            # teleported BACKWARDS in world X -- producing
+            # the ping-pong between two columns instead of
+            # marching across the field.  World +X is the
+            # correct boustrophedon advance direction:
+            tp.pos[0] += float(self._zigzag_strip_width)
             # Reverse pass direction.
             self._zigzag_pass_dir *= -1
             self._set_speed_step(1)
@@ -6801,6 +8994,65 @@ class Viewer:
             self.log('')   # blank separator between mesh blocks
 
         self.log("=" * 80)
+        # ---- Track-pad section ----------------------------------
+        # Per Coffee 2026-05-09: dump every loaded track-pad
+        # pattern's stats (verts / tris / bbox / textures) under
+        # the main compare grid.  Pads load through the same
+        # primitives_processed + visual_processed pipeline as the
+        # rest of the tank (see `track_pads.load_pad_meshes`), so
+        # the same stat columns apply -- vert / face count, UV2 /
+        # colour presence, format string.  Useful for verifying
+        # both single-piece and shoe + connector tanks land
+        # geometry intact before the instanced renderer goes in.
+        pad_dict = getattr(self, '_track_pad_meshes', None) or {}
+        if pad_dict:
+            self.log("")
+            self.log("TRACK PADS (loaded per <trackPair> in chassis XML)")
+            self.log("-" * 80)
+            for key in ('segmentModelLeft', 'segmentModelRight',
+                        'segment2ModelLeft', 'segment2ModelRight',
+                        'linkLeft', 'linkRight'):
+                pad_meshes = pad_dict.get(key)
+                if not pad_meshes:
+                    continue
+                src = (self._track_pad_paths.get(key) or {}).get('model_zip',
+                                                                   '?')
+                tot_v = sum(len(m.positions) for m in pad_meshes)
+                tot_t = sum(m.index_count // 3 for m in pad_meshes)
+                # Aggregate bbox across all sub-meshes in this
+                # pattern -- gives a single "is this 13 cm or
+                # something stupid" sanity dimension.
+                pos_all = np.concatenate(
+                    [m.positions for m in pad_meshes
+                     if m.positions is not None and len(m.positions) > 0],
+                    axis=0) if pad_meshes else None
+                if pos_all is not None and len(pos_all):
+                    bb = pos_all.max(axis=0) - pos_all.min(axis=0)
+                    bbox_str = (f'{bb[0]:.3f} x {bb[1]:.3f} x '
+                                f'{bb[2]:.3f} m')
+                else:
+                    bbox_str = '-'
+                self.log(f"  {key:22}  {len(pad_meshes):>2} sub-mesh(es)  "
+                         f"v={tot_v:>5}  f={tot_t:>5}  bbox={bbox_str}")
+                self.log(f"      src={os.path.basename(src)}")
+                # Per-sub-mesh detail (one line each), in the same
+                # column shape as the main compare table for visual
+                # consistency.
+                for j, m in enumerate(pad_meshes):
+                    v = len(m.positions) if m.positions is not None else 0
+                    i = len(m.indices)   if m.indices   is not None else 0
+                    f = i // 3
+                    uv2 = 'Y' if getattr(m, 'uv1',    None) is not None else 'N'
+                    col = 'Y' if getattr(m, 'colour', None) is not None else 'N'
+                    fmt = (getattr(m, 'format', '') or '')[:22]
+                    name = (getattr(m, 'identifier', '')
+                            or getattr(m, 'name', '')
+                            or f'submesh_{j}')[:22]
+                    self.log(f"    sub#{j:>2}  {name:22}  "
+                             f"v={v:>6}  f={f:>6}  inds={i:>7}  "
+                             f"UV2={uv2}  Col={col}  fmt={fmt}")
+            self.log("=" * 80)
+
         # Header status reflects the result at a glance.
         if n_mismatch:
             self.log_status(f"Compare: {n_mismatch}/{n_total} mismatch")
@@ -8432,13 +10684,12 @@ class Viewer:
                      status_callback=None,
                      prefer_res_mods=True):
         """Load a complete tank from a WoT vehicle XML definition file."""
-        # Reset camera mode to 1 (chase) on every tank load -- so a
-        # session that ended in commander view doesn't reopen with
-        # the turret hidden.  Press C to cycle to chase / commander
-        # again.  (Was previously only being reset in load_mesh,
-        # which is the single-file FBX/GLB import path -- not this
-        # one, the tank-tree pick path.)
-        self.camera_mode = 1
+        # Reset camera mode to 0 (orbit / free cam) on every tank
+        # load -- so a session that ended in commander view doesn't
+        # reopen with the turret hidden.  Press C to cycle to chase
+        # / commander again.  (Was 1 / chase pre-1.113.1; bumped to
+        # 0 per Coffee 2026-05-09 -- matches the ctor default.)
+        self.camera_mode = 0
         return self._load_vehicle_impl(
             xml_path, damaged=damaged, skin=skin,
             chassis_tag=chassis_tag, turret_tag=turret_tag,
@@ -8538,6 +10789,15 @@ class Viewer:
         # their unique colour is baked into the texture itself.
         nation = _nation_from_xml_path(xml_path)
         tank_basename = os.path.splitext(os.path.basename(xml_path))[0]
+        # Per Coffee 2026-05-10 ("do the same for the tank def
+        # file that is in scripts.pkg"): stash the canonical
+        # pkg-internal path of the loaded tank's gameplay XML so
+        # the Extract dialog can offer it as a check-box and
+        # copy the file verbatim from scripts.pkg into res_mods.
+        # Mirrors how `_resolve_track_pad_paths` cached
+        # `_track_pad_paths` for the Track Segments extract row.
+        self._loaded_tank_xml_zip = (
+            f'scripts/item_defs/vehicles/{nation}/{tank_basename}.xml')
         self._armor_color = self._armor_loader.get(nation, tank_basename)
         if self._armor_color:
             print(f"  nation='{nation}'  tank='{tank_basename}'  "
@@ -9001,6 +11261,14 @@ class Viewer:
                             _chassis_kwargs['max_yaw_rate_dps'] = _rspd_f
                     except (ValueError, TypeError):
                         pass
+                # Per Coffee 2026-05-09: pass the XML-driven
+                # `wheel_roles` dict so `from_chassis_meshes` can
+                # use the gameplay-XML `<wheels>` block as the
+                # authoritative road-wheel list -- no Y-band /
+                # WD_drop / shape heuristics needed.
+                _roles = _ci.get('wheel_roles')
+                if _roles:
+                    _chassis_kwargs['wheel_roles'] = _roles
                 self.tank_physics = TankPhysics.from_chassis_meshes(
                     chass, **_chassis_kwargs)
 
@@ -9025,6 +11293,15 @@ class Viewer:
                 self._track_left = None
                 self._track_right = None
                 self._track_chassis_bones_bind = {}
+                self._track_left_rigid_pads = None
+                self._track_right_rigid_pads = None
+                self._track_left_rigid_tans = None
+                self._track_right_rigid_tans = None
+                self._track_left_pad_pos    = None
+                self._track_left_pad_tan    = None
+                self._track_right_pad_pos   = None
+                self._track_right_pad_tan   = None
+                self._track_pad_paths = {}
                 # Detailed diagnostic logging so a user pressing F8
                 # and getting nothing on screen has a clear trail
                 # to follow in the console.  Each early-out path
@@ -9096,6 +11373,79 @@ class Viewer:
                                     self._track_left = L
                                     self._track_right = R
                                     self._track_chassis_bones_bind = bones
+                                    # Cache rigid (no-residual) pad
+                                    # chassis-local positions for the
+                                    # golden-rule clamp in the spline
+                                    # render block.  Built by running
+                                    # the augmented control loop +
+                                    # CR + resample with the BIND
+                                    # bone dict (= zero residual on
+                                    # every Track_<side><i>).  Cost:
+                                    # one CR pass per side once at
+                                    # load time, ~2 ms total.
+                                    #
+                                    # Pad count comes from the
+                                    # gameplay XML's `<trackPair>`:
+                                    # `pads_per_side = segmentsCount
+                                    # / 2`.  No hardcoded fallback
+                                    # in source -- if the XML didn't
+                                    # supply a count, skip the cache
+                                    # so the render block can fall
+                                    # back to its own resolved value.
+                                    # (Per Coffee 2026-05-08: "no
+                                    # hardcoded spline descriptors;
+                                    # get it from the visual or tank
+                                    # def".)
+                                    pads_per_side = self._resolve_pads_per_side()
+                                    # Wheel-wrap anchors disabled per
+                                    # Coffee 2026-05-09 ("remove the
+                                    # wheel wrap math at front and end
+                                    # wheels").  The wheel_radius kwarg
+                                    # on build_augmented_control_loop
+                                    # remains available for a future
+                                    # cleaner attempt; for now the
+                                    # rigid cache is built from the raw
+                                    # V_loc + bottom-run loop only.
+                                    try:
+                                        from .track_spline import (
+                                            centripetal_catmull_rom_closed,
+                                            resample_uniform,
+                                        )
+                                        for spline, pos_attr, tan_attr in (
+                                                (L, '_track_left_rigid_pads',
+                                                 '_track_left_rigid_tans'),
+                                                (R, '_track_right_rigid_pads',
+                                                 '_track_right_rigid_tans')):
+                                            ctrl_rigid = (
+                                                spline.build_augmented_control_loop(
+                                                    bones))
+                                            if (len(ctrl_rigid) >= 4
+                                                    and pads_per_side > 0):
+                                                # samples_per_seg now derives
+                                                # from the gameplay-XML pad
+                                                # count (segmentsCount/2).
+                                                # Min 16 keeps tiny tanks
+                                                # from degenerate sampling.
+                                                _sps = max(16, int(pads_per_side))
+                                                dense = centripetal_catmull_rom_closed(
+                                                    ctrl_rigid,
+                                                    samples_per_seg=_sps,
+                                                    alpha=1.0)
+                                                pad_pos, pad_tan, _ = (
+                                                    resample_uniform(
+                                                        dense, pads_per_side))
+                                                setattr(self, pos_attr, pad_pos)
+                                                setattr(self, tan_attr, pad_tan)
+                                            else:
+                                                setattr(self, pos_attr, None)
+                                                setattr(self, tan_attr, None)
+                                    except Exception as _ex_rigid:
+                                        print(f"[track_spline] rigid pad "
+                                              f"cache failed: {_ex_rigid}")
+                                        self._track_left_rigid_pads = None
+                                        self._track_right_rigid_pads = None
+                                        self._track_left_rigid_tans = None
+                                        self._track_right_rigid_tans = None
                                     nL = len(L.binding.bottom_run_bones)
                                     nR = len(R.binding.bottom_run_bones)
                                     print(
@@ -9106,6 +11456,19 @@ class Viewer:
                                         f"+ {nR} Track_R bones, "
                                         f"{len(bones)} chassis bones; "
                                         f"press F8 to toggle overlay")
+                                    # Phase C step 1: resolve every
+                                    # track-pad `.model` ref to its
+                                    # sibling `.primitives_processed`
+                                    # / `.visual_processed`.  Phase C
+                                    # step 2: build GPU-resident pad
+                                    # meshes from those paths.  Both
+                                    # are gated by tank presence (the
+                                    # chassis XML has to declare
+                                    # track_segment_models -- mod
+                                    # tanks may omit them and we
+                                    # silently skip).
+                                    self._resolve_track_pad_paths()
+                                    self._load_track_pad_meshes()
                 except Exception as exc:
                     import traceback
                     print(f"[track_spline] load skipped: "
@@ -9114,6 +11477,8 @@ class Viewer:
                 # Reset the per-render error gate so a previous
                 # tank's spline error doesn't silence this load.
                 self._track_spline_err_logged = False
+                # Same for the instanced pad renderer error gate.
+                self._track_pad_err_logged = False
 
                 # Reset position state on tank reload so old
                 # positions don't carry over.
@@ -9990,16 +12355,34 @@ class Viewer:
                     # in the new WASD-style tank-handles scheme.
                     # F1 is reserved for the help overlay (future).
                     self.wireframe = not self.wireframe
-                    self._sync_button_state('wireframe', self.wireframe)
+                    state = 'ON' if self.wireframe else 'OFF'
+                    print(f"[F2] wireframe: {state}")
+                    try:
+                        self.log(f"[F2] wireframe: {state}",
+                                 color=(120, 220, 180)
+                                 if self.wireframe
+                                 else (220, 200, 120))
+                    except Exception:
+                        pass
+                    try:
+                        self._sync_button_state(
+                            'wireframe', self.wireframe)
+                    except Exception:
+                        pass
                 elif event.key == K_F3:
-                    # 1-Turn auto-test: same code path as the
-                    # "1-Turn Test" button in the Tools group.
-                    # Drives the tank in a full 360-degree
-                    # auto-circle at speed step 1 (top per-tank
-                    # speed) and saves a frame-by-frame JSON dump
-                    # of chassis pose + per-wheel state to
-                    # test_runs/.  Press again mid-test to cancel.
-                    self._on_turn_test_clicked()
+                    # F3 -- manual recorder toggle.  Press once to
+                    # start recording, press again to stop and write
+                    # JSON.  No auto-circle, no time limit, no
+                    # tank-pose reset on start -- the user drives
+                    # normally and every frame is captured to
+                    # test_runs/manual_<tank>_<ts>.json.  Built to
+                    # diagnose post-1.105 oscillation (see
+                    # _on_manual_record_clicked docstring for the
+                    # full list of fields the snapshot exposes).
+                    # The 1-Turn auto-test is still available via
+                    # the "1-Turn Test" button in the Tools group;
+                    # it just no longer has a hotkey.
+                    self._on_manual_record_clicked()
                 elif event.key == K_F4:
                     # Zig-zag terrain-sweep test (boustrophedon).
                     # Drives the tank back-and-forth across the
@@ -10012,45 +12395,40 @@ class Viewer:
                     # map.  Press again mid-run to cancel.
                     self._on_zigzag_test_clicked()
                 elif event.key == K_F8:
-                    # Toggle the track NURB spline overlay.
-                    # Yellow = LEFT loop, cyan = RIGHT loop.
-                    # The line strip deforms as the wheels move:
-                    # bumps push the bottom-run pads up, droops
-                    # pull them down.  Useful while developing
-                    # the kinematic-bone-driven track work in
-                    # docs/TRACK_PHYSICS.md.  Persisted to the
-                    # `show_track_spline` config flag so the
-                    # state survives a tank reload.
-                    self._show_track_spline = not self._show_track_spline
-                    self._cfg['show_track_spline'] = bool(
-                        self._show_track_spline)
-                    try:
-                        _config.save(self._cfg)
-                    except Exception as _ex:
-                        print(f"[viewer] config save "
-                              f"(show_track_spline) failed: {_ex}")
-                    # Honest message: distinguish "toggled on but no
-                    # data loaded" (orange / warn) from "toggled on
-                    # and rendering" (cyan / info).  Mismatch between
-                    # the F8 state and what's actually on screen was
-                    # the first thing Professor Coffee hit when
-                    # pressing F8 produced no visible change.
-                    have_data = (self._track_left is not None
-                                 and self._track_right is not None)
-                    if self._show_track_spline and not have_data:
-                        self.log(
-                            "track NURB overlay: ON but NO spline data "
-                            "loaded for this tank -- check console for "
-                            "[track_spline] log line",
-                            color=(255, 180, 120))
-                    else:
-                        self.log(
-                            f"track NURB overlay: "
-                            f"{'on' if self._show_track_spline else 'off'} "
-                            f"(F8)",
-                            color=((180, 220, 255)
-                                   if self._show_track_spline
-                                   else (180, 180, 180)))
+                    # Per Coffee 2026-05-10 ("add F8 to hide
+                    # pads"): F8 now toggles the instanced
+                    # track-pad render only.  The spline
+                    # overlay (cyan / yellow line strip) stays
+                    # ON unconditionally per the earlier
+                    # 1.111.2 directive ("on all the time
+                    # until it is done") so chain debugging
+                    # still has a visible chain even when the
+                    # pads are hidden.
+                    self._show_track_pads = not getattr(
+                        self, '_show_track_pads', True)
+                    self.log(
+                        f"track pads: "
+                        f"{'on' if self._show_track_pads else 'off'}",
+                        color=(180, 220, 255)
+                              if self._show_track_pads
+                              else (180, 180, 180))
+                elif event.key == K_F9:
+                    # Per Coffee 2026-05-10 ("remove F9 binding
+                    # to flip them"): homie is the only chain
+                    # math now.  F9 is a no-op; reserved in case
+                    # we want a different toggle later.
+                    pass
+                elif event.key == K_F10:
+                    # Toggle orthographic LEFT-side view
+                    # centered on the rear drive sprocket.
+                    # Per Coffee 2026-05-10 ("F10 switch to
+                    # ortho view of left side centered on
+                    # rear drive axle.  F10 back to normal
+                    # perspective").  Captures the sprocket
+                    # bone position in chassis-local space on
+                    # entry so the view tracks the tank as it
+                    # drives / rotates.
+                    self._toggle_ortho_left_view()
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
                 elif event.key == K_o:
@@ -10067,52 +12445,28 @@ class Viewer:
                              color=(180, 220, 255) if self._auto_circle
                              else (180, 180, 180))
                 elif event.key == K_c:
-                    # Cycle camera mode: orbit -> chase -> commander -> orbit.
-                    #   0 (orbit / free cam) -> 1 (chase)
-                    #   1 (chase)            -> 2 (commander)
-                    #   2 (commander)        -> 0 (orbit)
+                    # Cycle camera mode per Coffee 2026-05-09:
+                    #   0 = orbit (free cam)
+                    #   1 = side chase (perpendicular to chassis
+                    #       Z, look-at = turret HP, dist = 15 m,
+                    #       locked to tank position + rotation)
+                    #   2 = driver / commander POV (turret seat,
+                    #       head rotates via LEFT-drag)
                     #
-                    # On the 2 -> 0 hop (commander -> free cam),
-                    # snapshot commander's CURRENT eye + look-at into
-                    # the orbit camera state.  Why: commander view is
-                    # locked to the chassis -- as the tank moves, the
-                    # commander-view eye moves with it.  Without this
-                    # save, free cam would yank back to a stale
-                    # pre-commander orbit pose, leaving the camera
-                    # somewhere the tank used to be.  By copying
-                    # commander's now-position into self.camera, free
-                    # cam picks up exactly where commander was looking
-                    # at the moment of the press.  User request
-                    # 2026-05-08.
+                    # On the 2 -> 0 hop (commander -> free cam)
+                    # snapshot the commander view's CURRENT eye
+                    # + look-at into the orbit camera so free
+                    # cam picks up at the same pose.
                     if (self.camera_mode == 2
                             and self.tank_physics is not None):
-                        # NOTE: wrap the entire save-commander-view
-                        # block in try/except.  This runs only on the
-                        # 2 -> 0 hop, which is the 3RD C-press, so
-                        # any latent bug here is silent until the
-                        # third press and then closes the app.  We
-                        # prefer a logged failure + falling through
-                        # to "free cam keeps its previous orbit
-                        # state" over killing the session.  A
-                        # specific instance of this was the
-                        # `bind_model_matrix or model_matrix`
-                        # short-circuit chain below: `or` on a 4x4
-                        # numpy array raises ValueError ("truth
-                        # value of an array ...is ambiguous") because
-                        # Python has to coerce the LHS to bool.  Now
-                        # using explicit `is not None` checks.
                         try:
-                            chassis = np.asarray(
+                            chassis_save = np.asarray(
                                 self.tank_physics.chassis_matrix(),
                                 dtype=np.float64)
-                            # Use the SAME eye + head-rotated target
-                            # the commander view is actually looking
-                            # at -- so free cam picks up at the
-                            # current head rotation, not the
-                            # forward-locked default.  Mirror of
-                            # _anchored_view_matrix's C2 branch.
-                            head_yaw   = math.radians(self._head_yaw_deg)
-                            head_pitch = math.radians(self._head_pitch_deg)
+                            head_yaw   = math.radians(
+                                self._head_yaw_deg)
+                            head_pitch = math.radians(
+                                self._head_pitch_deg)
                             cy_, sy_ = (math.cos(head_yaw),
                                         math.sin(head_yaw))
                             cp_, sp_ = (math.cos(head_pitch),
@@ -10120,20 +12474,18 @@ class Viewer:
                             fwd = np.array(
                                 [-cp_ * sy_, sp_, -cp_ * cy_],
                                 dtype=np.float64)
-                            # Same gun-mount eye lookup as the
-                            # commander branch of
-                            # _anchored_view_matrix -- keep in sync.
                             EYE_LIFT_M = 0.25
                             gun_local = None
                             for _m in self.meshes:
-                                if getattr(_m, 'component', '') != 'gun':
+                                if (getattr(_m, 'component', '')
+                                        != 'gun'):
                                     continue
-                                # Explicit-None path: `or` would call
-                                # bool(ndarray) and explode.
-                                _bm = getattr(_m, 'bind_model_matrix',
+                                _bm = getattr(_m,
+                                              'bind_model_matrix',
                                               None)
                                 if _bm is None:
-                                    _bm = getattr(_m, 'model_matrix',
+                                    _bm = getattr(_m,
+                                                  'model_matrix',
                                                   None)
                                 if _bm is not None:
                                     gun_local = (
@@ -10142,36 +12494,35 @@ class Viewer:
                                         float(_bm[2, 3]))
                                 break
                             if gun_local is not None:
-                                eye_local = np.array(
+                                eye_local_save = np.array(
                                     [gun_local[0],
                                      gun_local[1] + EYE_LIFT_M,
-                                     gun_local[2],
-                                     1.0], dtype=np.float64)
+                                     gun_local[2], 1.0],
+                                    dtype=np.float64)
                             else:
-                                eye_local = np.array(
+                                eye_local_save = np.array(
                                     [0.0, 1.95, 0.0, 1.0],
                                     dtype=np.float64)
-                            target_local = np.array(
-                                [eye_local[0] + 10.0 * fwd[0],
-                                 eye_local[1] + 10.0 * fwd[1],
-                                 eye_local[2] + 10.0 * fwd[2],
+                            target_local_save = np.array(
+                                [eye_local_save[0] + 10.0 * fwd[0],
+                                 eye_local_save[1] + 10.0 * fwd[1],
+                                 eye_local_save[2] + 10.0 * fwd[2],
                                  1.0], dtype=np.float64)
-                            eye_world    = (chassis @ eye_local)[:3]
-                            target_world = (chassis @ target_local)[:3]
-                            # offset points from look-at BACK to eye
-                            # -- which is exactly the orbit camera's
-                            # eye-relative-to-center vector.
+                            eye_world = (
+                                chassis_save @ eye_local_save)[:3]
+                            target_world = (
+                                chassis_save @ target_local_save)[:3]
                             offset = eye_world - target_world
-                            dist   = float(np.linalg.norm(offset))
+                            dist = float(np.linalg.norm(offset))
                             if (dist > 1e-6
                                     and np.all(np.isfinite(offset))
                                     and np.all(np.isfinite(target_world))):
-                                self.camera.center   = (
+                                self.camera.center = (
                                     target_world.astype(np.float32))
                                 self.camera.distance = max(0.5, dist)
-                                self.camera.yaw     = float(np.degrees(
+                                self.camera.yaw = float(np.degrees(
                                     np.arctan2(offset[0], offset[2])))
-                                self.camera.pitch   = float(np.degrees(
+                                self.camera.pitch = float(np.degrees(
                                     np.arctan2(
                                         offset[1],
                                         np.hypot(offset[0],
@@ -10183,15 +12534,14 @@ class Viewer:
                                 color=(255, 180, 120))
                     self.camera_mode = (
                         self.camera_mode + 1) % self._N_CAMERA_MODES
-                    # Entering commander mode: reset head rotation to
-                    # straight-forward + level so the user always
-                    # starts the seat ride facing where the tank is
-                    # facing.  Mouse drag rotates from there.
                     if self.camera_mode == 2:
+                        # Reset head rotation on entry so the
+                        # seat ride starts facing forward.
                         self._head_yaw_deg   = 0.0
                         self._head_pitch_deg = 0.0
-                    label = ('orbit', 'chase (driver side)',
-                             'commander (turret POV)')[self.camera_mode]
+                    label = ('orbit',
+                             'side chase (right @ 15 m)',
+                             'driver POV')[self.camera_mode]
                     self.log(f"camera: {label}",
                              color=(180, 220, 255))
                 elif event.key == K_h:
@@ -10248,7 +12598,12 @@ class Viewer:
             elif event.type == MOUSEWHEEL:
                 # Tree panel scroll has priority over camera zoom
                 mx, my = pygame.mouse.get_pos()
-                if self.ui.handle_mouse_wheel(mx, my, event.y):
+                # Per Coffee 2026-05-10 ("alt down should stop
+                # all mouse rotations and freeze it"): wheel
+                # zoom is also a mouse rotation -- block it.
+                if bool(pygame.key.get_mods() & pygame.KMOD_ALT):
+                    pass
+                elif self.ui.handle_mouse_wheel(mx, my, event.y):
                     pass  # consumed by the tree
                 else:
                     # Mode-aware zoom: chase has its own
@@ -10256,13 +12611,26 @@ class Viewer:
                     # commander is fixed-position and ignores wheel
                     # zoom; orbit/free uses the standard
                     # `self.camera.distance`.
+                    # Two-way wheel zoom restored per Coffee
+                    # 2026-05-10 "zoom only works one way lol" --
+                    # the earlier "remove wheel down" instruction
+                    # was mis-interpreted as "disable zoom-out".
                     if event.y > 0:
                         zoom = 0.9    # wheel forward -> zoom in
                     elif event.y < 0:
-                        zoom = 1.1
+                        zoom = 1.1    # wheel back    -> zoom out
                     else:
                         zoom = 1.0
-                    if self.camera_mode == 1:
+                    if self._is_ortho_active():
+                        # F10 ortho mode -- zoom rescales the
+                        # ortho half-height (clamped to 5 cm so
+                        # we can't accidentally invert).  Per
+                        # Coffee 2026-05-10 ("let me zoom and
+                        # pan in ortho mode").
+                        self._ortho_left_half_h = max(
+                            0.05,
+                            float(self._ortho_left_half_h) * zoom)
+                    elif self.camera_mode == 1:
                         self._chase_distance = max(
                             0.5, self._chase_distance * zoom)
                     elif self.camera_mode != 2:
@@ -10270,6 +12638,14 @@ class Viewer:
 
             elif event.type == MOUSEBUTTONDOWN:
                 mx, my = event.pos
+                # ALT-rect screenshot (Coffee 2026-05-10).
+                # LMB-down with ALT held starts the drag.
+                if (event.button == 1
+                        and bool(pygame.key.get_mods()
+                                 & pygame.KMOD_ALT)):
+                    self._alt_rect_start = (mx, my)
+                    self._alt_rect_end   = (mx, my)
+                    continue
                 if event.button == 1 and self.ui.is_pointer_over_ui(mx, my):
                     # Section-header clicks come first -- they're
                     # wider hit zones than buttons (full row width)
@@ -10308,6 +12684,10 @@ class Viewer:
                 self.ui.update_hover(*event.pos)
                 if event.buttons[0]:    # left button held -- update slider drag
                     self.ui.handle_mouse_drag(*event.pos)
+                # ALT-rect screenshot drag follow.  Update the
+                # end corner so the overlay tracks the cursor.
+                if self._alt_rect_start is not None:
+                    self._alt_rect_end = event.pos
 
         # Continuous mouse-button camera controls
         btns      = pygame.mouse.get_pressed()
@@ -10321,19 +12701,59 @@ class Viewer:
         # button (the "wheel" button -- XZ pan).  Right-click
         # orbit doesn't move the look-at, so it doesn't trigger
         # the cue.
-        shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-        # Crosshair shows whenever the user is moving the look-at
-        # point.  After the 2026-05-08 mouse rebind:
-        #   RIGHT-button held  -> XZ pan  -> show crosshair
-        #   MIDDLE-button held -> Y-lift (with Shift) -> show crosshair
-        # Either chord turns it on so the user always sees where
-        # they're aiming during a pan / Y-lift.  Drawn with depth
-        # test ENABLED (see render() near `lookat_lines.render`)
-        # so the lines occlude correctly behind the tank / terrain
-        # -- the look-at point inside a piece of geometry only shows
-        # the parts of the cross that emerge to the surface, which
-        # reads as the natural "your aim is here" cue.
-        self._show_lookat_lines = bool(btns[1] or btns[2])
+        # Per Coffee 2026-05-10 ("need left mouse down bool.
+        # LM_down. Ctrl_down left_shift_down.  pan only when
+        # LM_down and left_shift_down are both true.  only move
+        # Z when left_ctrl_down and LM_down are true"):
+        # store LM, LEFT-Shift, LEFT-Ctrl as separate instance
+        # flags so the dispatch below (and any downstream render
+        # gate) reads the same single-frame snapshot.
+        # KMOD_LSHIFT / KMOD_LCTRL distinguish LEFT-side mods
+        # from their right-side cousins (right-shift / right-
+        # ctrl don't trigger pan/lift any more).
+        mods = pygame.key.get_mods()
+        self._left_shift_down = bool(mods & pygame.KMOD_LSHIFT)
+        self._left_ctrl_down  = bool(mods & pygame.KMOD_LCTRL)
+        # ALT-rect screenshot: detect the keyup edge per
+        # Coffee 2026-05-10 ("release of alt key copies area
+        # to clipboard").  If we WERE held last frame and
+        # we're NOT held now, and the user drew a rect, queue
+        # the capture for the NEXT render's tail (so the
+        # cyan overlay rectangle drawn this frame stays out
+        # of the captured bytes).
+        alt_now = bool(mods & pygame.KMOD_ALT)
+        if (self._alt_held_prev and not alt_now
+                and self._alt_rect_start is not None
+                and self._alt_rect_end is not None):
+            x0, y0 = self._alt_rect_start
+            x1, y1 = self._alt_rect_end
+            rx = min(x0, x1)
+            ry = min(y0, y1)
+            rw = abs(x1 - x0)
+            rh = abs(y1 - y0)
+            if rw >= 4 and rh >= 4:
+                self._pending_alt_capture = (rx, ry, rw, rh)
+            # Clear the live drag state so the overlay isn't
+            # drawn on the upcoming frame -> screenshot is
+            # clean.
+            self._alt_rect_start = None
+            self._alt_rect_end   = None
+        self._alt_held_prev = alt_now
+        # LM_down is also stored here so it's available in render.
+        self._lm_down = bool(btns[0])
+        # Back-compat aliases (some downstream code still reads
+        # `_shift_held` / `_ctrl_held` as the union of L+R).
+        self._shift_held = bool(mods & pygame.KMOD_SHIFT)
+        self._ctrl_held  = bool(mods & pygame.KMOD_CTRL)
+        shift_held = self._left_shift_down
+        ctrl_held  = self._left_ctrl_down
+        lm_down    = self._lm_down
+        # Crosshair shows whenever LEFT-Shift OR LEFT-Ctrl is held
+        # AND the LEFT mouse button is down -- the user is
+        # actively in pan / lift mode (not just brushing a
+        # modifier while reading text).
+        self._show_lookat_lines = bool(
+            (shift_held or ctrl_held) and lm_down)
 
         # Tank-driving keys: arrow keys move the tank around the
         # terrain (XZ only -- physics handles Y / pitch / roll).
@@ -10348,8 +12768,41 @@ class Viewer:
         # visible front of the tank ends up at world -Z).  This
         # negation makes UP=forward, LEFT=strafe-left, Q=yaw-left
         # match the visible tank.
+        # Physics + drive run whenever a terrain is LOADED (regardless
+        # of whether it's currently visible), per Coffee 2026-05-09:
+        # "the math sees the terrain regardless if I can [see it]".
+        # Toggling the on-screen terrain off must not pause the
+        # solver; otherwise the tank's pos / pose freeze and the
+        # mesh snap-to-bind in the else-branch below makes the next
+        # toggle-on look like a Z jump (= the bug Coffee just hit).
+        # Per Coffee 2026-05-10 diagnostic: one-shot log when WASD
+        # is held but the gate below silently blocks drive.  Lets
+        # the user see WHY the tank isn't moving (Susp off, no
+        # tank, no terrain, or the keys really aren't reaching us).
+        _diag_keys = pygame.key.get_pressed()
+        _wasd_held = (_diag_keys[pygame.K_w]
+                      or _diag_keys[pygame.K_s]
+                      or _diag_keys[pygame.K_a]
+                      or _diag_keys[pygame.K_d])
+        if _wasd_held and not getattr(self, '_drive_gate_logged', False):
+            ss = getattr(self, '_speed_step', None)
+            self.log(
+                f"drive gate: phys_enabled="
+                f"{bool(self.tank_physics_enabled)}  "
+                f"tank_physics={self.tank_physics is not None}  "
+                f"terrain={self.terrain is not None}  "
+                f"speed_step={ss}",
+                color=(220, 200, 120))
+            print(
+                f"[drive-gate] phys_enabled="
+                f"{bool(self.tank_physics_enabled)}  "
+                f"tank_physics={self.tank_physics is not None}  "
+                f"terrain={self.terrain is not None}  "
+                f"speed_step={ss}")
+            self._drive_gate_logged = True
+
         if (self.tank_physics_enabled and self.tank_physics
-                and self.show_terrain and self.terrain):
+                and self.terrain):
             keys = pygame.key.get_pressed()
             dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
             # Stepped speed selector.  `_speed_yards_per_sec()`
@@ -10385,22 +12838,18 @@ class Viewer:
             # decel rates -- so W press doesn't snap to full speed,
             # release doesn't stop instantly.
             #
-            # Auto-circle, cruise, and W all want forward (full step).
-            # Z wants backward (negate).  No keys = decel toward 0.
+            # Auto-circle, cruise, and W want forward (full step).
+            # S wants backward (negate).  No keys = decel toward 0.
+            # WASD-style binding per Coffee 2026-05-09 -- the
+            # legacy Z / X reverse keys were dropped in the same
+            # change (W/S now mirror left-hand WASD; A/D handle
+            # yaw above).
             target_forward = 0.0
             if self._auto_circle:
                 target_forward = move_speed
-            elif (keys[pygame.K_w] or keys[pygame.K_s]
-                    or self._zigzag_drive_command):
-                # W and S both drive forward (momentary -- release
-                # to stop, same as any other drive key).  S used
-                # to be a cruise toggle but Professor Coffee
-                # preferred straight hold-to-go behaviour.
+            elif keys[pygame.K_w] or self._zigzag_drive_command:
                 target_forward = move_speed
-            elif keys[pygame.K_z] or keys[pygame.K_x]:
-                # Z and X both drive backward (hold).  X is the
-                # duplicate added at Professor Coffee's request --
-                # different finger position, same effect.
+            elif keys[pygame.K_s]:
                 target_forward = -move_speed
 
             # ---- Ramp toward target ----------------------------------
@@ -10515,7 +12964,10 @@ class Viewer:
                 # Manual yaw input.  Yaw rate is INSTANT (no ramp)
                 # because tanks pivot quickly when stopped and
                 # ramping the yaw was distracting in testing.
-                if keys[pygame.K_a] or keys[pygame.K_q]:
+                # Per Coffee 2026-05-10 ("remove Q binding"):
+                # Q is no longer aliased to A for yaw-left.
+                # E remains aliased to D for yaw-right.
+                if keys[pygame.K_a]:
                     tp.yaw_deg -= yaw_speed * dt
                     moved = True
                 if keys[pygame.K_d] or keys[pygame.K_e]:
@@ -10552,83 +13004,132 @@ class Viewer:
             dx = mouse_pos[0] - self.mouse_last[0]
             dy = mouse_pos[1] - self.mouse_last[1]
 
-            # Mouse-button bindings (2026-05-08 user request):
-            #   LEFT   (btns[0]) -> orbit (yaw / pitch the camera)
-            #   RIGHT  (btns[2]) -> pan on the XZ ground plane
-            #   MIDDLE (btns[1]) -> show look-at crosshair; +Shift = Y-lift
-            #   WHEEL scroll      -> zoom (handled in MOUSEBUTTONDOWN above)
+            # Mouse bindings (Coffee 2026-05-10 rebind):
+            #   LEFT-drag (no modifier)  -> orbit (mode-aware)
+            #   Shift held + cursor move -> XZ pan       (no button)
+            #   Ctrl  held + cursor move -> Y-lift       (no button)
+            #   WHEEL scroll up          -> zoom in
+            #   WHEEL scroll down        -> (no-op, intentionally)
+            # Modifier priority: Ctrl wins over Shift if both held.
             #
-            # The `is_pointer_over_ui` gate above means LEFT-click on a
-            # UI button / slider goes to the UI handler instead of orbit,
-            # so the rebind doesn't break panel interaction.  The
-            # `not slider_active` extra gate handles the case where the
-            # user drags a slider OUT of the panel mid-drag (still want
-            # the slider to win, not have orbit kick in).
+            # Per Coffee 2026-05-10 ("the left mouse has no down
+            # events.." / "Mouse XY move events check if the shift
+            # is down"): pan and Y-lift fire on cursor MOTION while
+            # the modifier is held -- no mouse-button click
+            # required.  The crosshair already showed on key-down;
+            # actual translation happens as soon as the cursor
+            # moves a single pixel.
             #
-            # Shift + MIDDLE keeps Y-lift on its own dedicated chord so
-            # an accidental Shift during typing doesn't yank the camera.
-            if shift_held and btns[1] and (dx or dy):
-                # Half the pan-XZ speed so the Y lift feels deliberate
-                # and lands precisely instead of overshooting.  The
-                # 0.10 factor (vs the pan's 0.20) is the only knob --
-                # adjust here if it ever feels too sluggish or too
-                # twitchy.
-                speed_y = 0.01 * self.camera.distance * 0.10
-                # Sign reversed from the obvious "drag-up = rise"
-                # convention: pygame y grows downward, so adding
-                # `dy * speed` directly means drag-DOWN raises the
-                # look-at and drag-UP drops it -- matches the user's
-                # mental model of "push the world down to lift my
-                # gaze" / "pull the world up to look down".
-                self.camera.center[1] += dy * speed_y
-            elif btns[0]:   # LEFT-drag
-                if self.camera_mode == 2:
-                    # Commander mode: drag rotates the HEAD in
-                    # chassis-local space, not the orbit camera.
-                    # Lets the user look around from the commander
-                    # seat (left, right, up, down) while the
-                    # chassis-locked anchor preserves "tracks the
-                    # car's turn" -- a head rotated 90 deg right
-                    # in chassis-local stays right-of-tank as the
-                    # tank yaws.  Pitch clamped to keep the head
-                    # from flipping over.
-                    self._head_yaw_deg   += dx * 0.5
-                    self._head_pitch_deg += dy * 0.5
-                    self._head_pitch_deg  = float(np.clip(
-                        self._head_pitch_deg, -85.0, +85.0))
-                elif self.camera_mode == 1:
-                    # Chase mode: drag rotates the orbit angle in
-                    # CHASSIS-LOCAL space (so chase tracks the
-                    # tank's yaw automatically -- same kid-out-
-                    # the-window behavior as commander).
-                    self._chase_yaw_deg   += dx * 0.5
-                    self._chase_pitch_deg += dy * 0.5
-                    self._chase_pitch_deg  = float(np.clip(
-                        self._chase_pitch_deg, -85.0, +85.0))
+            # Math lives in `viewer_input.py` (apply_orbit / apply_pan
+            # / apply_y_lift) so this block is just a dispatcher.
+            #
+            # The `is_pointer_over_ui` gate above means LEFT-click on
+            # a UI button / slider goes to the UI handler instead of
+            # the camera, so the rebind doesn't break panel
+            # interaction.  The `not slider_active` extra gate handles
+            # the case where the user drags a slider OUT of the panel
+            # mid-drag (the slider keeps winning, the camera doesn't
+            # kick in).
+            # Per Coffee 2026-05-10 ("pan only when LM_down and
+            # left_shift_down are both true.  only move Z when
+            # left_ctrl_down and LM_down are true"): require
+            # LEFT-mouse-button held in addition to the modifier
+            # so brushing a modifier key while reading text
+            # doesn't move the camera.  Modifier priority:
+            # Ctrl + LM wins over Shift + LM if both held.
+            # Plain LM (no modifier) still orbits.  Right-button
+            # drag still zooms (independent of LEFT button).
+            from . import viewer_input
+            # Per Coffee 2026-05-10 ("alt down should stop all
+            # mouse rotations and freeze it"): when ALT is
+            # held, the user is in screenshot-rectangle mode.
+            # Block every camera-mutating branch below so the
+            # camera doesn't orbit / pan / lift / zoom under
+            # the rectangle drag.  `_alt_held_prev` was just
+            # updated above to reflect this frame's ALT state.
+            alt_active = bool(self._alt_held_prev)
+            if alt_active:
+                # Still drain `self.mouse_last` so we don't
+                # see a giant delta on the first non-ALT
+                # frame after release.
+                pass
+            elif lm_down and ctrl_held and (dx or dy):
+                if self._is_ortho_active():
+                    # Disable Y-lift in ortho mode -- the look-at
+                    # height is governed entirely by pan (in the
+                    # chassis-local YZ plane).  Per Coffee
+                    # 2026-05-10 ("let me zoom and pan in ortho
+                    # mode") -- pan handles both axes.
+                    pass
                 else:
-                    # Free cam (orbit / mode 0): drag the world-
-                    # frame orbit camera.
-                    self.camera.yaw   += dx * 0.5
-                    self.camera.pitch += dy * 0.5
-                    self.camera.pitch  = np.clip(self.camera.pitch, -89, 89)
-
-            if btns[2]:   # RIGHT-drag -> pan on XZ ground plane
-                # Pan speed (formerly a UI slider, baked at 0.20)
-                speed = 0.01 * self.camera.distance * 0.20
-                view  = self.camera.get_view_matrix()
-
-                # Camera right and forward vectors, flattened to XZ (no Y lift)
-                right_xz = np.array([view[0, 0], 0.0, view[0, 2]], dtype=np.float32)
-                fwd_xz   = np.array([-view[2, 0], 0.0, -view[2, 2]], dtype=np.float32)
-
-                # Normalise (safe -- zero-length only when looking straight down)
-                r_len = np.linalg.norm(right_xz)
-                f_len = np.linalg.norm(fwd_xz)
-                if r_len > 1e-6: right_xz /= r_len
-                if f_len > 1e-6: fwd_xz   /= f_len
-
-                self.camera.center -= right_xz * (dx * speed)   # flipped X: drag right → camera right
-                self.camera.center += fwd_xz   * (dy * speed)
+                    viewer_input.apply_y_lift(self, dy)
+            elif lm_down and shift_held and (dx or dy):
+                if self._is_ortho_active():
+                    # F10 ortho pan: shift `_ortho_left_center_local`
+                    # in chassis-local YZ.  Screen-right axis
+                    # = chassis-local +Z (per `_ortho_left_view_
+                    # matrix`'s s = cross(+X_local, +Y_local) =
+                    # +Z_local).  Screen-up axis = chassis-local
+                    # +Y.  Cursor follows world rule: cursor right
+                    # -> scene appears to track right -> look-at
+                    # shifts LEFT in screen-X (i.e., -Z local).
+                    # 1 pixel of cursor motion = (2 * half_h /
+                    # viewport_height) metres in either axis
+                    # (ortho aspect is matched to the viewport,
+                    # so pixels-per-metre is the same in both
+                    # screen axes).
+                    cl = getattr(self,
+                                  '_ortho_left_center_local', None)
+                    if cl is not None:
+                        h_pix = max(1.0,
+                                    float(self.camera.height))
+                        mpp = (2.0
+                               * float(self._ortho_left_half_h)
+                               / h_pix)
+                        cx, cy, cz = cl
+                        cz -= dx * mpp
+                        cy += dy * mpp
+                        self._ortho_left_center_local = (
+                            float(cx), float(cy), float(cz))
+                else:
+                    viewer_input.apply_pan(self, dx, dy)
+            elif btns[2] and (dx or dy):
+                if self._is_ortho_active():
+                    # Right-drag zoom in ortho mode -- vertical
+                    # drag rescales half_h, same direction as
+                    # the wheel-zoom: drag DOWN zooms OUT.  Per
+                    # Coffee 2026-05-10 ("let me zoom and pan
+                    # in ortho mode") -- right-drag is the
+                    # alternative to wheel zoom, useful when
+                    # the mouse wheel is being consumed by the
+                    # tree panel.
+                    factor = 1.0 + dy * 0.005
+                    self._ortho_left_half_h = max(
+                        0.05,
+                        float(self._ortho_left_half_h) * factor)
+                else:
+                    viewer_input.apply_zoom_drag(self, dy)
+            elif lm_down and (dx or dy):
+                if self._is_ortho_active():
+                    # Plain LM-drag in ortho = pan (no orbit
+                    # in side-view -- there's no meaningful
+                    # orbit axis for a locked-direction
+                    # orthographic projection).
+                    cl = getattr(self,
+                                  '_ortho_left_center_local', None)
+                    if cl is not None:
+                        h_pix = max(1.0,
+                                    float(self.camera.height))
+                        mpp = (2.0
+                               * float(self._ortho_left_half_h)
+                               / h_pix)
+                        cx, cy, cz = cl
+                        cz -= dx * mpp
+                        cy += dy * mpp
+                        self._ortho_left_center_local = (
+                            float(cx), float(cy), float(cz))
+                else:
+                    viewer_input.apply_orbit(self, dx, dy)
 
         self.mouse_last = list(mouse_pos)
 
@@ -10653,6 +13154,27 @@ class Viewer:
             self.splash.render()
             pygame.display.flip()
             return
+
+        # ---- Per-frame timer reset -------------------------------------
+        # `_frame_timers` accumulates per-section wall-clock costs in
+        # milliseconds.  Two-buffer scheme so the F3 manual recorder
+        # (which fires INSIDE the physics block, before later passes
+        # have written their timers) always sees a COMPLETE set of
+        # timers from the previous frame.
+        #   * `_frame_timers_complete` -- last frame's full snapshot.
+        #     Read by the recorder.  Empty on the very first frame.
+        #   * `_frame_timers`          -- current frame's accumulator.
+        #     Promoted to `_frame_timers_complete` at the top of the
+        #     NEXT render() call.
+        # This introduces a 1-frame lag in the recorder's timer
+        # correlation -- acceptable for diagnostic use (events at
+        # 60 fps are slow enough that the lag is invisible) and far
+        # simpler than restructuring the whole render() to push the
+        # recorder hook to the end.
+        import time as _time
+        self._frame_timers_complete = self._frame_timers
+        self._frame_timers = {}
+        _render_t0 = _time.perf_counter()
 
         # Mirror the Debug + Susp checkboxes into the master flags
         # at the TOP of render() so every gate downstream reads
@@ -10782,7 +13304,10 @@ class Viewer:
         # robust against that.
 
         view = self._anchored_view_matrix()
-        proj = self.camera.get_projection_matrix()
+        if self._is_ortho_active():
+            proj = self._ortho_left_projection_matrix()
+        else:
+            proj = self.camera.get_projection_matrix()
 
         # ---- Tank physics (per-wheel terrain conformance) ------------
         # Runs BEFORE every per-mesh upload below so the picker FBO,
@@ -10800,8 +13325,15 @@ class Viewer:
         #   * Terrain off                  -> chassis pose = identity.
         #   * No tank loaded               -> nothing to apply.
         #   * `tank_physics_enabled` False -> identity (debug knob).
+        # Physics tick runs whenever a terrain is LOADED.  The on-
+        # screen terrain visibility (`show_terrain`) only gates the
+        # GL terrain render below -- it does NOT gate physics.  See
+        # the matching note on the drive-input gate above for why
+        # (toggling the visual must not pause the solver, or the
+        # mesh-snap-to-bind in the else branch produces a Z jump
+        # on the next toggle).
         if (self.tank_physics_enabled and self.meshes
-                and self.show_terrain and self.terrain
+                and self.terrain
                 and self.tank_physics is not None):
             # Save each mesh's load-time matrix once per load.
             for m in self.meshes:
@@ -10818,9 +13350,18 @@ class Viewer:
             # in the upper-left corner.  Uses perf_counter for
             # microsecond resolution; smoothed lightly so the
             # readout is stable.
-            import time as _time
+            #
+            # Also captures the *exact* dt the physics solver saw
+            # (post-1ms clamp) into the recorder timers -- jitter in
+            # this number is one of the suspects for the post-1.105
+            # oscillation, since the inertia integrator is explicit-
+            # Euler over a critically-damped second-order system and
+            # responds badly to >5x dt spikes.
+            self._frame_timers['frame_dt_in'] = float(dt) * 1000.0
             _t_phys0 = _time.perf_counter()
             chassis_pose = self.tank_physics.update(self.terrain, dt)
+            _phys_ms_raw = (_time.perf_counter() - _t_phys0) * 1000.0
+            self._frame_timers['physics_update'] = _phys_ms_raw
             # 1-Turn auto-test recorder: capture this frame's freshly-
             # computed wheel state + chassis pose BEFORE we apply the
             # pose to meshes (the recorder doesn't read mesh state,
@@ -10831,10 +13372,59 @@ class Viewer:
                 self._turn_test_capture_frame(dt)
             if self._zigzag_active:
                 self._zigzag_step(dt)
+            # Manual-record (F3) snapshot.  Same physics-state ordering
+            # rule as the turn-test capture above.  No-op while idle.
+            if self._manual_record_active:
+                self._manual_record_capture_frame(dt)
+            # Contact-trail FIFO: every Nth physics frame AND only
+            # while the tank is moving, push every wheel currently
+            # in CONTACT (state 1) or OVER_COMPRESSED (state 3) onto
+            # the ring buffer.  HANGING wheels skip -- they're not
+            # actually touching ground.  Stationary tanks skip too
+            # (per Coffee 2026-05-09): otherwise a parked tank
+            # floods the buffer with copies of the same wheel
+            # positions and drowns out any actual driven trail.
+            # Reads from `last_wheel_state` / `last_wheel_world`
+            # captured by tank_physics.update() above.
+            self._contact_filo_phase += 1
+            tp = self.tank_physics
+            speed_mps = abs(float(getattr(tp, 'cur_forward_mps', 0.0)))
+            if (self._contact_filo_phase >= self._contact_filo_period
+                    and speed_mps > self._contact_filo_speed_min):
+                self._contact_filo_phase = 0
+                if (hasattr(tp, 'last_wheel_state')
+                        and hasattr(tp, 'last_wheel_world')
+                        and len(tp.last_wheel_state)
+                            == len(tp.last_wheel_world)):
+                    lw = tp.last_wheel_world
+                    for i, st in enumerate(tp.last_wheel_state):
+                        if int(st) in (1, 3):
+                            # Disabled per Coffee 2026-05-09 ("rem
+                            # out line that pushes balls on the
+                            # FILO buffer").  FIFO render below
+                            # still draws whatever's already in
+                            # the buffer; just no new pushes.
+                            # self._contact_filo.append(
+                            #     (float(lw[i, 0]),
+                            #      float(lw[i, 1]),
+                            #      float(lw[i, 2])))
+                            pass
+            elif self._contact_filo_phase >= self._contact_filo_period:
+                # Parked: keep the phase counter pegged at the period
+                # so the FIRST frame of motion fires immediately
+                # rather than waiting for another 12-frame interval.
+                self._contact_filo_phase = self._contact_filo_period
             # Apply chassis pose to every sub-mesh.
+            _t_pose0 = _time.perf_counter()
             for m in self.meshes:
                 m.model_matrix = (chassis_pose
                                    @ m.bind_model_matrix).astype(np.float32)
+            self._frame_timers['mesh_pose_apply'] = (
+                (_time.perf_counter() - _t_pose0) * 1000.0)
+            # Total tank-math wall time still reported on the
+            # upper-left overlay; smoothed lightly to keep the
+            # readout stable.  Includes pose-apply because that's
+            # part of what the user observes as "physics cost".
             _phys_ms = (_time.perf_counter() - _t_phys0) * 1000.0
             # Exponential smoothing so the overlay value doesn't
             # flicker every frame.  Alpha 0.20 ~= 5-frame trailing
@@ -10856,7 +13446,10 @@ class Viewer:
             # forward direction gets only the 3x3 rotation block --
             # we don't want a hardpoint emit-direction to pick up
             # the chassis's world translation.
+            _t_em0 = _time.perf_counter()
             self._update_emitters_for_chassis_pose(chassis_pose)
+            self._frame_timers['emitters'] = (
+                (_time.perf_counter() - _t_em0) * 1000.0)
         else:
             # Restore bind pose if we ever applied physics earlier
             # in this load (e.g. terrain toggled off mid-session).
@@ -10879,6 +13472,7 @@ class Viewer:
         # rest of the pipeline pointing at the visible target.
         if (self.picker.enabled and self.meshes
                 and not self.ui.is_pointer_over_ui(*pygame.mouse.get_pos())):
+            _t_pk0 = _time.perf_counter()
             self.picker.update_pass(
                 meshes        = self.meshes,
                 view          = view,
@@ -10894,14 +13488,19 @@ class Viewer:
             # in case a future driver bug breaks that contract.
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
             glViewport(scene_x, console_h, scene_w, scene_h)
+            self._frame_timers['picker_pass'] = (
+                (_time.perf_counter() - _t_pk0) * 1000.0)
 
         # Skybox -- rendered first; depth trick (xyww) places it at far plane
         if self.skybox and self.show_skybox:
+            _t_sky0 = _time.perf_counter()
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
             self.skybox.render(view, proj)
             # Stay in GL_FILL for the main mesh pass; the wireframe
             # overlay (if any) fires after the solid render.
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            self._frame_timers['skybox'] = (
+                (_time.perf_counter() - _t_sky0) * 1000.0)
 
         # Procedural terrain.  Drawn AFTER the skybox (so the
         # ground occludes the horizon line) and BEFORE the tank
@@ -10910,12 +13509,15 @@ class Viewer:
         # ground instead of clipping through.  Toggle is the
         # `Terrain` button in the UI section -- off by default.
         if self.show_terrain and self.terrain and self.terrain_shader:
+            _t_ter0 = _time.perf_counter()
             glEnable(GL_DEPTH_TEST)
             glDepthMask(GL_TRUE)
             light_dir_world = np.array(
                 [0.5, 1.0, 0.3], dtype=np.float32)
             self.terrain.render(self.terrain_shader, view, proj,
                                   light_dir_world)
+            self._frame_timers['terrain'] = (
+                (_time.perf_counter() - _t_ter0) * 1000.0)
 
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
@@ -11209,6 +13811,9 @@ class Viewer:
         # can see out from inside the turret -- otherwise the camera
         # is buried in the geometry and you just see the back of
         # the breech.  Mode 0 / 1 leave everything visible.
+        # Cam-2 is the driver / commander POV -- hide turret +
+        # gun so the breech / mantlet doesn't fill the view.
+        # Cam-0 / cam-1 (orbit / side chase) leave them visible.
         hide_turret_gun = (self.camera_mode == 2)
 
         # Re-assert polygon-offset state IMMEDIATELY before the solid
@@ -11645,35 +14250,88 @@ class Viewer:
                 and self.tank_physics is not None
                 and self._track_left is not None
                 and self._track_right is not None):
+            _t_spl0 = _time.perf_counter()
             try:
                 tp = self.tank_physics
                 cm = np.asarray(tp.chassis_matrix(), dtype=np.float64)
                 bones = self._track_current_bone_positions(tp)
                 segs = []
-                NURB_PADS = 64
-                # Distinct colours per side so a glance tells you
-                # which track you're looking at while the camera
-                # moves around.  Bright for visibility against the
-                # sand / grass terrain colours.
-                COL_L = (1.0, 0.85, 0.20)   # warm yellow -- LEFT
-                COL_R = (0.30, 0.85, 1.00)  # cyan       -- RIGHT
-                for spline, col in ((self._track_left, COL_L),
-                                     (self._track_right, COL_R)):
-                    ctrl = spline.build_augmented_control_loop(bones)
-                    if len(ctrl) < 4:
+                # Pad count comes from the gameplay XML's
+                # `<trackPair>` (`pads_per_side = segmentsCount / 2`).
+                # No hardcoded fallback -- per Coffee 2026-05-08, if
+                # the XML didn't provide a count we skip the overlay
+                # entirely rather than render at a guess.
+                NURB_PADS = self._resolve_pads_per_side()
+                if NURB_PADS <= 0:
+                    raise RuntimeError(
+                        "no <segmentsCount> in chassis XML; "
+                        "spline overlay needs an XML-driven pad count")
+                # Per Coffee 2026-05-10 ("remove drawing xml
+                # tracks"): only homie renders now, no stock
+                # toggle.  Use the warm-yellow / cyan palette
+                # (the historical default) for L / R.
+                COL_L = (1.0, 0.85, 0.20)    # warm yellow -- LEFT
+                COL_R = (0.30, 0.85, 1.00)   # cyan       -- RIGHT
+                # Golden-rule envelope clamps (per `tank_physics`):
+                #   comp_cap = -min_offset (m, +ve = max retract)
+                #   ext_cap  = -max_offset (m, -ve = max sag)
+                # Values in metres, matching the suspension envelope
+                # so the spline can never deflect further than a
+                # wheel can.
+                comp_cap = float(-tp.min_offset)
+                ext_cap  = float(-tp.max_offset)   # negative
+                from .track_spline import (
+                    centripetal_catmull_rom_closed,
+                    resample_uniform,
+                )
+                # Track per-side cumulative time for the terrain Y
+                # lookup so we can publish a `terrain_y_lookup_spline`
+                # frame-timer at the end (keeps the recorder's per-
+                # section breakdown faithful to where the time goes).
+                _terrain_y_ms = 0.0
+                # Per Coffee 2026-05-10 ("remove drawing xml
+                # tracks"): homie is the only chain source for
+                # the spline overlay LINE.  Stock path retained
+                # in `_compute_stock_chain_for_frame` for offline
+                # comparison plots only.
+                (_chain_pos_L, _chain_tan_L,
+                 _chain_pos_R, _chain_tan_R) = (
+                    self._compute_homie_chain_for_frame(tp))
+
+                _spline_sides = [
+                    (COL_L,
+                     '_track_left_rigid_pads',
+                     '_track_left_pad_pos',
+                     '_track_left_pad_tan',
+                     _chain_pos_L, _chain_tan_L),
+                    (COL_R,
+                     '_track_right_rigid_pads',
+                     '_track_right_pad_pos',
+                     '_track_right_pad_tan',
+                     _chain_pos_R, _chain_tan_R),
+                ]
+                # One-sided debug mode (Coffee 2026-05-10
+                # "draw only left track and spline").  Drop
+                # the R entry up front so the colour-pad-pos
+                # cache stays untouched for R while the
+                # spline render skips it.
+                if not getattr(self,
+                                '_show_right_track', True):
+                    _spline_sides = _spline_sides[:1]
+                for (col, rigid_cache_attr,
+                     pos_cache, tan_cache,
+                     chain_pos, chain_tan) in _spline_sides:
+                    if chain_pos is None or chain_tan is None:
                         continue
-                    # Direct CR + resample.  We don't reuse
-                    # `spline.pad_transforms()` because that path
-                    # caches off the SOURCE V_locs only; the
-                    # augmented loop is per-frame fresh data.
-                    from .track_spline import (
-                        centripetal_catmull_rom_closed,
-                        resample_uniform,
-                    )
-                    dense = centripetal_catmull_rom_closed(
-                        ctrl, samples_per_seg=64, alpha=0.5)
-                    pad_pos, _pad_tan, _total = resample_uniform(
-                        dense, NURB_PADS)
+                    pad_pos = np.asarray(
+                        chain_pos, dtype=np.float64)
+                    pad_tan = np.asarray(
+                        chain_tan, dtype=np.float64)
+                    # Cache the per-frame deflected pad pos + tan
+                    # so `_render_track_pad_instanced` can read
+                    # them without repeating the CR + resample.
+                    setattr(self, pos_cache, pad_pos)
+                    setattr(self, tan_cache, pad_tan)
                     # Chassis-local (M, 3) -> world (M, 3).
                     # `chassis_matrix()` follows the OpenGL column-
                     # vector convention (translation in column 3,
@@ -11689,19 +14347,135 @@ class Viewer:
                         [pad_pos, np.ones((len(pad_pos), 1),
                                            dtype=np.float64)],
                         axis=1)
-                    pad_w = pad_h @ cm.T
-                    pad_w = pad_w[:, :3].astype(np.float32)
+                    pad_w64 = pad_h @ cm.T
+                    pad_w64 = pad_w64[:, :3]   # keep float64 for clamp math
+
+                    # ---- Terrain floor only ------------------------
+                    # Per Coffee 2026-05-10 ("this splines are
+                    # wrong .. we are not drawing the true rendered
+                    # image"): the historical "golden-rule clamp"
+                    # bounded each pad's WORLD Y between
+                    # `rigid_y +/- (ext_cap, comp_cap)`, where
+                    # `rigid_y` came from the OLD stock-CR pipeline's
+                    # cached `_track_<side>_rigid_pads`.  That made
+                    # sense when the visible chain WAS the stock CR
+                    # spline (the clamp just kept it from straying
+                    # too far from its bind shape), but homie pads
+                    # are placed exactly on each wheel's circumference
+                    # by construction -- a clamp toward the stock CR
+                    # path actively distorts the homie chain into a
+                    # hybrid (homie X/Z, rigid Y).  Visible symptom:
+                    # cyan / yellow rendered splines that don't match
+                    # the offline paper plot.
+                    #
+                    # Drop the rigid-envelope clamp.  Keep only the
+                    # terrain-floor rule -- the chain still must not
+                    # sink through the ground.
+                    if (self.terrain is not None
+                            and hasattr(self.terrain, 'sample_heights')):
+                        _t_ter0 = _time.perf_counter()
+                        wx = pad_w64[:, 0]
+                        wz = pad_w64[:, 2]
+                        terrain_y = np.asarray(
+                            self.terrain.sample_heights(wx, wz),
+                            dtype=np.float64)
+                        _terrain_y_ms += (
+                            _time.perf_counter() - _t_ter0) * 1000.0
+                        pad_w64[:, 1] = np.maximum(
+                            pad_w64[:, 1], terrain_y)
+                    pad_w = pad_w64.astype(np.float32)
                     # Closed line strip via N segments connecting
                     # i -> i+1 (with i+1 mod N to close back).
                     for i in range(len(pad_w)):
                         a = tuple(pad_w[i])
                         b = tuple(pad_w[(i + 1) % len(pad_w)])
                         segs.append((a, b, col))
+                # Publish the per-frame terrain-Y-lookup cost into
+                # `_frame_timers` so the recorder picks it up
+                # alongside `spline_overlay`.  Only set when we
+                # actually queried the terrain.
+                if _terrain_y_ms > 0.0:
+                    self._frame_timers['terrain_y_lookup_spline'] = (
+                        _terrain_y_ms)
                 if segs:
                     self.track_lines.update(segs)
                     glEnable(GL_DEPTH_TEST)
                     self.track_lines.render(
                         self.color_shader, view, proj)
+                # One-shot dump of the EXACT data the line strip
+                # was built from, so the offline plot tool can
+                # read this file back and verify byte-identity
+                # with what's on screen.  Per Coffee 2026-05-10
+                # ("if this image is correct, something else is
+                # screwing up the splines.  They look nothing
+                # like what is on paper").  Captures:
+                #   * chassis_matrix used this frame
+                #   * per-side chain pos / tan in chassis-local
+                #     (post Z-flip, exactly as
+                #     `_compute_homie_chain_for_frame` returned)
+                #   * per-side world-space pad pos AFTER the
+                #     terrain-floor clamp (= what fed segs)
+                #   * chassis bones we built the chain from
+                # File: <root>/math_images/runtime_dump.json
+                # Write only on the first overlay frame after
+                # tank load (gated by `_runtime_dump_done`).
+                if (not getattr(self, '_runtime_dump_done', False)
+                        and _chain_pos_L is not None
+                        and _chain_pos_R is not None):
+                    try:
+                        import json as _json
+                        import os as _os
+                        bones_now = self._track_current_bone_positions(tp)
+                        ci = (getattr(self, '_pending_chassis_info', None)
+                              or {})
+                        # Recompute world-space again so we capture
+                        # the post-clamp values for both sides.
+                        def _world(local):
+                            h = np.concatenate(
+                                [np.asarray(local, dtype=np.float64),
+                                 np.ones((len(local), 1),
+                                          dtype=np.float64)],
+                                axis=1)
+                            return (h @ cm.T)[:, :3]
+                        dump = {
+                            'chassis_matrix':
+                                cm.astype(float).tolist(),
+                            'segmentLength':
+                                float(ci.get('segmentLength') or 0.0),
+                            'segmentsCount':
+                                int(ci.get('segmentsCount') or 0),
+                            'NURB_PADS': int(NURB_PADS),
+                            'L_pos_local':
+                                _chain_pos_L.astype(float).tolist(),
+                            'L_tan_local':
+                                _chain_tan_L.astype(float).tolist(),
+                            'R_pos_local':
+                                _chain_pos_R.astype(float).tolist(),
+                            'R_tan_local':
+                                _chain_tan_R.astype(float).tolist(),
+                            'L_pos_world':
+                                _world(_chain_pos_L).tolist(),
+                            'R_pos_world':
+                                _world(_chain_pos_R).tolist(),
+                            'bones_used':
+                                {k: [float(v[0]), float(v[1]),
+                                      float(v[2])]
+                                 for k, v in bones_now.items()},
+                        }
+                        _os.makedirs(
+                            'C:/experiment/math_images',
+                            exist_ok=True)
+                        out_path = ('C:/experiment/math_images/'
+                                    'runtime_dump.json')
+                        with open(out_path, 'w') as fh:
+                            _json.dump(dump, fh, indent=2)
+                        print(f'[runtime-dump] wrote {out_path}  '
+                              f'(L:{len(_chain_pos_L)} pads  '
+                              f'R:{len(_chain_pos_R)} pads)')
+                        self._runtime_dump_done = True
+                    except Exception as _ex_dump:
+                        print(f'[runtime-dump] failed: {_ex_dump}')
+                        self._runtime_dump_done = True
             except Exception as _ex:
                 # Don't kill the frame on a NURB glitch -- log
                 # once + skip future frames until the underlying
@@ -11710,11 +14484,46 @@ class Viewer:
                 # NaN from a degenerate residual.
                 if not getattr(self, '_track_spline_err_logged',
                                 False):
+                    import traceback
+                    traceback.print_exc()
                     self.log(
                         f"track-spline overlay error: "
                         f"{type(_ex).__name__}: {_ex}",
                         color=(255, 180, 120))
                     self._track_spline_err_logged = True
+            self._frame_timers['spline_overlay'] = (
+                (_time.perf_counter() - _t_spl0) * 1000.0)
+
+        # ---- Phase C step 3: instanced track-pad render --------------
+        # One draw call per loaded pad Mesh.  Per-pad transforms are
+        # built from the spline's current pad_pos array (commit 1:
+        # translation only, no rotation).  Cheap: the arr is built
+        # via numpy from the same `_track_left_rigid_pads` cache the
+        # spline overlay uses, uploaded once per frame, drawn in 1
+        # `glDrawElementsInstanced` per Mesh.
+        self._render_track_pad_instanced(view, proj)
+
+        # ---- Contact-trail FIFO render (blue spheres) ----------------
+        # Draws a small blue sphere at each point currently in the
+        # contact ring buffer.  Cheap: low-poly sphere (8 sectors x
+        # 4 stacks = ~32 verts), 100 instances = 100 draw calls per
+        # frame.  Build the Sphere lazily on first use so we have a
+        # GL context.
+        if self._contact_filo:
+            if self._contact_sphere is None:
+                from .scene import Sphere as _Sphere
+                self._contact_sphere = _Sphere(
+                    radius=self._contact_sphere_radius,
+                    sectors=8, stacks=4,
+                    color=(0.30, 0.55, 1.00))
+            glEnable(GL_DEPTH_TEST)
+            for (x, y, z) in self._contact_filo:
+                m = np.eye(4, dtype=np.float32)
+                m[0, 3] = float(x)
+                m[1, 3] = float(y)
+                m[2, 3] = float(z)
+                self._contact_sphere.render(
+                    self.color_shader, m, view, proj)
 
         # Look-at crosshair: pale-pink lines spanning 10 units along
         # each world axis (X / Y / Z), centred on `camera.center`.
@@ -11750,7 +14559,10 @@ class Viewer:
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
         glViewport(0, 0, self.width, self.height)
+        _t_ui0 = _time.perf_counter()
         self.ui.render(self.width, self.height)
+        self._frame_timers['ui'] = (
+            (_time.perf_counter() - _t_ui0) * 1000.0)
 
         # Physics-timer readout in the upper-left, grass-green text.
         # Drawn AFTER the UI so it sits on top of the scene + any
@@ -11758,6 +14570,27 @@ class Viewer:
         # value from `_physics_ms` (5-frame trailing average).
         if self.tank_physics_enabled and self.tank_physics is not None:
             self._render_physics_timer_overlay(self.width, self.height)
+            # Three-line live readout (Heading / XYZ / Speed) sits
+            # under the physics-timer line.  Re-rendered every
+            # frame so heading/speed track in real time -- per
+            # Coffee 2026-05-08 ("redraw every frame... in this
+            # order"); the speed is the ACTUAL drive-layer value
+            # not the speed-step selector.
+            self._render_tank_status_overlay(self.width, self.height)
+            # Bottom-left mini-map: tank world XZ + heading arrow.
+            # Drawn last so it sits on top of every UI / overlay
+            # in the corner area.
+            self._render_minimap(self.width, self.height)
+
+        # Total CPU-side wall-clock cost of this frame BEFORE flip()
+        # blocks on vsync.  Everything in `_frame_timers` should sum
+        # to roughly this number (with overhead for sections we
+        # didn't time individually).  The recorder snapshots this
+        # before flip so it correlates to "time the CPU spent
+        # producing this frame" rather than "time we waited for
+        # vsync".
+        self._frame_timers['frame_total'] = (
+            (_time.perf_counter() - _render_t0) * 1000.0)
 
         # ---- GPU timer query: end + read previous frame ------------------
         # Close THIS frame's timer query first (everything queued
@@ -11794,6 +14627,28 @@ class Viewer:
             except Exception:
                 # Driver hiccup -- disable for the rest of the session.
                 self._gl_query_ids = []
+
+        # ALT-rect screenshot (Coffee 2026-05-10 "alt key
+        # down.. drag rectangle area on screen.  release of
+        # alt key copies area to clipboard").  Two pieces:
+        # 1) Live drag overlay: thin cyan rectangle while the
+        #    user is sweeping out an area with LMB+ALT.
+        # 2) Pending capture: handle_input queued
+        #    `_pending_alt_capture` when ALT released; consume
+        #    it here so the captured pixels are clean (we
+        #    don't draw the overlay this frame because
+        #    handle_input cleared `_alt_rect_start` at the
+        #    same time).
+        self._render_alt_rect_overlay()
+        if self._pending_alt_capture is not None:
+            rect = self._pending_alt_capture
+            self._pending_alt_capture = None
+            try:
+                self._capture_alt_rect_to_clipboard(*rect)
+            except Exception as exc:
+                self.log(f"alt-rect capture failed: "
+                         f"{type(exc).__name__}: {exc}",
+                         color=(255, 180, 120))
 
         pygame.display.flip()
 
