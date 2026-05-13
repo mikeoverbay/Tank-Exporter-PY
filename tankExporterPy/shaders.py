@@ -417,6 +417,9 @@ class PadShader:
         glUniform4f(glGetUniformLocation(self.program, name),
                     r, g, b, a)
 
+    def set_int(self, name, v):
+        glUniform1i(glGetUniformLocation(self.program, name), int(v))
+
 
 class UIShader:
     """2D shader for menu bar: solid color or sampled text texture."""

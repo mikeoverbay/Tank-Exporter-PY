@@ -7,6 +7,1264 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-13
+
+### Wheel sag now drives the spline (1.118.117)
+
+Coffee: "wheel sag does not put the spine down".
+
+`_track_current_bone_positions` was writing the suspension
+residual to whichever bone-name form `_resolve` matched
+(`W_L<i>_BlendBone`) but `track_homie._collect_wheels` reads
+the BARE form (`W_L<i>`) first.  The bare entry stayed at bind
+position so the chain never followed the wheel down.
+
+Fix: after writing the residual to the matched key, write the
+same offset to the sibling form (bare <-> `_BlendBone`) when it
+exists.  Both entries stay synced; whichever consumer reads
+which form, the residual is there.
+
+### Wheel rotation L/R speed swap + R+track_thickness rolling radius + half-omega on wide turns (1.118.116)
+
+Coffee: "speed calculation for inner and outer tracks flipped..
+same reason" + "(R + offset to ground) * Pi = distance" +
+"1/2 the angle if both are moving forward or backward".
+
+Three fixes to the per-side track-speed math driving both the
+chain animation s_offset and the wheel-rotation angle delta:
+
+1. **L/R differential swap.**  Same Z-frame mismatch as the
+   wheel-orbit-chassis-center fix at 1.118.115.  v_L now uses
+   `speed - omega*b`, v_R uses `speed + omega*b`.
+2. **Rolling radius = R + track_thickness.**  Chain rides on
+   the outer face of the track ribbon, not the bare rim.  Use
+   `(R + track_thickness)` in the `omega_wheel = v / R_eff`
+   divisor.  `track_thickness` is the `<trackThickness>` or
+   `<renderModelOffset>` from the chassis XML, already loaded
+   into `TankPhysics.track_thickness`.
+3. **Halve omega on same-sign tracks.**  When `v_L * v_R > 0`
+   (both forward or both backward = wide differential turn,
+   not a pivot), divide the omega contribution to each track
+   by 2.  Pivot turns (opposite signs) keep the full
+   differential.
+
+### Extra rotating wheels: Z-flip the hub before registering (1.118.115)
+
+Coffee: "I see whats wrong.. we have the verts rotation around
+the wrong wheel center".
+
+Diagnostic on G78 showed bone position from the visual walk
+(`parse_chassis_bone_world_positions`) has Z with the OPPOSITE
+sign vs the chassis mesh vertices.  Road wheels work because
+`TankPhysics.from_chassis_meshes` computes `self.wheels[i]`
+from mesh-vertex means (matching the vertex frame).  The new
+`set_extra_rotating_wheels` was being fed Z straight from the
+visual walk -- so the rotation centre landed on the mirror
+image of the wheel across the chassis Y-X plane, and the
+entire wheel mesh orbited chassis origin as theta advanced.
+
+Fix: negate Z in viewer.py when building `_ex_hubs` -- single
+line.
+
+### Rotate all wheels, not just road (1.118.114)
+
+Coffee: "rotate all wheels" + "spinning backwards".
+
+Sign of the angle delta flipped from `+(v/R)*dt` to
+`-(v/R)*dt`.  And added `TankPhysics.set_extra_rotating_wheels
+(names, hubs, radii)` to register drive sprockets, idlers,
+and return rollers alongside road wheels.
+
+* New state: `extra_rotating_bones / hubs / radii /
+  angles_rad`, plus `_extra_rot_name_to_idx` for fast lookup
+  in `bone_matrix_array`.
+* `advance_wheel_angles` now iterates both road wheels (via
+  `self.wheels`) and extras (via `extra_rotating_hubs`).
+* `bone_matrix_array`: any palette bone matching the extras
+  table gets `T(hub) . Rx(theta) . T(-hub)` composed in, with
+  NO Y residual (sprockets / idlers / rollers are chassis-
+  rigid in suspension terms).
+
+Wired from the viewer once at chassis load, right after
+`_track_chassis_bones_bind` is set.
+
+### Wheel rotations -- per-wheel angle accumulator + bone matrix rotation (1.118.113)
+
+Coffee: "we are adding wheel rotations. we will want to spin
+the verts in ZY about center of each wheel".
+
+`TankPhysics.wheel_angles_rad` -- one accumulated angle per
+road-wheel bone in radians.  Caller advances via
+`advance_wheel_angles(v_L, v_R, dt)` once per frame, using the
+SAME side-differentiated speeds (`v_L = speed + omega*b`,
+`v_R = speed - omega*b` at the time of this rev; swap +
+halving landed at 1.118.116) that drive the chain s_offset.
+
+`bone_matrix_array` wheel-bone slot changed from a pure Y
+translation to:
+
+```
+M_wheel = T(hub + (0, ry, 0))  .  Rx(theta)  .  T(-hub)
+```
+
+For a bind-pose vertex p: shifts to hub-centred, rotates in
+the YZ plane about the wheel hub, translates back to (hub +
+Y residual).  Vertex p rotates about the wheel's centre on the
+side-view plane.  Per-wheel ID is implicit in the bone palette
+/ `iii` indexing -- same path the contact-state colour
+highlight uses.
+
+### Differential track speeds drive the chain animation (1.118.112)
+
+Coffee: "speed of segment movement does not match our actual
+movement on the terrain.. inside and outside should have
+different speeds based on our current turning radius".
+
+`_compute_homie_chain_for_frame` was advancing both
+`_track_chain_s_offset_L` and `_track_chain_s_offset_R` at the
+SAME `cur_forward_mps * dt`.  Tracked vehicle differential
+drive needs per-side track-contact speeds:
+
+```
+omega = yaw_rate (rad/s)         from tp._last_yaw_rate_dps
+b     = gauge_x / 2              half-track gauge
+v_L = speed_mps + omega * b      left contact-point speed
+v_R = speed_mps - omega * b      right contact-point speed
+```
+
+(Sign convention swapped at 1.118.116.)  Pivot turns naturally
+fall out: when speed_mps = 0 and omega > 0, v_L and v_R have
+opposite signs -- inner track runs backward, outer forward,
+matching real neutral steer.
+
+### Bottom-wheel pad rotation rate (1.118.110)
+
+Coffee: "we lost the rotation fix at the bottom wheels for the
+segments.. it should be 1/2 like the end wheels".
+
+Re-enabled the **central-chord tangent rebuild** at the top of
+`_compute_homie_chain_for_frame`:
+
+```python
+chord_i = pos[(i+1) % N] - pos[(i-1) % N]
+tan_i   = chord_i / |chord_i|
+```
+
+Pads on road-wheel arcs now rotate by Delta/2 between adjacent
+pads instead of Delta -- matches the symmetric "swing both
+directions from centre" rate on the sprocket / idler arcs.
+Sag, central-chord re-run, and PBD step stay gated below.
+
+### Virgin homie -- post-build massaging gated off (1.118.109)
+
+Coffee: "virgin homie.. poor guy".
+
+The homie chain output (after Z-flip to renderer frame) is
+now the FINAL chain that feeds the renderer.  Four post-build
+modifiers were `if False:`d out in
+`_compute_homie_chain_for_frame`:
+
+1. Central-chord tangent override #1 (re-enabled at 1.118.110)
+2. Sag bias via `track_sag.interp_sag_y` on bottom-run pads
+3. Central-chord override #2 (post-sag)
+4. PBD step (additionally gated with `False and ...` even when
+   F9 is on)
+
+Re-enable any by flipping its `if False:` guard.
+
+### F1 = key bindings popup (1.118.101)
+
+Coffee: "add a pop up of key bindings when I press F1".
+
+New `_show_keybindings_popup` reuses the existing Tkinter
+`messagebox.showinfo` path (no GL overlay machinery) and lists
+every active binding by category (Camera, Tank Drive, Display,
+Recorders, Track Debug, Screenshot / Clipboard, Other).  F1
+key handler placed just after the K_ESCAPE branch.
+
+### Pose carry-over across tank loads + emitter chassis-pose sync (1.118.99 -> 1.118.103)
+
+Coffee: "put the previous loaded tank's direction and position
+in when a tank loads" + "we need to figure out where the
+emitters need to be -- vector and location based on the
+just-loaded tank that has been transformed to a new location".
+
+At `load_vehicle`, snapshot the outgoing tank's solver pose
+(`pos / yaw_deg / pitch_deg / roll_deg`) AND its render-pose
+integrator state (`_render_pos_y / _render_pitch_deg /
+_render_roll_deg`) BEFORE `from_chassis_meshes` is called.
+After the new instance is built, write all of those back so
+`chassis_matrix()` returns the carried-over world transform
+from frame 0 (no integrator catch-up ramp).
+
+Smoke + fire emitter `bind_pos` snapshot at load made
+conditional (`if 'bind_pos' not in hp:`) so it no longer
+overwrites the lazy snapshot from
+`_update_emitters_for_chassis_pose` with already-transformed
+post-pose world values.  Bug was that the lazy snapshot
+correctly captured chassis-local bind during the per-component
+render frames at the OLD tank's pose, then the explicit
+snapshot at load end overwrote with world-at-OLD-pose values,
+which the carry-over then double-shifted on the new tank's
+pose for the next render frame.  See CLAUDE.md "Where we left
+off" for the detailed timeline.
+
+The post-load emitter chassis-pose sync (X / Z translation +
+yaw rotation only, since Y / pitch / roll are integrator
+state that hasn't settled yet) lives right after the
+`set_emitters` calls in `load_vehicle`.
+
+### Skinning bone-weight normalisation in shader (1.118.106)
+
+Coffee: "figure out why the rubber band tracks
+track_mat_L_skinned is deformed".
+
+`shaders/mesh.vert` now divides the weighted-sum `skin` matrix
+by `(ww.x + ww.y + ww.z + ww.w)` before applying to vertex
+position.  BigWorld packs the per-vertex weights as 4 uint8s
+that can round down to a byte-sum < 255 (= < 1.0 after the
+loader's `/255` scale).  G78 had 240 ribbon verts at
+weight-sum ~ 0.91, which compressed their X by ~9% toward
+origin via `skin * vec4(pos, 1)`.  Normalising at the shader
+keeps the skin a true convex combination of bone matrices --
+vertex data on disk untouched, round-trip safe.
+
+### Track-chain wheel ordering, gravity-aware PBD, gravity removed, attractors removed (1.118.105 -> 1.118.108)
+
+A sequence of PBD chain-solver experiments that ended with the
+solver gutted to a constraint-only relaxation:
+
+* **1.118.105** -- bind gate switched from "lower half"
+  (`d . g > 0`) to **correction-vs-gravity dot product**
+  (`corr . g > 0`).  Correct on outside / above hub AND
+  inside / below hub at once; the original lower-half check
+  was the wrong half for end-wheel wraparounds.
+* **1.118.107** -- gravity bias removed from the Verlet
+  predict step.  `_gravity_yz` field + `set_chassis_gravity`
+  plumbing kept in place; just bypassed.
+* **1.118.108** -- bilateral wheel BIND removed entirely.
+  Wheels are now pure SOLID OBJECTS via the unilateral push-
+  out only.  No attractors.
+
+Net `step()` per relaxation iteration: bending + distance +
+skip-K + unilateral push-out.  Chain holds the seed shape and
+only deforms in response to seed-pose changes (wheel
+deflection moves hubs, push-out responds).
+
+### Per-side track-speed differential plus PBD wheel-kind filtering and gravity vector projection (1.118.102 -> 1.118.104)
+
+* **1.118.102** -- world gravity projected to chassis-local
+  YZ each step (`g_local = R^T . (0, -9.81, 0)`) so PBD
+  always pulls along world -Y regardless of chassis tilt.
+  Reverted at 1.118.107.
+* **1.118.103** -- gravity-aware bind gate gated on
+  `corr . g > 0` (later replaced by full removal at .108).
+* **1.118.104** -- `_bone_yz` in the PBD setup now negates Z
+  so PBD hubs match the post-Z-flip pad positions.  Earlier
+  the chain visibly mirrored: chain pad at renderer Z =
+  -2.893 vs hub at +2.719, distance 5.4 m, never bound.
+
+### Pose snapshot + drop-from-1m experiments (1.118.99 -> 1.118.100)
+
+A couple of intermediate revs experimented with dropping the
+new tank from 1 m above terrain at the outgoing tank's XZ
+spot.  Replaced by full pose carry-over at 1.118.100.
+
+### CHANGELOG / docs catch-up
+
+Versions 1.118.55 - 1.118.97 represent in-progress work that
+landed at the 1.118.98 cumulative commit (the homie chain
+rewrite + assorted bug fixes).  See the 2026-05-11 entries
+below.
+
+---
+
+## 2026-05-11
+
+### Skinned-track ribbon defaults to UNCHECKED in mesh panel (1.118.98)
+
+Coffee: "un check the track_mat_r/l_skinned on the meshes
+visibility panel".
+
+When the mesh-visibility panel populates, each
+`track_<L|R>Shape*` (= the skinned rubber-band track ribbon)
+row now starts UNCHECKED and the corresponding
+`Mesh.visible = False`.  The pad-mesh chain is the visible
+chain by default; ribbon is on standby for A/B comparisons --
+click the checkbox to bring it back any time.
+
+Implemented in `_repopulate_mesh_visibility_panel`: after
+`mw.populate(...)`, the per-row sync loop now also checks each
+real-mesh row's name; if it starts with `track_` and contains
+`Shape` (covers `track_L_Shape`, `track_LShape`,
+`track_LShape_split_0`, etc.), the row + the mesh both get
+flipped to `visible = False`.
+
+### Skip-K tensioners between segments (1.118.97)
+
+Coffee: "can we apply tensioners between segments?  max dist?
+sag cant cause each one to fall to far..  hanging bridge deck
+sorta thing?".
+
+New constraint in `track_chain_pbd.TrackChainPBD`: long-range
+distance ties between non-adjacent pads.  Each pad i is bound
+to pad (i + SKIP_K) at the SEED distance captured at
+`seed_from_homie` time.
+
+  * `SKIP_K = 8` -- spans 8 pads ~= 1.4 m of chain, big
+    enough to cross the inter-road-wheel free run.
+  * `SKIP_STIFF = 0.30` -- soft enough that local link-to-link
+    distance constraints still dominate; firm enough to catch
+    the long-wavelength sag before the chain falls past its
+    authored shape.
+  * Rest length per-pad from seed -- straight runs land at
+    K * seg_len; wheel wraps land at the chord across K pads
+    (less than K * seg_len) -- so the constraint respects
+    authored geometry instead of pulling wrapped sections
+    apart.
+
+Bridge-deck analogy: each pad has cables across to its
+8-pad-distant neighbours.  Gravity can pull individual pads
+down a little, but the cables limit how far ANY section can
+sag.  Without it, all the pads in a free run between road
+wheels would collectively fall under gravity.
+
+Also bumped `N_RELAX_ITERS` 10 -> 14 so the extra constraint
+gets enough iterations to settle.
+
+### Tank load preserves pose; R key now resets everything (1.118.96)
+
+Coffee: "1. when i load a new tank, i do not want the camera or
+tank position reset.  I want the smoke and fire particle
+emitters locations set to the tanks locations using its
+position and angle.  2. R key should reset tank, cam and
+emitters cam should be set to free look."
+
+Two fixes in `viewer.handle_input` / load:
+
+**1. Tank load preserves the world pose.**  Removed the
+`tank_physics.pos[:] = 0.0` / yaw / pitch / roll / vy reset
+that fired on every load_vehicle.  Emitters (`_exhaust_points`
+for smoke, `_fire_points` for fire) are chassis-LOCAL and the
+per-frame `update_emitter_positions(chassis_frame)` call
+transforms them into world via the CURRENT chassis pose -- so
+when you load a new tank, the emitters automatically end up
+at the new model's HP_Smoke / HP_Fire bone positions
+transformed through whatever pose the camera was looking at,
+not snapped back to origin.
+
+**2. R key full-session reset.**  Was camera-only; now also:
+  * Zeros `tank_physics` pose (pos, yaw, pitch, roll, vy) plus
+    the integrator's render-side state (`_render_*`,
+    `omega_*`) so the inertia spring restarts clean.
+  * Sets `camera_mode = 0` (free look / orbit) regardless of
+    whether the user was in first-person or driver POV.
+  * Camera yaw/pitch/distance reset + fit_to_bounds as before.
+  * Logs `R: tank + camera reset, camera -> free look`.
+
+Emitter positions follow the chassis frame automatically, so
+resetting the tank pose to origin lands the emitters at origin
+too -- no separate emitter reset needed.
+
+### PBD tuning: tighter bind tol + lower gravity + 10 iters (1.118.95)
+
+Coffee: "chain_runtime is not smooth ffs..  plot the segments
+and the spline over".
+
+Three tuning changes to the PBD solver:
+
+  * `BIND_TOL` 0.020 -> 0.003.  The 2 cm bind grace was
+    catching pads on the inter-wheel tangent line (which sit
+    only ~1.5 cm outside the wheel rim when adjacent to a
+    wheel).  Binding them locked the chain to the wheel rim
+    and forced it to wrap each road wheel by ~5 deg.  3 mm
+    catches genuine arc pads (which sit at distance R
+    exactly per the homie geometry) and excludes tangent
+    pads.
+  * `GRAVITY_SCALE` 1.0 -> 0.10.  Full 9.81 m/s^2 over 60
+    settle steps dropped the chain ~10 cm between consecutive
+    Tiger road wheels (spacing ~0.5 m), way more than real
+    tank chains sag.  Seed already carries authored sag from
+    the skinned-track ribbon; PBD now runs primarily as a
+    constraint smoother with a small gravitational nudge so
+    bound pads slide to the lowest tangent point on each
+    wheel.
+  * `N_RELAX_ITERS` 6 -> 10.  More iterations per step =
+    cleaner constraint satisfaction; cost is negligible
+    (~7 ms per side per step at numpy speed).
+
+Diagnostic plot (`plot_chain_runtime.py`) gains larger figure
+size + numbered pivots every 4th pad + per-pad forward-
+direction tick so segment orientation is visible alongside
+the spline, addressing "plot the segments and the spline over".
+
+### PBD bending constraint kills spline zig-zag (1.118.94)
+
+Coffee: "spline is a zig zag mess" -> "you are applying to the
+spline and not the segments".
+
+The v1.118.93 PBD solver had distance + wheel bind/push but no
+ANGULAR constraint between consecutive pads.  Pads adjacent to
+each other could zig-zag freely as long as the inter-pad
+distance = seg_len.  Result: chain spline (the pad anchor
+positions) wiggled, which the renderer faithfully reproduced as
+sharp angle changes between consecutive pad meshes.
+
+Fix: bending constraint per iteration in
+`TrackChainPBD.step`.  Each FREE pad (not bound to a wheel)
+gets pulled toward the midpoint of its prev / next
+neighbours:
+
+    delta = (pos[i-1] + pos[i+1]) / 2 - pos[i]
+    pos[i] += BEND_STIFF * delta
+
+Bound pads (on wheel rims) skip the bend pass -- their position
+is determined by the wheel rim.  Default `BEND_STIFF = 0.20`
+gives visible chain smoothness without over-flattening the sag
+between wheels.
+
+Order in relaxation loop is now:
+    2a.  Bilateral wheel bind  (bound pads -> rim)
+    2a-bis. Bending            (free pads -> neighbour midpoint)
+    2b.  Distance              (adjacent pads at seg_len)
+    2c.  Unilateral wheel push (free pads only)
+
+### PBD bilateral wheel binding + render-faithful diagnostic plot (1.118.93)
+
+Coffee: "i dont see a change here" -> "plot what you are
+creating as if it was rendered".
+
+The v1.118.91 PBD solver used unilateral wheel constraints
+only -- "chain pad can't penetrate the rim" pushed pads OUT of
+wheels, but offered nothing to anchor the chain TO the wheels
+against gravity.  Result: chain dropped through everything and
+settled as a free hanging loop below the wheels.
+
+Fix: BILATERAL bind at seed time.  Any pad within
+`R + BIND_TOL` (2 cm) of a wheel hub when the chain is seeded
+gets locked to that wheel; per step, the solver snaps the
+bound pad's distance to the hub back to exactly `R`, then
+applies distance constraints between adjacent pads.  Free
+pads (between wheels) sag with gravity until the inter-pad
+distance constraints from neighbouring bound pads pull them
+taut.  The unilateral push-out still resists wandering into a
+wheel.
+
+Stored per-pad on `_bound_wheel` (N int32, -1 = free).
+Computed inside `seed_from_homie` from the homie geometric
+chain positions.  Step now runs:
+
+   2a. Bilateral wheel bind  (bound pads -> rim)
+   2b. Distance constraints  (adjacent pads at seg_len)
+   2c. Unilateral wheel push (free pads only, drift catch)
+
+New diagnostic `cust_tools/plot_chain_runtime.py` runs the
+ENTIRE runtime pipeline offline (homie seed + Z-flip + central
+chord + sag bias + central chord + PBD with 60 settle steps)
+and draws what the renderer would show.  4 panels: Tiger L,
+Tiger R, T110E4 L, T110E4 R.
+
+Output: `math_images/chain_runtime.png`.
+
+### Drop tangent-flip sweep -- flip is the "home" signal (1.118.92)
+
+Coffee: "you can never flip the direction vector..  that's the
+you are home signal".
+
+Removed the v1.118.x tangent-continuity sweep in
+`track_homie.assemble_chain_arrays`:
+
+    if N >= 2:
+        for _ in range(2):
+            for i in range(N):
+                j = (i - 1) % N
+                if dot(tan[i], tan[j]) < -1e-6:
+                    tan[i] = -tan[i]    # <-- DELETED
+
+The flip was masking a real signal.  When two consecutive pads
+have anti-aligned tangents it means either (a) the chain has
+genuinely closed back on itself = "you are home" loop marker,
+or (b) the chain math has produced a bad tangent.  Silently
+flipping in software hid both cases.  Now the tangents flow
+through unmodified; downstream consumers can detect a flip
+with `dot(tan[i], tan[i-1]) < 0` and act on it as a signal.
+
+(In a correctly closed CW-traversed loop, no consecutive pads
+should ever have anti-aligned tangents.  A real flip means
+something upstream needs investigation.)
+
+### Position-based-dynamics chain solver, all-wheel constraints (1.118.91)
+
+Coffee: "we need a radial resolver for force on the chain.. ZY
+.. never X.. can we do all wheels if the physics works?".
+
+New module `tankExporterPy/track_chain_pbd.py`:
+
+  * `TrackChainPBD` -- per-side position-based-dynamics solver.
+    Particles in 2D chassis-local (Y, Z); X fixed at +/- gauge/2.
+    Per step:
+       1. Verlet predict with gravity (-9.81 m/s^2 on Y).
+       2. 6 relaxation iterations alternating
+          (distance constraint, wheel radial constraint).
+       3. Implicit velocity from `pos - prev_pos`.
+  * Distance constraint: adjacent pads stay at `segmentLength`
+    (closed loop, half-split correction).
+  * Wheel constraint = the radial resolver you described:
+    `|pos - hub| < R` -> push pad to `hub + R * radial_hat`
+    (deepest penetration wins per pad per iteration).  Direction
+    locked to the radial vector = "directional lock on the
+    wheel" -- tangential motion is the only DOF left at the rim.
+  * ALL wheel roles fed in: drive sprockets, idlers, road
+    wheels, return rollers.  Solver doesn't distinguish; every
+    wheel is a circle the chain can't enter.
+
+Wiring (`viewer.py`):
+
+  * F9 toggles `_use_chain_pbd`.  Default OFF -- chain stays on
+    geometric homie until you flip it.
+  * `_step_chain_pbd` called from `_compute_homie_chain_for_frame`
+    when the toggle is on.  Lazy-creates one `TrackChainPBD` per
+    side after seeding from the homie geometric chain on the
+    first tick after each toggle -- avoids cold-start explosion.
+  * Real-time `dt` from wall clock (decoupled from physics tick);
+    clamped to 40 ms to survive frame stutters.
+
+Sanity: T110E4 has 13 wheels per side, T110E4 chain = 80 pads
+per side, 6 iterations -> ~6000 constraint checks per side per
+frame.  Vectorised over (pad, wheel) pairs.
+
+### Rubber-band track ribbon rendered again (1.118.90)
+
+Coffee: "we need the rubber band back".
+
+The skinned-track ribbon (`track_<L|R>Shape` /
+`track_<L|R>Shape_split_<N>` inside
+`Chassis.primitives_processed`) has been gated off since the
+Phase A track-physics roadmap started.  Pad meshes (homie
+chain) covered the visible chain, but with no ribbon under
+them you could see between pads.
+
+Removed the `RENDER_RUBBER_BAND_TRACK = False` short-circuit
+in `viewer.render`'s three mesh passes (solid, wireframe,
+normals) and the matching skip in `picker.py`.  The ribbon
+now:
+
+  * Renders with the rest of the chassis meshes via the
+    standard `_upload_skinning` path (per-bone matrix array
+    upload picks up suspension deflection automatically).
+  * Sits UNDER the homie pad render (pads still draw on top),
+    filling the visible gaps between pads.
+  * Reports as a pickable mesh in the picker FBO.
+
+### Per-side road-wheel Z range for sag mask (1.118.89)
+
+Coffee: "you forgot about the other wheels".
+
+The 1.118.88 sag-mask Z range was derived from `road_wheels_L`
+only and reused for both sides.  WoT XMLs author L and R road
+wheels with slightly different Z positions (T110E4 W_L1 Z =
++1.261 m vs W_R1 Z = +1.183 m), so the single L-derived range
+clipped a sliver off the R-side bottom run.
+
+Fix: compute `(z_lo, z_hi)` per side from the respective
+`road_wheels_<L|R>` role list.  Each side's sag mask now uses
+its own road-wheel extremes.
+
+### Sag mask by road-wheel Z range; no chain breaks (1.118.88)
+
+Coffee: "we have breaks in our chain?  are we sure we are in
+order?".
+
+The v1.118.86 sag bias used `Y < Y_mid` to identify bottom-run
+pads.  On a sprocket wrap the chain swings through the full Y
+range (rim bottom Y to rim top Y), so individual pads on the
+arc oscillated above / below `Y_mid` -- some got the sag bias,
+some didn't.  That created visible Y discontinuities at the
+sprocket wraparound = "breaks" in the chain.
+
+Fix: mask by Z range instead.  Bottom-run = chain pads with
+Z between the front-most and rear-most ROAD WHEEL Z.  This
+selects only the section riding under the road wheels (where
+sag physically makes sense) and excludes the sprocket / idler
+arcs cleanly.  Boundary is continuous because the sag curve
+tapers to zero at the road-wheel Z extremes (the ribbon
+authored hugs the wheel rim there).
+
+### Re-run central-chord tangent AFTER sag bias (1.118.87)
+
+Coffee: "the grounds wheel's segments need the same 1/2 rotation
+factor as the drive wheel's".
+
+The v1.118.83 central-chord tangent override ran ONCE before
+the v1.118.86 sag bias.  After sag reshaped bottom-run pad Y
+positions, the tangents still pointed along the pre-sag flat
+line -- so ground-wheel pads kept their forward axis horizontal
+even when the chain physically dipped between wheels.
+
+Fix: re-apply the central-chord override `chord_i =
+pos[i+1] - pos[i-1]` AFTER the sag bias.  Bottom-run pads now
+tilt with the sagged chain shape; the same Delta/2 rotation
+halving the drive wheel pads enjoy carries through to ground
+wheel pads.
+
+### Chain sag from skinned-track ribbon (1.118.86)
+
+Coffee: "can we add weights to the segments?  I want them to
+sag" -> "there are weights in the tank_mat_r/l_skinned for the
+rubber band tracks.  Usable?" -> "of course.  I didn't think
+that was a viable path."
+
+New module `tankExporterPy/track_sag.py`:
+
+  * `extract_sag_curve(prim_path, vis_path, side)` walks the
+    skinned-track ribbon mesh (`track_<side>_Shape`,
+    `track_<side>Shape`, OR `track_<side>Shape_split_<N>` --
+    Tiger I uses the split layout) and pulls the OUTER FACE
+    vertices.  Bins them by chassis-local Z (1 cm bins), takes
+    the MIN Y per bin, returns `(zs, ys)` -- the authored
+    BOTTOM EDGE of the track ribbon vs Z.  This is the chain's
+    natural rest sag profile, encoded in the .primitives_processed
+    vertex positions.
+  * `interp_sag_y(zs_curve, ys_curve, zs_query)` -- np.interp
+    wrapper with edge-clamping for runtime lookup.
+
+Wiring:
+
+  * `Viewer._load_track_sag_curves` called once per tank load
+    after `_resolve_track_pad_paths`.  Stashes
+    `track_sag_L` / `track_sag_R` on `_pending_chassis_info`.
+  * `Viewer._compute_homie_chain_for_frame` -- new bias pass.
+    For every BOTTOM-RUN pad (Y in the lower half of the
+    chain's Y range), interpolate the sag curve at the pad's Z
+    and `Y_pad = min(Y_homie, Y_sag)`.  The `min()` makes sure
+    the bias only ever DROPS the chain; if homie already
+    placed the pad lower (e.g. suspension deflection), that
+    wins.
+
+Net visual: chain bottom run now dips between road wheels in
+the natural authored shape; on the sprocket arcs the curve
+hugs the wheel rim (zero extra sag) so the chain drops cleanly
+into sprocket position.  Tiger ribbon extracts 120 samples,
+T110E4 extracts 98 -- enough resolution for sub-cm sag detail.
+
+### All spline-radius adjustments removed (1.118.85)
+
+Coffee: "find and remove any adjustments to the spine dia".
+
+Audited every `radii.items()` / `w['R'] *=` / `w['R'] -=`
+write site and stripped the remaining shrink:
+
+  * `Viewer._compute_homie_chain_for_frame` -- removed
+    `segmentsInnerThickness` shrink.
+  * `Viewer._wire_homie_to_physics` -- removed same shrink.
+  * `cust_tools/plot_homie_T110E4.py` -- removed same shrink.
+  * `cust_tools/plot_homie_compare.py` -- removed same shrink.
+
+Combined with earlier removals:
+  * v1.118.73: `<radiusOverrides>` parser stripped from loader.
+  * v1.118.84: `track_homie._correct_R` no longer called from
+    `build_chain_segments`.
+
+Net: every wheel hits the homie chain math at its authored
+`<wheelGroup><groupRadius>` value verbatim.  Chain wraps the
+visible wheel rim.
+
+### Authored wheel diameters preserved; L->R radii mirror (1.118.84)
+
+Coffee: "our spline diameters are off..  make sure the correct
+dia wheels are use in the proper locations of our spline".
+
+Two fixes:
+
+1.  **`_correct_R` scaling skipped.**  `track_homie.build_chain_segments`
+    no longer mutates active wheels' radii to fit the chain
+    length to `segmentLength * segmentsCount` exactly.  The
+    scaling was inflating sprockets (T110E4 WD_L0 grew from
+    0.325 to ~0.5; Tiger WD_L0 grew similarly) because the
+    correction had to be absorbed by sprockets + rollers alone
+    (road wheels excluded from the active set).  Every wheel
+    now keeps its authored radius from `<wheelGroup>
+    <groupRadius>` (minus segmentsInnerThickness applied
+    upstream).  Pad pitch falls out as `natural_length /
+    n_pads`, typically within 1-2 % of `segmentLength`.
+
+2.  **L->R `wheel_radii` mirror in loader.**  WoT chassis XMLs
+    list `<wheelGroup>` entries only for the L-side; the R-side
+    relied on `_collect_wheels`' fallback to look up the L
+    mirror name.  Loader now mirrors `_L` -> `_R` into
+    `wheel_radii` directly, so downstream code (track_homie,
+    physics, plot tools) has explicit entries for every wheel
+    bone.  Diagnostic audit on Tiger + T110E4 now shows
+    correct R-side values where it previously showed `<NONE>`.
+
+`cust_tools/plot_homie_compare.py` adds an `AUTHORED wheel
+radii by role` table at the top of every run so the wheel-
+diameter <-> position map is auditable, and draws both the
+bind-pose outline (dashed) AND the post-correction circle
+(filled) per wheel.  Post-correction is now identical to bind
+since `_correct_R` is skipped.
+
+### Per-pad orientation: central-chord halves prev forward-chord (1.118.83)
+
+Coffee: "the rotation angle to the wheel needs to be half.  we
+swing both directions from center so we double the angel to
+prev and post pads".
+
+The v1.118.x forward-chord override in
+`_compute_homie_chain_for_frame` set each pad's tangent to
+`pos[i+1] - pos[i]` -- the chord from THIS pivot to the NEXT
+pivot.  That chord direction is rotated by Delta/2 FORWARD of
+the pivot's own symmetric chain tangent, where Delta = the
+per-pad angular step on the wheel arc (= pitch / R).  Result:
+consecutive pads' "forwards" spanned the FULL prev-to-post
+angular range -- 2 * Delta/2 = Delta -- which on a sprocket
+read as the pads pinwheeling around the wheel twice as fast as
+they should.
+
+Fix: central chord (`pos[i+1] - pos[i-1]`).  This is
+symmetric about the pivot -- equal pull from prev and next
+neighbours -- and matches the exact geometric tangent at the
+pivot to leading order.  Consecutive central chords on a
+regular sprocket arc are correctly Delta/2 apart.
+
+### Spline rides at (R - innerThickness); no runtime offset (1.118.82)
+
+Coffee: "remove the pad inner thickness when we draw the
+spline.. remove any existing offset to the spline and subtract
+the inner thickness from all wheel dias".
+
+Wheel radii from the chassis XML's `<wheelGroups>` go to the
+OUTER pad face (the rim).  The chain itself rides INSIDE the
+rim by `segmentsInnerThickness` -- the pin axle plane sits
+between the wheel center and the rim.  So before handing
+radii to `track_homie.compute_homie_chain`, we now subtract
+the inner thickness from every wheel:
+
+    radii_eff = {nm: max(R - inner_th, 0.01)
+                 for nm, R in radii.items()}
+
+Applied in both runtime paths:
+  * `Viewer._compute_homie_chain_for_frame`
+  * `Viewer._wire_homie_to_physics`
+  * `cust_tools/plot_homie_T110E4.py`
+
+Runtime pad offset shift dropped:  the previous
+`xform_clamped[:, :, 3] += seg2_offset * +Y` is gone.  Pad
+meshes render with their .model-authored origin at the
+spline anchor verbatim; the spline now sits at the right
+radius and the pad bodies cover [chain-anchor + inner
+thickness, chain-anchor + outer thickness] along radial.
+
+Net visual on T110E4 sprocket: pads wrap snugly around the
+sprocket rim; chain spline runs through the INNER edge of
+each gold pad rectangle; hinge points (green diamonds) sit
+just past the chain at +segment2Offset out.
+
+### Parse pad thickness fields; draw pads as rectangles in plot (1.118.81)
+
+Coffee: "draw pads as rectangles the size of pad..  pad space
+and pad thickness" + "<segmentsOuterThickness>0.029107..
+<segmentsInnerThickness>0.061535".
+
+`loaders.py` now parses `<segmentsOuterThickness>` and
+`<segmentsInnerThickness>` from the chassis XML into
+`info['chassis']['segmentsOuterThickness']` /
+`['segmentsInnerThickness']` (m).  Pad "space" along the chain
+already comes from `<segmentLength>`.
+
+Diagnostic plot draws each pad as a gold rectangle:
+  * length  = segmentLength                  (along chain)
+  * inner   = segmentsInnerThickness         (toward wheel
+                                               center / chain)
+  * outer   = segmentsOuterThickness         (away from wheel
+                                               center / cleat side)
+  * centred on the hinge point (chain anchor + segment2Offset
+    * outward axis)
+
+Rectangle corners computed from the chain tangent (forward) +
+outward perpendicular (radial out on arc pads).  Polygon
+patch with translucent gold fill so the chain + sprocket
+remain visible underneath.
+
+### Hinge point at segment2Offset; both pad parts share it (1.118.80)
+
+Coffee: "now draw the pad so their hinge point is at the seg 2
+offset".
+
+Both segment + segment2 pad meshes now hinge at the same point
+in world space: `chain_anchor + segment2Offset * +Y_axis_world`
+(radially outward from the wheel center on arc pads, perpendicular
+outward from the chain on line pads).  On T110E4 that puts the
+hinge at chain_anchor + 0.09 m radial.
+
+`segmentOffset` (0.258) is no longer applied as a runtime
+transform -- it represents the larger pad part's authored
+geometric extent past the hinge in the .model file itself.
+
+Runtime `_render_track_pad_body`:
+  xform_clamped[:, 0:3, 3] += seg2_offset * xform_clamped[:, 0:3, 1]
+
+Same shift for both renderer keys (segmentModel + segment2Model).
+
+Diagnostic plot updated:
+  * Green diamond + line = hinge point (segment2Offset out)
+  * Faint red dashed line = segmentOffset extent (for context;
+    no longer a runtime quantity)
+
+### Pad offsets are RADIAL OUTWARD from wheel center (1.118.79)
+
+Coffee: "seg offsets are from wheel center out.. add them the
+the spline point distance to wheel center".
+
+`segmentOffset` and `segment2Offset` are radial outward
+displacements from the chain anchor.  On arc pads they push
+the mesh outward from the wheel hub (anchor at R, mesh sits
+at R + offset).  On line pads they push perpendicular outward
+from the chain tangent.  Both cases reduce to "shift along
+pad-local +Y axis" -- the orientation pipeline already sets
++Y to "outward from chain interior" on every pad.
+
+Runtime `_render_track_pad_body`:
+  xform_clamped[:, 0:3, 3] += offset * xform_clamped[:, 0:3, 1]
+
+(was previously +offset along +Z (forward) in v1.118.68 and
+then -offset along +Z in v1.118.77.  The correct axis is +Y.)
+
+Diagnostic plot tick lines now draw outward along the
+perpendicular-to-tangent direction (= 90 deg CCW rotation of
+chain forward in 2D, which matches the chain's outward normal
+for a CW-traversed closed loop).
+
+### Drop pad-mesh offset shift + drive-wheel-only diagnostic plot (1.118.78)
+
+Coffee: "don't offset the rotation point on the pads and redraw
+just the drive wheel spline and pads.. keep window on drive
+wheel drawing".
+
+Two changes:
+
+1.  `_render_track_pad_body` no longer applies any per-variant
+    forward shift along pad-local +Z.  Each pad-mesh part
+    renders with its mesh-local origin at the chain anchor
+    verbatim.  Whatever forward / backward extent the mesh
+    body has stays as authored.  Result: rotation pivot for
+    both segment + segment2 is the mesh's own (0, 0, 0) in
+    pad-local coords -- the runtime no longer second-guesses
+    where the pivot should be.
+    Removed `seg_offset` / `seg2_offset` writes into
+    `xform_clamped[:, 0:3, 3]`.
+
+2.  `cust_tools/plot_homie_T110E4.py` collapsed from
+    LEFT + RIGHT + zoom (3-panel, 22x20") down to a single
+    drive-wheel zoom panel (16x14") so the offset geometry
+    reads at usable scale on screen.  At each chain anchor on
+    the front sprocket arc:
+      * magenta dot = pivot (= chain anchor)
+      * red line + square = where mesh-local origin would
+        sit if you shifted by segmentOffset (0.258 m
+        backward along chain forward)
+      * orange line + square = same for segment2Offset
+        (0.09 m)
+    Lets us see the pivot-to-mesh-origin geometry directly
+    against the chain spline + sprocket circle.
+
+### segmentOffset is pivot-in-mesh-local, not anchor-to-mesh-forward (1.118.77)
+
+Coffee: "both of the pad pieces should be considered as one.
+they need to both rotate at the pivot as one part.  could these
+be the offsets to center of rotation".
+
+Yes -- `<segmentOffset>` and `<segment2Offset>` in the gameplay
+XML are the LOCATION OF THE PIVOT (= center of rotation = hinge
+pin) inside each mesh part's local coordinate frame.  The
+runtime had the sign inverted: `+offset * z_axis` moved the
+mesh-local ORIGIN forward of the chain anchor, leaving the
+pivot 2x the offset ahead of where it should be -- and each
+of the two pieces ended up with its own pivot at a different
+spot.
+
+Fix in `_render_track_pad_body` dispatch:
+  * Flip sign: `xform_clamped[:, 0:3, 3] -= offset * z_axis`
+    (shift the mesh BACKWARDS so the mesh-local pivot point
+    `(0, 0, offset)` lands at the chain anchor).
+  * Both `segment` and `segment2` now SHARE one pivot in world
+    space per anchor.  The two pieces extend "behind" the pivot
+    along their respective lengths, forming one rigid shoe that
+    rotates around the chain anchor as the chain bends.
+
+Pink hinge-pin markers updated to match: one pin per chain
+anchor at the SHARED pivot location (the side's pre-offset
+xform_world translation), instead of per-renderer at the
+old post-shift positions.  Each anchor on T110E4 now gets
+ONE pink crosshair (was two -- one for each variant at its
+incorrect-by-2x post-shift location).
+
+### Pink hinge-pin markers at every pad transform (1.118.76)
+
+Coffee: "render the pink seg markers at the hinge pin transform
+locations".  The pink pin-axis lines (removed in v1.118.58) are
+back, but driven by the post-1.118.74 dispatch math so each
+2-piece shoe gets TWO pins per anchor at the actual
+segmentOffset / segment2Offset world positions -- not just at
+the pre-shift chain anchor.
+
+Implementation:
+  * `self.pin_lines = LineBatch(line_width=1.8)` constructed
+    alongside `self.track_lines` in viewer `__init__`.
+  * In `_render_track_pad_body`'s dispatch loop, for each
+    renderer key compute:
+        pin_origin = xform_clamped[:, 0:3, 3]   # hinge world XYZ
+        pin_dir    = xform_clamped[:, 0:3, 0]   # pad-local +X axis
+        pin_start  = pin_origin - ex * pin_dir
+        pin_end    = pin_origin + ex * pin_dir
+    where `ex` = renderer's X half-extent (full pin spans the
+    pad's width).  Per-renderer collection so segment + segment2
+    pins land at their respective post-shift positions, drawing
+    two pink crosshairs per anchor on T110E4 / one per anchor
+    on single-variant tanks.
+  * Post-dispatch: `pin_lines.update(pin_segments)` +
+    `render(self.color_shader, view, proj)` -- pins drawn on
+    top of pads with depth test on, so they read clearly
+    against the warm tank-tone pad surfaces.
+  * Pink colour = `(1.0, 0.40, 0.78)`.
+
+### Extract dialog auto-sizes to fit controls (1.118.75)
+
+Coffee: "the extract window needs to fit the controls".  The
+`_show_extract_picker` Tk dialog had a hardcoded `'360x300'`
+geometry that cut off the bottom rows (Track Segments + Tank
+Definition checkboxes, the Extract-textures toggle, and the
+button row) when all controls were present.
+
+Fix in `_show_extract_picker`:
+  * `win.geometry('')` -- let Tk size the window from its
+    packed children.  Width auto-expands for long Tank
+    Definition path text; height auto-expands as rows are
+    added.
+  * Button row switched from `side='bottom'` to `side='top'`
+    so it packs in natural order below the texture toggle
+    instead of potentially overlapping under auto-geometry.
+  * Added a separator above the buttons for visual grouping.
+
+### 2-piece shoe rotates as one rigid body (1.118.74)
+
+Coffee: "rotate 2 piece segments as one.. not as 2 different
+seg parts".  On T110E4 the prior per-renderer terrain clamp
+computed a SEPARATE Y lift for segment + segment2 using each
+renderer's own `bbox_half_extent` -- on uneven terrain the two
+pieces ended up at different world Y, so they read as two
+independently-rotating parts instead of one rigid shoe.
+
+Fix: terrain clamp moved OUT of the per-renderer loop.  Per
+side:
+
+  1. Compute the worst-case Y half-extent across all renderers
+     on that side.
+  2. Sample terrain ONCE at every chain anchor's world XZ,
+     compute the lift using the shared extent.
+  3. Bake the lift into the side's shared `xform_world_L/R`
+     before the dispatch loop -- both segment + segment2
+     renderers consume the same lifted xform.
+
+Per-renderer dispatch now ONLY adds the per-variant hinge
+offset along pad-local +Z (segment gets segmentOffset, segment2
+gets segment2Offset).  Rotation and Y are identical between
+the two pieces of a given anchor.
+
+Also removed `pin_xform_per_side` / `ex_for_pins` stubs that
+were only ever consumed by the magenta pin-axis overlay
+deleted in v1.118.58.
+
+### Drop `<radiusOverrides>` pitch-radius override (1.118.73)
+
+Coffee: "the drive wheel offset.. remove it".  The v1.118.56
+parsing of `<radiusOverrides>` in `loaders.py` is removed.  That
+block had been replacing the drive sprocket / idler outer-tooth
+radius (from `<wheelGroups>`) with the smaller chain-pitch
+radius so the chain wrapped the inside-of-the-teeth line.
+
+Now the chain uses whatever `<wheelGroups>` supplies for the
+drive sprocket -- same source as the road wheels.
+
+Effect on T110E4: WD_L0 R goes from 0.3844 m (pitch override)
+to 0.3245 m (wheelGroups).  Chain wraps the smaller radius;
+end sprocket pie-slices in the diagnostic plot are smaller.
+
+### Runtime chain pad count: route through `_resolve_pads_per_side` (1.118.72)
+
+Coffee: "math png not what i see".  The offline diagnostic plot
+(`cust_tools/plot_homie_T110E4.py`) and the runtime F8 / pad
+render disagreed on T110E4 -- the PNG showed 80 pads, the viewer
+drew 160.
+
+Root cause: `Viewer._compute_homie_chain_for_frame` read
+`n_pads = int(seg_count)` straight off the chassis-info dict,
+bypassing `_resolve_pads_per_side()` -- which halves
+segmentsCount on 2-part shoe tanks per the 1.118.69 fix.  Tiger
+(no segment2) was unaffected because seg_count == anchors there.
+T110E4 (segment + segment2) wanted 80 anchors but got 160.
+
+Fix: route `n_pads` through `_resolve_pads_per_side()` (returns
+80 for T110E4, 80 for Tiger, etc.).  Single source of truth for
+"how many pad anchors per side"; `_wire_homie_to_physics` was
+already using it, so they're now in sync.
+
+The diagnostic plot script gains an extra cross-check at the
+end -- if `math_images/runtime_dump.json` is present, it
+compares offline vs runtime pad-array lengths + per-pad
+|delta| to surface this kind of pipeline divergence
+automatically.
+
+### Physics plane fit uses homie chain bottom run + XML spline dropped (1.118.71)
+
+Coffee: "now get the physics to use this spline... dont use xml
+spline if not needed".
+
+**Physics plane-fit input switched from wheel hubs to homie
+chain bottom run.**
+
+`tank_physics.TankPhysics` gains:
+
+  * `_homie_bottom_local_L` / `_homie_bottom_local_R` -- chassis-
+    local XYZ of the homie chain's bottom-run pads, per side.
+    Set once per tank load.
+  * `set_homie_bottom_run(local_L, local_R)` -- public setter
+    the viewer calls after building the bind-pose homie chain.
+
+`TankPhysics.update()`: when the chain is set, the lstsq
+plane fit consumes chain-pad terrain samples instead of
+wheel-hub samples.  Same `fit_plane(targets_local)` recipe,
+just denser + along the true contact line.  Per-wheel
+suspension classification (CONTACT/HANGING/OVER_COMP) and
+iterative refinement still operate on wheels.  Empty / None
+chain -> falls back to the old wheel-hub plane fit verbatim.
+
+**XML `.track` spline load path dropped at tank load.**
+
+The legacy `track_spline.TrackSplineLoader.from_pkg` pulled
+left.track + right.track Collada files, parsed V_locs, built
+a centripetal Catmull-Rom NURB.  Homie (`track_homie`) builds
+the same chain shape purely from chassis bones + wheel radii;
+the .track files are now dead weight on every tank load.
+
+Removed work per tank load:
+  * `.track` file extraction + parse (`TrackSplineLoader.from_pkg`)
+  * V_loc -> bone match (`attach_binding`)
+  * Rigid pad cache via `build_augmented_control_loop` + CR +
+    resample (~2 ms per side)
+
+Kept (homie still needs them):
+  * `parse_chassis_bone_world_positions` on
+    Chassis.visual_processed -- bind-pose bone dict that both
+    homie and physics consume.
+  * `_resolve_track_pad_paths` + `_load_track_pad_meshes` for
+    the GPU-resident instanced pad renderers.
+
+F8 overlay gate switched from `_track_left/right is not None`
+to `_track_chassis_bones_bind` -- chain rendering only ever
+read the bone dict, never the spline objects.
+
+`_compute_stock_chain_for_frame` retained as dead code
+(self._track_left is always None now so it returns 4xNone on
+first check -- safe).
+
+Viewer adds `_wire_homie_to_physics`: computes bind-pose homie
+chain, masks bottom-run pads (Y in lower 35 % of chain Y range),
+hands them to `tank_physics.set_homie_bottom_run`.  Per-tank-
+load log: `[homie-physics] chain bottom run -> physics plane
+fit: L=N pads R=M pads (was wheel-hub samples)`.
+
+### Revert CW-arc enforcement, keep 2-part halve fix (1.118.70)
+
+Coffee: "wd_l1 and wd_r1 are figure 8".  The CW-arc enforcement
+introduced in 1.118.69 caused front-roller WD_L1 / WD_R1 to draw
+a near-360 deg wrap whenever `_correct_R` scaled the adjacent
+front sprocket WD_L0 / WD_R0 -- the bigger sprocket tilts the
+roller's exit tangent slightly CCW (~6 deg) of its entry, and
+the CW enforcement re-routed that as a 354 deg CW loop.  Result:
+visible figure-8 on the two frontmost rollers.
+
+Investigation showed the CW enforcement was never necessary in
+the first place.  The diagnostic claim "T110E4's rear sprocket
+needs >180 deg CW wrap" was a misreading -- the prior
+`_short_arc_signed_diff` already returns the correct 144 deg
+arc for WD_L6's a_in=-128 deg / a_out=+88 deg case, with
+direction = -1 (CW) in `_place_pads`, and the walk traverses
+through angle -180 deg (= backmost point of the wheel).  The
+chain wraps around the BACK of the sprocket -- which is the
+geometrically correct path.
+
+Real fix:  ONLY the segment-count halving from 1.118.69 was
+needed.  Reverted:
+  * `track_homie._cw_signed_arc` -- removed.
+  * `_measure_loop`, `_correct_R`, `_place_pads` -- restored
+    to calling `_short_arc_signed_diff`.
+Kept:
+  * `Viewer._resolve_pads_per_side` -- still halves segmentsCount
+    on 2-part shoe tanks (segment2ModelLeft present).
+
+Verification on T110E4 post-revert:
+  - mean pad spacing = 0.1716 m (target 0.172, error 0.25 %)
+  - std = 0.0025
+  - max gap = 0.1724 (no jumps)
+  - WD_L1 / WD_R1 wraps = ~1.5 deg (touch, no figure-8)
+  - Sprockets WD_L0 / WD_R0 scaled to R=0.469 (natural 0.384;
+    `_correct_R` k=1.22 to absorb 0.39 m err to target).
+
+### T110E4 spline fix: CW arcs + halve count for 2-part shoes (1.118.69)
+
+Coffee: "spline is completely wrong on the T110E4.  Pull data
+and plot on paper".  Added `cust_tools/plot_homie_T110E4.py`
+which dumps every input the runtime homie chain sees
+(`bones`, `radii`, `roles`, `segmentLength`, `segmentsCount`,
+gauge) AND the resulting pad positions, side by side with a
+matplotlib side-view PNG.  Two bugs surfaced:
+
+**Bug 1 -- arc direction at the rear sprocket.**
+`track_homie._short_arc_signed_diff` picked the SHORTER arc
+at every wheel.  For Tiger / T30 the rear is a small idler
+at road-wheel Y, the chain wraps <180 deg, and "shortest" IS
+the correct path.  T110E4 has TWO drive sprockets at higher Y
+than the road wheels (front WD_L0 at Y=+0.92, rear WD_L6 at
+Y=+1.01 vs road wheels at +0.42), so the chain must wrap
+>180 deg around the BACK of WD_L6 -- the "short" arc instead
+cuts across the inside of the loop (physically impossible).
+
+Fix: `track_homie._cw_signed_arc` returns the CW-enforced
+signed arc (angle DECREASING in atan2, matching the loop
+traversal sense `_order_loop` produces).  Replaces
+`_short_arc_signed_diff` at three callsites:
+`_measure_loop`, `_correct_R`, and `_place_pads`.  Arc
+direction in `_place_pads` is now hardcoded to `-1` (CW).
+
+**Bug 2 -- segmentsCount counts PARTS, not anchors.**
+T110E4 ships TWO shoe parts per pad anchor (`segmentModel*`
++ `segment2Model*`).  The XML's `segmentsCount=160` is the
+PART count, not the anchor count -- so the chain wants 80
+anchors, not 160.  With 160 the chain math (geometric
+length ~13.5 m) was less than half the target (160 * 0.172
+= 27.52 m), forcing `_correct_R` to inflate sprocket radii
+by 6x.  With 80 the target = 13.76 m, matching the actual
+geometry within 2% (an err `_correct_R` cleanly absorbs).
+
+Fix: `Viewer._resolve_pads_per_side` halves the count when
+`track_segment_models['segment2ModelLeft']` is present.
+Tiger / T30 (no segment2 model) keep the verbatim count.
+
+Verification on T110E4 with both fixes:
+  - mean pad spacing = 0.170 m (target 0.172, error 1.4%)
+  - std = 0.006 m (was 0.228 m before fix)
+  - max gap = 0.172 m (was 2.35 m before fix)
+  - Y range [+0.09, +1.27] (all on wheel surfaces)
+
+### Two-part pad assembly: per-renderer hinge offset (1.118.68)
+
+Coffee clarified the T110E4 case: "some tanks have 2 parts but
+they are both attached to one point.  there are 2 offsets to
+get total pad thickness.  2 pad parts."
+
+Correct model -- the shoe assembly on tanks like T110E4 is TWO
+rigid mesh parts that share ONE chain anchor.  `segmentOffset`
+positions part 1 along pad-local +Z; `segment2Offset` positions
+part 2.  The two together give the total assembled-shoe thickness.
+Not alternation -- co-location.
+
+The v1.118.66 stride-2 attempt (which assumed alternation) was
+wrong.  This pass implements the actual structure:
+
+  * Removed the bulk `seg_offset` pre-shift of xform_L / xform_R
+    (it could only carry one offset).
+  * Read both `segmentOffset` and `segment2Offset` from
+    `track_segment_models`.
+  * In the dispatch loop, pick the offset by the renderer's
+    XML key name:
+        is_seg2         = 'segment2' in key.lower()
+        offset_for_this = seg2_offset if is_seg2 else seg_offset
+    then apply it in world-space to a fresh copy of
+    `xform_world`:
+        xform_offset[:, 0:3, 3] += offset_for_this
+                                   * xform_offset[:, 0:3, 2]
+  * Both renderers draw the FULL instance set (same chain
+    anchors) -- only the forward offset differs.
+
+Tiger I (segmentModel only -> single renderer per side) keeps
+its prior behaviour: one offset, all instances.
+
+### Revert v1.118.65 + v1.118.66 T110E4 attempts (1.118.67)
+
+Coffee: "revert last 2 tries".  Both T110E4-targeted changes
+backed out:
+
+  * v1.118.65 `<segmentsPlaneOffset>` parser in `loaders.py`:
+    removed.  `info['chassis']` no longer carries the field.
+
+  * v1.118.66 `_render_track_pad_body` rewrite in `viewer.py`:
+    reverted to single-variant logic.  The bulk segmentOffset
+    pre-shift before the dispatch loop is restored
+    (`for xform in (xform_L, xform_R): xform[:, 0:3, 3] +=
+    seg_offset * xform[:, 0:3, 2]`); the per-renderer stride-2
+    slicing + segment2Offset application is removed.  Dispatch
+    loop is back to the simple "L gets xform_world_L, R gets
+    xform_world_R, every renderer draws every instance" shape.
+
+Tiger I still works as it did pre-1.118.65; T110E4 stays broken
+pending a different approach.
+
+### T110E4 dual pad-variant rendering fix (1.118.66)
+
+User report: "tracks are not working on all tanks.. probably a
+different naming scheme in the xmls?  tiger 1 great... T110E4 ..
+nope".
+
+Root cause -- T110E4's `<trackPair>` ships TWO alternating pad
+shoe meshes with DIFFERENT hinge offsets:
+
+    segmentModelLeft   = ...track/segment1.model     offset 0.258
+    segmentModelRight  = ...track/segment1.model
+    segment2ModelLeft  = ...track/segment2.model     offset 0.09
+    segment2ModelRight = ...track/segment2.model
+
+Tiger I only has `segmentModel*` (single variant); T110E4
+introduces the alternation.  The previous `_render_track_pad_body`:
+
+  1. Pre-shifted EVERY xform_L / xform_R by `segmentOffset`
+     (segmentOffset only -- segment2Offset entirely ignored).
+  2. In the dispatch loop, fed ALL N instances to BOTH renderers
+     (segment renderer drew N=80 + segment2 renderer drew N=80
+     ON TOP of them = 160 pads overlapping per side, with the
+     wrong offset on half of them).
+
+Fix:
+
+  * Removed the upstream bulk pre-shift of xform_L / xform_R.
+  * Count variants per side at dispatch time (`_l_variants`,
+    `_r_variants`) from the renderer key set (any key with
+    'Left' / 'Right' in its name).
+  * In the dispatch loop, when a side has >= 2 variants:
+        is_seg2     = 'segment2' in key.lower()
+        stride_start = 1 if is_seg2 else 0
+        xform_sub   = xform_world[stride_start::2].copy()
+        offset_for_this = seg2_offset if is_seg2 else seg_offset
+    so segment gets even instances + segmentOffset, segment2
+    gets odd instances + segment2Offset.  Single-variant tanks
+    (Tiger I etc.) keep getting all instances + segmentOffset.
+  * Hinge-offset shift then applied in WORLD space using
+    `xform_sub[:, 0:3, 2]` (the pad-local +Z axis after the
+    chassis transform).  Same math as the pre-1.118.66 local-
+    space pre-shift, just deferred to where we know the
+    variant.
+
+Result on T110E4: 80 segment1 + 80 segment2 alternating along
+each side, each at its proper hinge offset.  Tiger I behaviour
+unchanged (verified by code-path -- only one variant, no
+stride taken).
+
+`<segmentsPlaneOffset>` parsing added to `loaders.py` in 1.118.65
+(half-gauge distance from chassis centerline to pad plane) and
+remains a defensive fallback for the chain's lateral placement.
+
+---
+
 ## 2026-05-09
 
 ### Recorder split out of viewer.py (1.113.0)

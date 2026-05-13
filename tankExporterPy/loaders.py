@@ -2925,6 +2925,32 @@ class VehicleXMLLoader:
                     except ValueError:
                         pass
 
+            # Per Coffee 2026-05-11 ("draw pads as rectangles
+            # the size of pad..  pad space and pad thickness"):
+            # `<segmentsOuterThickness>` + `<segmentsInnerThickness>`
+            # are the pad's thickness on each side of the hinge
+            # line.  Outer = side facing away from wheel center
+            # (ground side / cleat).  Inner = side facing the
+            # wheel (between hinge and chain).  T110E4: outer
+            # 0.0291 m, inner 0.0615 m.  Stored for the
+            # diagnostic plot tool + any future runtime use.
+            for ot_el in best_chassis.iter('segmentsOuterThickness'):
+                if ot_el.text:
+                    try:
+                        info['chassis']['segmentsOuterThickness'] = (
+                            float(ot_el.text.strip()))
+                        break
+                    except ValueError:
+                        pass
+            for it_el in best_chassis.iter('segmentsInnerThickness'):
+                if it_el.text:
+                    try:
+                        info['chassis']['segmentsInnerThickness'] = (
+                            float(it_el.text.strip()))
+                        break
+                    except ValueError:
+                        pass
+
             # ---- physicalTracks.springsLength (sag budget) -------
             # Per-region MAX SLACK the track ribbon can bow in,
             # in metres.  Two motion variants (forwardMovement,
@@ -3146,7 +3172,37 @@ class VehicleXMLLoader:
                         best_radius = rad
                 if best_radius is not None:
                     info['chassis']['groupRadius_road'] = best_radius
+                # Per Coffee 2026-05-11 ("the drive wheel
+                # offset.. remove it"): the v1.118.56
+                # `<radiusOverrides>` parsing block lived here.
+                # It replaced the drive sprocket / idler's
+                # outer-tooth-tip radius (from <wheelGroups>)
+                # with the smaller chain-pitch radius so the
+                # chain wrapped the inside-of-the-teeth pitch
+                # line.  Removed -- chain now wraps the outer
+                # radius the chassis XML's <wheelGroups>
+                # supplies, same as road wheels.
+                # Per Coffee 2026-05-11 ("make sure the correct
+                # dia wheels are use in the proper locations of
+                # our spline"): WoT chassis XMLs typically list
+                # `<wheelGroup>` entries only for the L-side
+                # wheels and rely on the engine to mirror them
+                # to R-side at runtime.  Mirror here, in the
+                # loader, so `wheel_radii` has explicit entries
+                # for every wheel bone -- both sides -- and
+                # downstream code (track_homie, physics, plot
+                # tools) doesn't have to re-implement the L->R
+                # fallback.  Substitution rule: any name
+                # containing `_L` (with `_R` absent) gets a
+                # mirrored entry with `_L` -> `_R`.
                 if wheel_radii:
+                    mirrored = {}
+                    for nm, R in wheel_radii.items():
+                        if '_L' in nm and '_R' not in nm:
+                            r_name = nm.replace('_L', '_R', 1)
+                            if r_name not in wheel_radii:
+                                mirrored[r_name] = R
+                    wheel_radii.update(mirrored)
                     info['chassis']['wheel_radii'] = wheel_radii
 
             # ---- Wheel roles (XML-driven; replaces heuristics) -

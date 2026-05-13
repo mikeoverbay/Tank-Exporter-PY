@@ -175,5 +175,26 @@ void main()
     // vec3  result    = mix(lit, fog_color, fog);
     vec3  result = lit;
 
+    // ---- Height-gradient darken -----------------------------------------
+    // Per Coffee 2026-05-10 ("the terrain hurts my eyes.. can we
+    // darken it using a gradient from the height map?").  Map the
+    // per-fragment v_height into [0, 1] across the terrain's
+    // [u_height_min, u_height_max] range, then mix a darken factor
+    // between two endpoints.  Low spots dim more (= shadowed
+    // valley feel), peaks stay near full brightness.  Cosine-
+    // smoothed via smoothstep so the gradient is gentle, not
+    // banded.
+    //
+    // Endpoints tuned for "no eye-strain" -- valleys at 0.55x,
+    // peaks at 0.92x.  Adjust by editing the mix() constants
+    // below; restore the pre-1.118.57 look by changing the
+    // mix(0.55, 0.92, ...) to mix(1.0, 1.0, ...).
+    float h_span   = max(u_height_max - u_height_min, 1e-3);
+    float h_norm   = clamp(
+        (v_height - u_height_min) / h_span, 0.0, 1.0);
+    float h_smooth = smoothstep(0.0, 1.0, h_norm);
+    float darken   = mix(0.55, 0.92, h_smooth);
+    result        *= darken;
+
     FragColor = vec4(result, 1.0);
 }

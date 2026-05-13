@@ -695,6 +695,28 @@ class TankPhysics:
         self._last_yaw_rate_dps          = 0.0   # telemetry
         self._target_lat_lean_roll_deg   = 0.0   # integrator offset
 
+        # Per Coffee 2026-05-13 ("we are adding wheel rotations"):
+        # one accumulated angle per road-wheel bone, in radians.
+        # Caller advances each frame via `advance_wheel_angles
+        # (v_L, v_R, dt)`; `bone_matrix_array` reads it to
+        # compose a rotation about each wheel's hub into the
+        # bone's skin matrix.  Parallel to `wheel_bone_names`.
+        self.wheel_angles_rad = np.zeros(
+            len(self.wheels), dtype=np.float32)
+        # Per Coffee 2026-05-13 ("rotate all wheels"): extras --
+        # drive sprockets / idlers / return rollers.  Populated
+        # via `set_extra_rotating_wheels`; bone_matrix_array
+        # applies the same hub-centred Rx rotation to these as
+        # to road wheels.  No Y residual (they're chassis-rigid).
+        self.extra_rotating_bones      = []
+        self.extra_rotating_hubs       = np.zeros((0, 3),
+                                                    dtype=np.float32)
+        self.extra_rotating_radii      = np.zeros((0,),
+                                                    dtype=np.float32)
+        self.extra_rotating_angles_rad = np.zeros((0,),
+                                                    dtype=np.float32)
+        self._extra_rot_name_to_idx    = {}
+
         # ---- Longitudinal lean (squat under accel, dive under brake) -
         # Mirror of the lateral-lean: derive longitudinal accel from
         # chassis-forward signed speed delta, apply atan(a_long/g)
@@ -741,6 +763,48 @@ class TankPhysics:
         # discontinuities.
         self._smoothed_a_lat_mps2  = 0.0
         self._smoothed_a_long_mps2 = 0.0
+
+        # Per Coffee 2026-05-11 ("get the physics to use this
+        # spline"): chassis-local XYZ of the homie chain bottom
+        # run pads per side.  Set ONCE per tank load via
+        # `set_homie_bottom_run` after the viewer has built the
+        # bind-pose homie chain.  When non-None, the plane fit
+        # in `update()` uses these points (instead of wheel
+        # hubs) as terrain-sample sites -- the chain bottom run
+        # is the actual track-on-ground contact line, so its
+        # terrain profile drives the chassis pitch/roll more
+        # faithfully than discrete wheel hubs do.
+        #
+        # Per-wheel suspension classification still runs on
+        # wheel hubs as before -- only the lstsq plane fit
+        # source is swapped out.
+        self._homie_bottom_local_L = None   # (N, 3) np.float64
+        self._homie_bottom_local_R = None   # (M, 3) np.float64
+        # Cached concatenation built on first use -- (N+M, 3).
+        self._homie_bottom_local   = None
+
+    def set_homie_bottom_run(self, local_L, local_R):
+        """Receive the bind-pose homie chain bottom-run pad
+        positions in chassis-local XYZ -- one (N, 3) array per
+        side, or None to disable chain-based plane fitting.
+
+        The viewer calls this once per tank load (right after
+        computing the bind-pose homie chain).  Per Coffee
+        2026-05-11 ("get the physics to use this spline").
+        """
+        def _to_arr(p):
+            if p is None or len(p) == 0:
+                return None
+            return np.asarray(p, dtype=np.float64).reshape(-1, 3)
+        self._homie_bottom_local_L = _to_arr(local_L)
+        self._homie_bottom_local_R = _to_arr(local_R)
+        parts = [a for a in (self._homie_bottom_local_L,
+                              self._homie_bottom_local_R)
+                 if a is not None]
+        if parts:
+            self._homie_bottom_local = np.concatenate(parts, axis=0)
+        else:
+            self._homie_bottom_local = None
 
     # ------------------------------------------------------------------
     @classmethod
@@ -1834,11 +1898,63 @@ class TankPhysics:
         # produces the chassis-local pitch / roll that
         # `chassis_matrix()` then yaws into world correctly.
         contact = contact_mask | over_mask
-        targets_local = np.column_stack([
-            local[contact, 0],
-            target_centre[contact],
-            local[contact, 2],
-        ])
+        # Per Coffee 2026-05-11 ("get the physics to use this
+        # spline"): when the viewer has handed us a bind-pose
+        # homie chain bottom run, use those pad positions as
+        # the plane-fit terrain sample sites instead of the
+        # wheel hubs.  The chain bottom run is the actual
+        # track-on-ground contact line -- many more samples
+        # (~30/side vs 6 wheels) along the true contact
+        # footprint => smoother pitch/roll fit.  Wheel hubs
+        # are still classified per-wheel above for the
+        # CONTACT/HANGING/OVER_COMP suspension state.
+        chain_local = self._homie_bottom_local
+        if (chain_local is not None
+                and len(chain_local) >= 3
+                and terrain is not None):
+            # Project chain pads into world XZ via current
+            # target pose (yaw + pitch + roll + pos), same
+            # transform we use for wheels above.  Sample terrain
+            # at those XZ; build plane-fit input in chassis-
+            # local XZ + world Y same shape as the wheel form.
+            ch_h = np.column_stack([
+                chain_local[:, 0],
+                chain_local[:, 1],
+                chain_local[:, 2],
+                np.ones(len(chain_local), dtype=np.float64),
+            ])
+            ch_world = (m_in @ ch_h.T).T
+            ch_wx = ch_world[:, 0]
+            ch_wz = ch_world[:, 2]
+            if hasattr(terrain, 'sample_heights'):
+                ch_ty = np.asarray(
+                    terrain.sample_heights(ch_wx, ch_wz),
+                    dtype=np.float64)
+            elif hasattr(terrain, 'sample_height'):
+                ch_ty = np.array([
+                    float(terrain.sample_height(float(x), float(z)))
+                    for x, z in zip(ch_wx, ch_wz)],
+                    dtype=np.float64)
+            else:
+                ch_ty = np.zeros(len(chain_local),
+                                  dtype=np.float64)
+            # Target world Y for each chain pad = terrain Y at
+            # that pad's world XZ (chain bottom must sit on
+            # ground).  Note the chain bottom in chassis-local
+            # already includes the (-radius) offset from wheel
+            # hub, so no extra lift here -- a `c` term swap
+            # absorbed by the force-balance Y solver below.
+            targets_local = np.column_stack([
+                chain_local[:, 0],
+                ch_ty,
+                chain_local[:, 2],
+            ])
+        else:
+            targets_local = np.column_stack([
+                local[contact, 0],
+                target_centre[contact],
+                local[contact, 2],
+            ])
         n_vec, _  = fit_plane(targets_local)
         pitch_deg, roll_deg = normal_to_pitch_roll(n_vec)
 
@@ -2242,6 +2358,87 @@ class TankPhysics:
                 self.smoothed_residual_y[i] = a * new + (1.0 - a) * old
 
     # ------------------------------------------------------------------
+    def set_extra_rotating_wheels(self, names, hubs, radii):
+        """Register additional bones that should spin under
+        `advance_wheel_angles`: drive sprockets, idlers, return
+        rollers.  Road wheels stay handled via `self.wheels` /
+        `self.wheel_bone_names`.
+
+        Per Coffee 2026-05-13 ("rotate all wheels").
+
+        Args:
+            names: list of bone names (typically `WD_<side><i>
+                   _BlendBone`).
+            hubs:  (M, 3) chassis-local bind positions.
+            radii: (M,) per-bone wheel radii in metres.
+        """
+        if not names:
+            self.extra_rotating_bones      = []
+            self.extra_rotating_hubs       = np.zeros((0, 3),
+                                                       dtype=np.float32)
+            self.extra_rotating_radii      = np.zeros((0,),
+                                                       dtype=np.float32)
+            self.extra_rotating_angles_rad = np.zeros((0,),
+                                                       dtype=np.float32)
+            self._extra_rot_name_to_idx    = {}
+            return
+        self.extra_rotating_bones = list(names)
+        self.extra_rotating_hubs  = np.asarray(
+            hubs, dtype=np.float32).reshape(-1, 3)
+        self.extra_rotating_radii = np.asarray(
+            radii, dtype=np.float32).reshape(-1)
+        self.extra_rotating_angles_rad = np.zeros(
+            len(names), dtype=np.float32)
+        self._extra_rot_name_to_idx = {
+            nm: i for i, nm in enumerate(names) if nm}
+
+    def advance_wheel_angles(self, v_L, v_R, dt):
+        """Advance each rotating wheel's spin angle by
+        (v_track / R) * dt.  Covers BOTH road wheels (W_<side><i>
+        bones via `self.wheels`) and any extras registered via
+        `set_extra_rotating_wheels` (sprockets / idlers /
+        rollers).
+
+        Per Coffee 2026-05-13 ("we are adding wheel rotations" +
+        "rotate all wheels" + "spinning backwards").  Sign on
+        the angle delta is NEGATIVE so the visible spin matches
+        the chain advance direction (Coffee verified after the
+        v1.118.113 first pass).
+
+        Side derived from each bone's chassis-local X sign:
+        X < 0 -> left -> use v_L; X >= 0 -> right -> use v_R.
+        """
+        # Per Coffee 2026-05-13 ("any ground wheel R + offset to
+        # ground * Pi = distance"): rolling radius for the angle
+        # update is R + track_thickness, NOT R alone -- the chain
+        # rides on the OUTER surface of the track, which sits
+        # `track_thickness` further out than the bare wheel rim.
+        t_thick = float(getattr(self, 'track_thickness', 0.0))
+
+        # ---- Road wheels --------------------------------------
+        if (self.wheel_angles_rad is None
+                or len(self.wheel_angles_rad) != len(self.wheels)):
+            self.wheel_angles_rad = np.zeros(
+                len(self.wheels), dtype=np.float32)
+        R_road_eff = max(float(self.radius) + t_thick, 1e-3)
+        for i in range(len(self.wheels)):
+            x = float(self.wheels[i, 0])
+            v = float(v_L) if x < 0.0 else float(v_R)
+            self.wheel_angles_rad[i] += -(v / R_road_eff) * float(dt)
+
+        # ---- Extra rotating wheels ----------------------------
+        if (getattr(self, 'extra_rotating_bones', None)
+                and getattr(self, 'extra_rotating_hubs', None) is not None
+                and getattr(self, 'extra_rotating_radii', None) is not None):
+            hubs  = self.extra_rotating_hubs
+            radii = self.extra_rotating_radii
+            for i in range(len(self.extra_rotating_bones)):
+                x = float(hubs[i, 0])
+                v = float(v_L) if x < 0.0 else float(v_R)
+                R_eff = max(float(radii[i]) + t_thick, 1e-3)
+                self.extra_rotating_angles_rad[i] += (
+                    -(v / R_eff) * float(dt))
+
     def bone_matrix_array(self, palette, max_bones=64):
         """Build the per-bone matrix array for the skinning shader.
 
@@ -2330,17 +2527,72 @@ class TankPhysics:
             # Road-wheel bone we accepted during extract?
             wheel_idx = name_to_wheel.get(name)
             if wheel_idx is not None:
-                # Direct pass-through: +residual = wheel up.  Shader
-                # does standard `world = model * skin * position` with
-                # no sign flip (verified by walking shaders/mesh.vert
-                # 2026-05-08 against T30's "wheels sinking to the rim"
-                # bug).  An earlier docstring claimed the shader chain
-                # flipped the sign empirically -- it doesn't, the
-                # claim was a misdiagnosis.  Bone Y > 0 -> visible
-                # wheel UP, exactly as you'd expect.
-                ry            = float(residual_src[wheel_idx])
-                out[pi]       = np.eye(4, dtype=np.float32)
-                out[pi, 1, 3] = ry
+                # Per Coffee 2026-05-13 ("spin the verts in ZY
+                # about center of each wheel"): compose a rotation
+                # about the wheel's hub on the X axis (YZ plane)
+                # into the bone matrix, in addition to the existing
+                # Y residual.
+                #
+                # Matrix: T(hub + (0, ry, 0)) . Rx(theta) . T(-hub)
+                #   shifts a bind-pose vertex to hub-centred,
+                #   rotates about chassis-local +X by theta, then
+                #   translates back to (hub + Y residual).
+                #
+                # +residual = wheel up.  Shader does `world = model
+                # * skin * position` with no sign flip (verified
+                # on T30's "wheels sinking to the rim" bug
+                # 2026-05-08).  Bone Y > 0 -> visible wheel UP.
+                ry  = float(residual_src[wheel_idx])
+                hub = self.wheels[wheel_idx]
+                theta = float(self.wheel_angles_rad[wheel_idx]
+                              if self.wheel_angles_rad is not None
+                              else 0.0)
+                c = math.cos(theta)
+                s = math.sin(theta)
+                # Rx(theta):
+                #   [ 1  0  0  0 ]
+                #   [ 0  c -s  0 ]
+                #   [ 0  s  c  0 ]
+                #   [ 0  0  0  1 ]
+                # T(hub + ry) . Rx . T(-hub):
+                #   row 0:  [ 1  0  0  hub_x - hub_x ]                = [1, 0, 0, 0]
+                #   row 1:  [ 0  c -s  hub_y + ry - (c*hub_y - s*hub_z) ]
+                #   row 2:  [ 0  s  c  hub_z         - (s*hub_y + c*hub_z) ]
+                #   row 3:  [ 0  0  0  1 ]
+                m = np.eye(4, dtype=np.float32)
+                m[1, 1] = c
+                m[1, 2] = -s
+                m[2, 1] = s
+                m[2, 2] = c
+                m[1, 3] = (float(hub[1]) + ry
+                           - (c * float(hub[1]) - s * float(hub[2])))
+                m[2, 3] = (float(hub[2])
+                           - (s * float(hub[1]) + c * float(hub[2])))
+                out[pi] = m
+                continue
+
+            # Per Coffee 2026-05-13 ("rotate all wheels"): extras
+            # (drive sprockets / idlers / return rollers) get a
+            # hub-centred Rx rotation, no Y residual (chassis-
+            # rigid).  Looked up by exact bone name via the dict
+            # built in `set_extra_rotating_wheels`.
+            ex_idx = (self._extra_rot_name_to_idx.get(name)
+                      if self._extra_rot_name_to_idx else None)
+            if ex_idx is not None:
+                hub_ex = self.extra_rotating_hubs[ex_idx]
+                theta = float(self.extra_rotating_angles_rad[ex_idx])
+                c = math.cos(theta)
+                s = math.sin(theta)
+                m = np.eye(4, dtype=np.float32)
+                m[1, 1] =  c; m[1, 2] = -s
+                m[2, 1] =  s; m[2, 2] =  c
+                m[1, 3] = (float(hub_ex[1])
+                           - (c * float(hub_ex[1])
+                              - s * float(hub_ex[2])))
+                m[2, 3] = (float(hub_ex[2])
+                           - (s * float(hub_ex[1])
+                              + c * float(hub_ex[2])))
+                out[pi] = m
                 continue
 
             # Track segment bone?  Defer until after pass 1.

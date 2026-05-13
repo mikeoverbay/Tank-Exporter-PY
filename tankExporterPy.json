@@ -28,9 +28,9 @@
     "gas_large": {
       "start_size": 0.07407407407407407,
       "end_size": 0.7703703703703704,
-      "speed": 2.1333333333333333,
+      "speed": 2.6666666666666665,
       "fade_start_frame": 2.3703703703703702,
-      "fade_end_frame": 46.45925925925926
+      "fade_end_frame": 54.992592592592594
     },
     "diesel_small": {
       "start_size": 0.07,
@@ -96,7 +96,7 @@
   "motif_bg": null,
   "normals_length": 0.0,
   "normals_per_vertex": false,
-  "debug": false,
+  "debug": true,
   "show_terrain": true,
   "suspension_test": true,
   "show_track_spline": true

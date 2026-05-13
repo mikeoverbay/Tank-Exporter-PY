@@ -104,6 +104,19 @@ void main() {
                + u_bones[int(iii.y) / 3] * ww.y
                + u_bones[int(iii.z) / 3] * ww.z
                + u_bones[int(iii.w) / 3] * ww.w;
+        // Per Coffee 2026-05-13 (track_mat_L_skinned X-shift):
+        // BigWorld packs the per-vertex weights as 4 uint8s that
+        // can round down to a sum < 255 (= < 1.0 after the
+        // loader's /255 scale).  G78 has 240 ribbon verts with
+        // sum ~ 0.91, which compresses their X by ~9 % toward
+        // origin via `skin * vec4(pos, 1)`.  Re-normalise the
+        // weighted-sum matrix by the actual weight sum so the
+        // skin acts like a true convex combination of the bone
+        // matrices regardless of the source rounding.
+        float w_sum = ww.x + ww.y + ww.z + ww.w;
+        if (w_sum > 1e-4) {
+            skin /= w_sum;
+        }
     }
 
     // ---- Skinned attributes ------------------------------------------

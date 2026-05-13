@@ -333,6 +333,7 @@ def _place_pads(arcs, n_pads, s_offset=0.0):
             u = (p1 - p0) / max(sl, 1e-9)
             pos = p0 + local_t * u
             tan = u
+            anchor_hub = None         # line pad -- no single wheel
         else:
             _, hub, R, a_in_seg, direction, _alen = seg
             # Walk from a_in toward a_out in the short direction.
@@ -344,8 +345,113 @@ def _place_pads(arcs, n_pads, s_offset=0.0):
             # increase direction).
             tan = direction * np.array(
                 [-math.sin(a), math.cos(a)])
-        pads.append((pos, tan))
+            anchor_hub = hub          # arc pad -- carries its wheel
+        # Per Coffee 2026-05-10 ("grab the line hub to wheel and
+        # seg point and hinge point and take the tangent"): emit
+        # the per-pad anchor alongside pos/tan so the renderer's
+        # orientation pass can derive `up` from
+        # `pad_center - hub` for arc pads (= exact radial outward
+        # at the wheel that pad is currently wrapping), and fall
+        # back to chord-perpendicular for line pads.  Three-
+        # tuple per pad: (pos_2d, tan_2d, hub_2d_or_None).
+        pads.append((pos, tan, anchor_hub))
     return pads, total
+
+
+def build_chain_segments(bones, radii, roles, side, n_pads,
+                          seg_len):
+    """Build the chain's line+arc segment list -- the heavy
+    half of `compute_homie_chain`.  Per Coffee 2026-05-10
+    ("once the spline shape be recycled?"): split out so a
+    cache-aware caller can SKIP this work when the wheel
+    bone positions haven't changed frame-to-frame and just
+    re-call `_place_pads` on the cached segments.
+
+    Steps:
+      _collect_wheels -> _order_loop -> _measure_loop -> err calc
+        -> _correct_R (mutates wheel R) -> _measure_loop again
+
+    Returns the post-correction `arcs_3` segment list, OR
+    `None` on failure (missing inputs / degenerate loop).
+    The wheel objects inside arcs_3 carry their CORRECTED
+    radii after this call -- re-using them is the cache's
+    raison d'etre, but caller MUST treat the returned data
+    as frozen (re-running `_correct_R` on it would compound
+    the correction).
+    """
+    if not bones or not radii or not roles:
+        return None
+    if not n_pads or n_pads <= 0 or not seg_len or seg_len <= 0:
+        return None
+    wheels = _collect_wheels(bones, radii, roles, side)
+    if len(wheels) < 3:
+        return None
+    loop = _order_loop(wheels)
+    if len(loop) < 3:
+        return None
+    # Per Coffee 2026-05-11 ("our spline diameters are off..
+    # make sure the correct dia wheels are use in the proper
+    # locations of our spline"): SKIP `_correct_R` so every
+    # wheel keeps its authored radius (= chassis XML's
+    # `<wheelGroup><groupRadius>` minus segmentsInnerThickness
+    # applied upstream).  The old _correct_R scaled active
+    # wheels (sprockets / rollers) up by a factor `k` to make
+    # the geometric loop length match `segmentLength *
+    # segmentsCount` exactly -- but the cost was inflated
+    # sprockets that no longer matched their authored visible
+    # diameter.  Now the chain's natural geometric length is
+    # used verbatim; pad pitch falls out as
+    # `natural_length / n_pads`, typically within 1-2 % of
+    # `segmentLength`.
+    arcs_3, _, _, _ = _measure_loop(loop)
+    return arcs_3
+
+
+def assemble_chain_arrays(arcs_3, gauge_x, side, n_pads,
+                           s_offset=0.0):
+    """Per-frame light half: sample pads from a (possibly
+    cached) `arcs_3`, build the chassis-local (pos, tan,
+    hubs, on_arc) ndarrays.  Per Coffee 2026-05-10 ("once
+    the spline shape be recycled?") -- this is the only
+    work that has to happen every frame; `arcs_3` itself
+    can be recycled when wheel bones haven't moved.
+
+    Returns:
+        (pos, tan, hubs, on_arc) -- same layout as
+        `compute_homie_chain`'s return, or
+        (None, None, None, None) on failure.
+    """
+    pads_2d, _ = _place_pads(arcs_3, n_pads,
+                              s_offset=float(s_offset))
+    if not pads_2d:
+        return None, None, None, None
+    is_left = side.lower().startswith('l')
+    side_x  = (-0.5 * gauge_x) if is_left else (+0.5 * gauge_x)
+    N = len(pads_2d)
+    pos     = np.zeros((N, 3), dtype=np.float32)
+    tan     = np.zeros((N, 3), dtype=np.float32)
+    hubs    = np.zeros((N, 3), dtype=np.float32)
+    on_arc  = np.zeros(N, dtype=bool)
+    for i, (xy_pos, xy_tan, hub_or_none) in enumerate(pads_2d):
+        pz, py = xy_pos[0], xy_pos[1]
+        tz, ty = xy_tan[0], xy_tan[1]
+        pos[i] = (side_x, float(py), float(pz))
+        tan[i] = (0.0,    float(ty), float(tz))
+        if hub_or_none is not None:
+            hubs[i] = (side_x,
+                       float(hub_or_none[1]),
+                       float(hub_or_none[0]))
+            on_arc[i] = True
+    # Per Coffee 2026-05-11 ("you can never flip the direction
+    # vector.. that's the you are home signal"): the v1.118.x
+    # tangent-continuity sweep that flipped anti-aligned tan
+    # vectors is REMOVED.  A flip between consecutive pad
+    # tangents is a real signal -- the chain closing back on
+    # itself, or a genuine direction discontinuity -- not a
+    # noise artefact to be masked over.  Downstream code can
+    # detect a flip via `dot(tan[i], tan[i-1]) < 0` and treat
+    # it as the loop's "home" marker.
+    return pos, tan, hubs, on_arc
 
 
 def compute_homie_chain(bones, radii, roles, side, n_pads,
@@ -363,73 +469,18 @@ def compute_homie_chain(bones, radii, roles, side, n_pads,
                       R gets +gauge_x/2.
 
     Returns:
-        (positions, tangents) -- each (n_pads, 3) float32 in
-        chassis-local XYZ, or (None, None) on failure.
+        (positions, tangents, hub_anchors, on_arc) -- the first
+        two are (n_pads, 3) float32 in chassis-local XYZ as
+        before; `hub_anchors` is (n_pads, 3) float32 carrying
+        each arc-pad's wheel hub position (zeros for line
+        pads); `on_arc` is (n_pads,) bool flagging arc pads.
+        Caller uses (hub_anchors, on_arc) to derive a per-pad
+        radial-outward up direction.  Returns
+        (None, None, None, None) on failure.
     """
-    if not bones or not radii or not roles:
-        return None, None
-    if not n_pads or n_pads <= 0 or not seg_len or seg_len <= 0:
-        return None, None
-    wheels = _collect_wheels(bones, radii, roles, side)
-    if len(wheels) < 3:
-        return None, None
-    loop = _order_loop(wheels)
-    if len(loop) < 3:
-        return None, None
-    arcs_1, arc_sum, lin_sum, active = _measure_loop(loop)
-    loop_len_1 = arc_sum + lin_sum
-    xml_target = float(seg_len) * float(n_pads)
-    err = xml_target - loop_len_1
-    _correct_R(loop, arcs_1, active, err)
-    arcs_3, _, _, _ = _measure_loop(loop)
-    pads_2d, _ = _place_pads(arcs_3, n_pads,
-                              s_offset=float(s_offset))
-    if not pads_2d:
-        return None, None
-
-    is_left = side.lower().startswith('l')
-    side_x  = (-0.5 * gauge_x) if is_left else (+0.5 * gauge_x)
-    N = len(pads_2d)
-    pos = np.zeros((N, 3), dtype=np.float32)
-    tan = np.zeros((N, 3), dtype=np.float32)
-    # Z is in the chassis primitives' native frame because
-    # `_collect_wheels` now uses `b[2]` verbatim (no negate),
-    # matching the un-flipped frame the chassis MESH renderer
-    # consumes.  Pads go through `chassis_pose @ pad` in the
-    # SAME convention the renderer transforms primitives in --
-    # no extra flip needed here.
-    for i, ((pz, py), (tz, ty)) in enumerate(pads_2d):
-        pos[i] = (side_x, float(py), float(pz))
-        tan[i] = (0.0,    float(ty), float(tz))
-
-    # Tangent-continuity sweep (Coffee 2026-05-10 "all segs X on
-    # a track side has to face the same way after transform").
-    # Belt-and-suspenders for the degenerate-arc skip in
-    # `_place_pads`: walk the closed loop and force every
-    # adjacent tangent pair to be on the same side of a 90 deg
-    # turn.  Any pad whose tangent has flipped > 90 deg from its
-    # predecessor (= almost certainly a 180 deg sign inversion,
-    # NOT a real bend) gets its tangent negated.  Done in two
-    # forward passes so a flip propagates correctly even when
-    # it spans the chain's wraparound (pad 0 vs pad N-1).
-    if N >= 2:
-        for _ in range(2):
-            for i in range(N):
-                j = (i - 1) % N
-                if float(np.dot(tan[i], tan[j])) < -1e-6:
-                    tan[i] = -tan[i]
-
-    # Per Coffee 2026-05-10 (followup to "run homie in catmull
-    # rom?" -- visible figure-8 at sprockets): CR smoothing
-    # DISABLED.  Chordal CR through pad positions on the wrap
-    # arc cuts a chord through the wheel's interior, putting
-    # ~8 pads INSIDE the sprocket disk instead of along its
-    # circumference (visible as a vertical line of dots through
-    # the sprocket center, perpendicular to the outer wrap
-    # arc).  The raw line+arc homie chain already places pads
-    # exactly on the wheel circumference at every wrap point;
-    # smoothing was producing a worse result, not a better one.
-    # If we ever want to bring it back, we'd need CR-on-the-
-    # arcs-only (preserve straight tangents, smooth only the
-    # corners), which is a different algorithm.
-    return pos, tan
+    arcs_3 = build_chain_segments(bones, radii, roles, side,
+                                    n_pads, seg_len)
+    if arcs_3 is None:
+        return None, None, None, None
+    return assemble_chain_arrays(arcs_3, gauge_x, side,
+                                  n_pads, s_offset)

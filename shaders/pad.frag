@@ -17,6 +17,12 @@ in VS_OUT {
 } vs_in;
 
 uniform vec4 u_color;
+// Per Coffee 2026-05-13 ("move face coloring of the tracks ...
+// to the debug enabled state"): only tint the +X/-X side
+// faces when this is 1.  Default 0 = no debug tint, pad
+// renders in plain u_color.  Set per frame from viewer.py
+// based on `self._debug`.
+uniform int u_show_face_debug;
 
 out vec4 FragColor;
 
@@ -27,16 +33,13 @@ void main() {
     // triangle lies in a constant-X plane.  Detected via the
     // screen-space derivatives of `pad_local_pos.x`; both are
     // zero (to float precision) on a constant-X triangle and
-    // non-zero anywhere X varies across the surface.  Misses
-    // the chamfered side-edges and the top / bottom / leading
-    // / trailing faces -- exactly the behaviour we want for
-    // unambiguously tagging the pin-axis side faces.
+    // non-zero anywhere X varies across the surface.
     float dx = abs(dFdx(vs_in.pad_local_pos.x));
     float dy = abs(dFdy(vs_in.pad_local_pos.x));
     bool on_x_face = (dx + dy) < 1.0e-5;
 
     vec3 base_rgb = u_color.rgb;
-    if (on_x_face) {
+    if (u_show_face_debug == 1 && on_x_face) {
         if (vs_in.pad_local_pos.x >= 0.0) {
             base_rgb = vec3(0.10, 1.00, 0.15);   // +X face: green
         } else {

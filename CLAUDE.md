@@ -11,70 +11,133 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 
 ---
 
-## Where we left off (handoff 2026-05-08, v1.107.0)
+## Where we left off (handoff 2026-05-13, v1.118.117)
 
-**Active investigation: chassis-oscillation diagnostic.**  Coffee
-reported the chassis "oscillates and does not settle" since
-the track NURB overlay was added in 1.105 -- but
-`tank_physics.py` was NOT touched between 1.103 and 1.106, so
-the spline render is the only post-1.103 change.  Hypotheses:
-(1) dt-spike from spline overhead destabilising the explicit-
-Euler integrator, (2) hysteresis-edge wheel chattering,
-(3) integrator error not decaying.  v1.107 ships a manual
-recorder + per-section frame timers to localise the cause:
+**Track chain pipeline is the active workstream.**  Phase C
+(per-pad mesh + instanced render) landed at v1.118.54 and the
+session since has been a sequence of polish + bug-fix passes
+on the runtime chain.
 
-* **F3** is now a manual-record toggle (was 1-Turn).  Press
-  once to start, again to stop and save
-  `test_runs/manual_<tank>_<ts>.json`.  No auto-circle, no
-  time limit, no tank-pose reset.  Drive normally, capture
-  every frame.
-* Per-frame snapshot now exposes `delta_y` (unclamped),
-  `state_changed`, `hyst_dist_to_flip_m` per wheel; integrator
-  error terms `e_pitch_deg / e_roll_deg / e_y_m`,
-  `target_*_with_lean_deg`, `lift_needed_m`; per-section CPU
-  ms in `frame_timers_ms` (`physics_update`, `spline_overlay`,
-  etc.).
-* 1-Turn / Zig-Zag automated tests are unchanged (still on
-  their Tools-group buttons; just no F3 / F4 hotkeys).  All
-  three recorders go through the same
-  `Viewer._build_recorder_frame` helper, so adding fields is
-  a single edit.
+**Current chain pipeline (top-down).**
 
-See `docs/PHYSICS.md` "F3 manual recorder" + `docs/TRACK_PHYSICS.md`
-"Investigation tooling" for the full field list and the
-diagnostic playbook.
+```
+tank_physics.update(terrain, dt)              suspension solve
+  -> last_residual_y[i]                       per road-wheel Y deflection
 
-**Track NURB rendering** (the underlying workstream): Phases
-A + B done in 1.106 -- per-side spline runs every frame,
-deforms with wheel suspension residuals, F8 toggles the
-line-strip overlay, LEFT / RIGHT arrows inject manual test
-deflections (BACKSPACE resets).  Topology audited (no Z-flip
-needed).  See `docs/TRACK_PHYSICS.md` "Status snapshot at
-handoff" + "Next session pickup".
+_track_current_bone_positions(tp)             viewer.py
+  bones = bind-pose.copy()
+  for each wheel bone:
+      bones[name].Y         += last_residual_y[i]
+      bones[alt_name].Y     += last_residual_y[i]    # bare <-> _BlendBone pair
+      both forms must move together or homie reads the
+      stale bind position.  v1.118.117 fix.
 
-**Top of next session's todo: drive a tank around with F3
-recording on, analyse the resulting JSON to localise the
-oscillation cause.**  Once root cause is identified, fix it
-and move on to **Phase C -- per-pad mesh + instance render**
-to replace the line-strip with actual track segment geometry.
-Discovery starts at the gameplay XML's
-`<chassis>...<tracks><trackPair>` block; pad meshes likely live at
-`vehicles/<n>/<tank>/normal/lod0/Track*.primitives_processed`.
-Use `cust_tools/analyze_track_spline.py <tank>` to verify the
-binding still works on whatever tank you start with.
+_compute_homie_chain_for_frame(tp)            viewer.py
+  bones = deflected hubs
+  track_homie.compute_homie_chain(...)
+  Z-flip to renderer +Z-forward
+  Central-chord tangent rebuild  (Delta/2 per-pad rotation)
+  -- sag / PBD / central-chord-redo currently gated off
+     ("virgin homie", v1.118.109)
 
-Also pending Phase A2 generalisation: binding has only been
-validated on T30; need a sweep across one tank from each major
-nation (T110E4, Object 268, Maus, AMX 50B, plus the WD-only
-Hotchkiss EBR edge case) before declaring it tank-agnostic.
+_render_track_pad_body(...)                   viewer.py
+  build_oriented_transforms(pos, tan)
+  + segmentOffset hinge-pin shift
+  + terrain floor clamp per pad
+  + instanced draw via shaders/pad.{vert,frag}
+```
 
-Recent tank-physics work (v1.100.0 -> 1.107.0): two-pose
-solver/render split + inertia damping, per-tank yaw cap from
-`<rotationSpeed>` XML, 1-Turn / Zig-Zag automated test
-recordings to `test_runs/`, C-key 3rd-press crash fixed,
-F3 manual recorder + per-section frame timers (1.107).  See
-`docs/PHYSICS.md` and `CHANGELOG.md` for details -- those
-landed cleanly and are stable.
+`F8` toggles pad visibility.  `F9` toggles the PBD chain solver
+(`tankExporterPy/track_chain_pbd.py`) -- a constraint relaxer
+(distance + bending + skip-K + unilateral wheel push-out, NO
+attractors, NO gravity bias as of v1.118.108).  `F10` ortho
+LEFT-side view tracking the rear-drive sprocket.  `F1` shows
+a keybinding popup.  `ALT+LMB-drag` = rect screenshot ->
+Windows clipboard.
+
+**Pose + emitter carry-over across tank loads (v1.118.100+).**
+At `load_vehicle`, the OUTGOING tank's solver pose + render-pose
+integrator state are snapshotted BEFORE `from_chassis_meshes`
+and restored onto the new instance AFTER, so the new tank
+spawns at the previous tank's location / heading.  Smoke
+emitters are then transformed once through the restored
+chassis_matrix at end-of-load so frame 0 has them at the
+correct world spot (no plume-pop on swap).  Single bug
+recently squashed in the bind_pos snapshot block at
+viewer.py:12523 -- it was overwriting the lazy snapshot with
+already-transformed values (v1.118.100).
+
+**Wheel rotations + differential drive (v1.118.112+).**  Each
+road wheel + drive sprocket + idler + return roller now spins
+about its own hub in the side-view YZ plane.  Per-wheel angle
+accumulator in `TankPhysics.wheel_angles_rad` and
+`extra_rotating_angles_rad`; `bone_matrix_array` composes
+`T(hub + (0, ry, 0)) . Rx(theta) . T(-hub)` into the skin
+matrix.  Per-frame angle delta = `-(v_track / (R +
+track_thickness)) * dt`.  Differential speeds:
+```
+v_L = v_fwd - omega * b
+v_R = v_fwd + omega * b
+if v_L * v_R > 0:           same-sign tracks (wide turn)
+    omega -> omega / 2      halve the differential
+```
+Pivot turn (v_L * v_R < 0): full differential, opposite signs,
+matches neutral steer.
+
+Two frame-conversion subtleties recently caught:
+* Mesh vertices are in BigWorld native frame
+  (`flip_z = not has_bones` -> False for skinned chassis),
+  but `parse_chassis_bone_world_positions` returns Z with the
+  **opposite** sign.  Road-wheel hubs come from mesh-vertex
+  means so they already match; EXTRA rotating wheels
+  (sprocket / idler / roller) are pulled from the visual
+  walk and must have Z negated before being passed to
+  `set_extra_rotating_wheels`.  Without this the wheel mesh
+  orbits chassis origin instead of spinning in place
+  (v1.118.115).
+* L/R differential signs likewise had the swap that put inner
+  / outer on the wrong sides for the same reason (v1.118.116).
+
+**Bone-weight normalisation in skinning shader (v1.118.106).**
+BigWorld byte-weights can sum to < 255 due to round-down.  The
+old shader fed the un-normalised weighted sum straight into
+`world = model * skin * pos`, scaling X by `Σwᵢ` and
+producing visible X-shift on ~240 of G78's 3046 ribbon verts.
+`shaders/mesh.vert` now divides `skin` by `(ww.x + ww.y +
+ww.z + ww.w)` before applying to position -- vertex data
+untouched, round-trip safe.
+
+**Debug visuals gated (v1.118.111).**  Pad-mesh face-tint
+(`shaders/pad.frag u_show_face_debug`) and the magenta pin-
+axis lines both render only when the master Debug checkbox is
+on.  Production view is clean of the +X/-X red/green tint.
+
+**Open items / known issues.**
+
+* Chassis-oscillation diagnostic (v1.107) is parked.  The track-
+  physics rewrite removed the per-frame NURB-spline overhead
+  (one of the suspected causes) but no fresh F3 recording has
+  been logged on 1.118.x to verify.
+* PBD chain solver is gutted -- gravity bias removed,
+  attractors removed.  Reactivating any of it requires
+  flipping the `if False:` guards in viewer.py
+  `_compute_homie_chain_for_frame` and the corresponding
+  branches in `track_chain_pbd.step()`.
+* Sag bias from `physicalTracks.springsLength` is gated off;
+  the `track_spring_bottom` value is still parsed but never
+  applied.
+* Cross-tank validation: tested heavily on G78_Panther_M10
+  and Tiger.  Sweep across T110E4, IS-7 / Object 268, Maus /
+  E100, AMX 50B, Hotchkiss EBR before declaring the
+  homie chain tank-agnostic.
+* PBD-stage explanatory slideshow at
+  `math_images/pbd_slideshow.html` -- 10 self-contained PNGs
+  walking through the (now-disabled) PBD step on G78's drive
+  sprocket.  Reference material if the PBD ever comes back.
+
+See `CHANGELOG.md` 2026-05-13 entry and `docs/TRACK_PHYSICS.md`
+"Status snapshot at handoff" for the full per-version
+breakdown.
 
 ---
 
