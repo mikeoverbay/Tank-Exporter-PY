@@ -34,8 +34,11 @@ from OpenGL.GL import (
     glEnableVertexAttribArray, glVertexAttribPointer,
     glVertexAttribDivisor, glBindVertexArray,
     glDrawElementsInstanced, glDeleteBuffers,
+    glActiveTexture, glBindTexture,
     GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW,
     GL_FLOAT, GL_FALSE, GL_TRIANGLES, GL_UNSIGNED_INT,
+    GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3,
+    GL_TEXTURE_2D,
 )
 
 from .loaders import (
@@ -205,13 +208,17 @@ class TrackPadRenderer:
         of the source pad mesh.
 
         Args:
-            shader      : `PadShader` instance.
+            shader      : `PadShader` instance.  Caller has already
+                          bound the global per-frame PBR state
+                          (light_pos, view_pos, IBL textures,
+                          sliders) -- see
+                          `Viewer._render_track_pad_body`.
             chassis_pose: 4x4 row-major float32 matrix -- the
                           tank's render-pose `chassis_matrix()`.
             view        : 4x4 view matrix.
             projection  : 4x4 projection matrix.
-            color       : (r, g, b, a) flat tint until the
-                          textured shader lands.
+            color       : kept for backwards-compat signature, no
+                          longer consumed by the PBR pad shader.
         """
         if not self.live_instances:
             return
@@ -221,7 +228,45 @@ class TrackPadRenderer:
         shader.set_mat4('u_chassis_pose', chassis_pose)
         shader.set_mat4('u_view',         view)
         shader.set_mat4('u_proj',         projection)
+        # Backwards-compat: original flat-color shader read u_color.
+        # The PBR shader no longer uses it; the call is a silent
+        # no-op when the uniform is optimised out of the program.
         shader.set_vec4('u_color', *color)
+
+        # ---- Per-mesh material textures (units 0/1/2/3) --------------
+        # Pads' diffuse / normal / AO / GMM tex IDs are loaded once
+        # at chassis load by track_pads.py's PadVisualLoader (around
+        # line 616-649); this is the per-frame bind site.  Each
+        # call rebinds the unit -> tex association so the shader
+        # picks up THIS pad mesh's textures rather than whatever
+        # the previous instanced draw left on the unit.  Lines
+        # match mesh.py:299's per-mesh bind dance exactly so the
+        # behaviour is consistent across the main mesh pass and
+        # the instanced pad pass.
+        mesh = self.mesh
+        if mesh.diffuse_tex_id:
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, mesh.diffuse_tex_id)
+            shader.set_int('diffuse_map', 0)
+        if mesh.normal_tex_id:
+            glActiveTexture(GL_TEXTURE1)
+            glBindTexture(GL_TEXTURE_2D, mesh.normal_tex_id)
+            shader.set_int('normal_map', 1)
+        if getattr(mesh, 'ao_tex_id', None):
+            glActiveTexture(GL_TEXTURE2)
+            glBindTexture(GL_TEXTURE_2D, mesh.ao_tex_id)
+            shader.set_int('ao_map', 2)
+            shader.set_int('has_ao_map', 1)
+        else:
+            shader.set_int('has_ao_map', 0)
+        if getattr(mesh, 'gmm_tex_id', None):
+            glActiveTexture(GL_TEXTURE3)
+            glBindTexture(GL_TEXTURE_2D, mesh.gmm_tex_id)
+            shader.set_int('gmm_map', 3)
+            shader.set_int('has_gmm_map', 1)
+        else:
+            shader.set_int('has_gmm_map', 0)
+
         glBindVertexArray(self.mesh.vao)
         glDrawElementsInstanced(
             GL_TRIANGLES, self.mesh.index_count,

@@ -117,6 +117,21 @@ GRID_DEFS = {
         note='light-bg vertical flame columns (32 frames @ 128px)',
     ),
 
+    # ---- GUN-TRAIL SMOKE ---------------------------------------------------
+
+    # Faint trail-smoke flipbook for the per-projectile trail effect.
+    # Coffee 2026-05-13: "try the atlas texture at coords 5 12 x 5 12.
+    # there are 4 columns of 2 rows.. 8 images".  Best guess: 128x128
+    # frames in a 4x2 grid starting at atlas (512, 512), region
+    # (512, 512, 1024, 768).  Adjust rect / frame_size if the
+    # extracted PNGs look off-frame -- this is the first-pass
+    # placement based on the spec.
+    'gun_trail': dict(
+        rect=(512, 512, 1024, 768),
+        cols=4, rows=2, frame_size=128,
+        note='gun-fire trail smoke (8 frames @ 128px, 4x2 grid)',
+    ),
+
     # ---- SMOKE GRIDS -------------------------------------------------------
 
     # White / pale smoke cloud grid -- generic smoke, reads well
@@ -168,8 +183,9 @@ DEFAULT_RUNTIME_PICK = 'fire_BIG'
 # even on a fresh clone where the WoT artwork was never shipped to
 # git.  The grid names map back into `GRID_DEFS` above.
 RUNTIME_TARGETS = {
-    'fire':  'fire_BIG',
-    'smoke': 'smoke_white',
+    'fire':       'fire_BIG',
+    'smoke':      'smoke_white',
+    'gun_trail':  'gun_trail',
 }
 
 

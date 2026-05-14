@@ -30,6 +30,7 @@ import pygame
 from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTTONUP,
                             MOUSEMOTION, MOUSEWHEEL, OPENGL, QUIT, RESIZABLE,
                             VIDEORESIZE, K_ESCAPE, K_n, K_r, K_w, K_h, K_c, K_o,
+                            K_SPACE,
                             K_a, K_d, K_s, K_F2, K_F3, K_F4, K_F8, K_F9,
                             K_F10,
                             K_LEFT, K_RIGHT, K_BACKSPACE,
@@ -49,6 +50,30 @@ from .terrain  import Terrain
 from .particles import FlipbookTexture, ParticleSystem, AnimatedBillboard
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 from .localization import _
+
+
+# ---------------------------------------------------------------------------
+# Track / homie physics console verbosity gate.
+#
+# Per Coffee 2026-05-14 ("stop dumping physics info from the tracks to
+# the output for now"): silence the periodic per-second [track-bones]
+# print + the one-shot-per-tank-load [homie] / [homie-physics] /
+# [homie-diag] / [track-sag] / [rotation] / "chassis params from XML"
+# lines while we work on the gun / particle systems.  Flip back to
+# True to recover the full diagnostic stream.
+# ---------------------------------------------------------------------------
+TRACK_PHYSICS_VERBOSE = False
+
+
+# ---------------------------------------------------------------------------
+# Per Coffee 2026-05-14: master switch for on-disk debug output --
+# screenshots, particle / emit-pos dumps, fire_log.txt.  Default OFF
+# (= shipping state) so a fresh checkout doesn't write debug files.
+# Flip to True to recover the full debug stream (each fire then
+# writes its full per-shot artefacts under `<project>/debug_screens/`).
+# In-app console logs are unaffected either way.
+# ---------------------------------------------------------------------------
+DEBUG_FILE_DUMPS = False
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +463,18 @@ class Viewer:
         self._active_set.scene_bbox = value
 
     def __init__(self, filepath=None, cfg=None):
+        # Per Coffee 2026-05-14 ("add code to flush the files in our
+        # debug_screen folder before running debug code.  Its too
+        # much to sort through.  If there is a risk of ever writing
+        # out side this in the process, no way"): wipe stale debug
+        # output at startup so each run's screenshots / .txt dumps
+        # / fire_log stand alone.  Implementation is paranoid --
+        # path is double-validated and only .png / .txt files are
+        # removed (see `_flush_debug_screens_dir` docstring).
+        # Run very early so debug code later in __init__ writes
+        # into a clean folder.
+        self._flush_debug_screens_dir()
+
         # Two-set storage (must be created BEFORE any property setter
         # below fires -- self.meshes = [] / self.source_type = None /
         # etc. all route through the active set's attribute).
@@ -641,6 +678,128 @@ class Viewer:
         # to keep around even when off.
         self.normals_shader  = NormalsShader()
 
+        # Gun recoil state -- standalone module per the 1.119.0
+        # lock on tank_physics.py.  Triggered by SPACE in
+        # handle_input; ticked every frame next to TankPhysics.update;
+        # consumed by `_upload_skinning` when the mesh's component
+        # is 'gun'.  See gun_recoil.py for the state machine.
+        from .gun_recoil import GunRecoil as _GunRecoil
+        self.gun_recoil = _GunRecoil()
+
+        # Shot pool -- up to 50 simultaneous in-flight muzzle effects
+        # per Coffee 2026-05-13 ("I want up to 50 shots in a row.
+        # build the array... every frame we will revisit each
+        # rounds progess.  Stop there and verify its usefulness").
+        # Per-slot lifetime carries the muzzle flash (0.2s), smoke
+        # puff (1.5s), and decay-light (0.15s).  Render wiring is
+        # deliberately deferred -- this object only holds state.
+        # See shot_pool.py.  Tick once per frame via
+        # `self.shots.update(dt)`; arm with `self.shots.fire(pos, fwd)`.
+        from .shot_pool import ShotPool as _ShotPool
+        self.shots = _ShotPool(capacity=50)
+
+        # Impact pool -- parallel to ShotPool, captures hit-side data
+        # (world pos + incoming direction + surface normal) for
+        # future ground effects (decals, scorch, dust ejecta).  Per
+        # Coffee 2026-05-13 ("on impact with an object, we want to
+        # copying their location data and impact angle for future
+        # ground effects ... they are not linked by index.. they are
+        # only a pool of effect triggers").  Same capacity as the
+        # shot pool but independent -- one shot may produce 0, 1,
+        # or N impacts, so index-linking is not useful.  See
+        # impact_pool.py.
+        from .impact_pool import ImpactPool as _ImpactPool
+        self.impacts = _ImpactPool(capacity=50)
+
+        # Turret-yaw + gun-pitch aim state.  Per Coffee 2026-05-13
+        # ("add turret rotation and gun elevation to the mouse
+        # controls for panning while mouse up").  Both angles are in
+        # CHASSIS-LOCAL degrees -- turret yaw about +Y, gun pitch
+        # about +X.  Limits come from the gun XML's `<pitchLimits>` +
+        # `<turretYawLimits>`, parsed in `_capture_aim_pivots`.
+        self._turret_yaw_deg     =  0.0
+        self._gun_pitch_deg      =  0.0
+        # Per Coffee 2026-05-13 ("please obey travel speed limits"):
+        # the mouse sets a TARGET angle (clamped by hard-limits); a
+        # per-frame integrator moves the ACTUAL angle toward the
+        # target at the XML-defined max-rate (`turret.rotationSpeed`,
+        # `gun.rotationSpeed` -- both in degrees per second).  This
+        # gives the realistic "turret lag" feel rather than letting
+        # a fast mouse-flick teleport the turret.
+        self._target_turret_yaw_deg = 0.0
+        self._target_gun_pitch_deg  = 0.0
+        self._aim_turret_yaw_rate_dps = 60.0   # default; overridden by XML
+        self._aim_gun_pitch_rate_dps  = 45.0   # default; overridden by XML
+        self._aim_yaw_min_deg    = -180.0   # 360 default for hull-traverse turrets
+        self._aim_yaw_max_deg    =  180.0
+        self._aim_pitch_min_deg  = -15.0    # depression default
+        self._aim_pitch_max_deg  =  25.0    # elevation default
+        # Pivot caches -- chassis-local (x,y,z) of the turret rotation
+        # centre and the gun-pitch joint.  Populated from the first
+        # turret/gun mesh's bind_model_matrix translation at load
+        # time.  None means aim is disabled (no tank loaded yet, or
+        # the model has no turret/gun component).
+        self._turret_pivot_chassis = None
+        self._gun_pivot_chassis    = None
+        # HP_gunFire muzzle list + round-robin cursor (re-populated
+        # per tank load in load_vehicle; defaulted here so any pre-
+        # load access doesn't AttributeError).
+        self._gun_muzzles_local_gl = []
+        self._gun_muzzle_next_idx  = 0
+        # Mouse aim mouse-sensitivity in degrees per pixel.
+        self._aim_yaw_per_px   = 0.20
+        self._aim_pitch_per_px = 0.15
+        # Aim ray length (m) -- visible debug line from gun muzzle
+        # straight through the gun's forward axis to this distance.
+        self._aim_ray_length_m = 1500.0
+        # Dedicated line renderer for the aim ray.  Single segment
+        # rebuilt every frame from current yaw/pitch state.
+        self.aim_ray_lines = LineBatch(line_width=1.5)
+        # Blue marker sphere drawn at the ray-terrain hit point per
+        # Coffee 2026-05-13 ("draw a blue ball at intersections to
+        # test").  Captured by `_drive_aim_from_aim_state`; rendered
+        # near the aim-ray draw site.  None means "no hit this frame
+        # OR no tank loaded yet" -- render path no-ops.
+        self.aim_hit_sphere   = Sphere(radius=0.30, sectors=18,
+                                       stacks=12,
+                                       color=(0.20, 0.50, 1.00))
+        self._aim_hit_world   = None
+        # Per Coffee 2026-05-13 ("fire red spheres at the terrain"):
+        # bright red 0.15m projectile sphere, re-used for every
+        # active shot in the pool.  Drawn at each shot's `cur_pos`
+        # while `projectile_alive` is True; ALSO drawn briefly at
+        # `impact_pos` for ~0.3s after impact so the user sees the
+        # round stop where it hit.
+        self.shot_sphere      = Sphere(radius=0.15, sectors=14,
+                                       stacks=10,
+                                       color=(1.00, 0.10, 0.10))
+        # Per Coffee 2026-05-13 ("block turret rotation so we can
+        # debug aiming"): when True, `_drive_aim_from_aim_state`
+        # only writes the gun pitch target -- turret yaw is left
+        # at its current value (effectively frozen at 0 unless
+        # something else nudges it).  Flip back to False to
+        # re-enable auto-track yaw once gun-pitch aim is dialled in.
+        self._aim_yaw_locked  = False
+        # Independent aim direction state per Coffee 2026-05-13
+        # ("we aim and the ball is placed where we aim").  Mouse
+        # motion writes these (chassis-local angles); camera orbit
+        # via RMB-drag is separate and doesn't touch them.  The
+        # per-frame `_drive_aim_from_aim_state` builds a world ray
+        # from gun-pivot along the (chassis-frame -> world) aim
+        # direction, hits the terrain, places the blue ball, and
+        # sets the gun pitch target accordingly.
+        #   aim_yaw_chassis_deg   : 0 = barrel forward (-Z chassis)
+        #                            +ve = barrel right (matches
+        #                            mouse-right after the sign flip)
+        #   aim_pitch_chassis_deg : 0 = level, +ve = barrel up
+        self._aim_yaw_chassis_deg   = 0.0
+        self._aim_pitch_chassis_deg = 0.0
+        # Mouse-aim sensitivity in degrees per pixel of motion.
+        # Half the previous values (the user reported "mouse is too
+        # fast"); refine later.
+        self._aim_mouse_yaw_per_px   = 0.05
+        self._aim_mouse_pitch_per_px = 0.04
+
         # Camera and scene helpers
         # Camera reports the visible 3D viewport size, which excludes both
         # the left info panel and the right tree panel.  Initialised with
@@ -651,6 +810,11 @@ class Viewer:
         self.camera.width  = max(1, self.width
                                   - self.INFO_PANEL_W - self.TREE_PANEL_W)
         self.camera.height = self.height
+        # Per Coffee 2026-05-14 ("move camera to z 8.0 and y to 5.0
+        # x 0.0 at start up and r key reset view"): apply that
+        # canonical view immediately.  Same helper is called by the
+        # R-key reset handler so the two paths can't drift apart.
+        self._apply_default_camera_view()
 
         self.grid         = Grid(cell_size=0.25, grid_cells=50)
         self.axes         = Axes(scale=5.0)
@@ -1071,6 +1235,134 @@ class Viewer:
                 self.smoke_particles.fade_start_frame)
             self.fire_smoke_particles.fade_end_frame = (
                 self.smoke_particles.fade_end_frame)
+
+            # Per-projectile trail smoke -- gun-fire trail flipbook
+            # extracted at atlas (512, 512) 4x2 = 8 frames.  Per
+            # Coffee 2026-05-14 ("each particle has its own emitter
+            # pool.  make it 600 to start.  dont use a common shared
+            # pool"): one ParticleSystem PER SHOT SLOT (50), each
+            # with a private 600-particle pool.  No cross-shot
+            # accumulator or round-robin interference.
+            #
+            # Parallel-array layout: `self.shot_trail_systems[i]` is
+            # the trail-smoke ParticleSystem for `self.shots.shots[i]`.
+            # When a slot fires, only its corresponding system is
+            # touched (emitter set, particles spawned).
+            self.shot_trail_systems = []
+            self.shot_trail_flipbook = None
+            try:
+                gt_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources', 'gun_trail')
+                if os.path.isdir(gt_dir):
+                    self.shot_trail_flipbook = FlipbookTexture(gt_dir)
+                    n_frames = float(
+                        self.shot_trail_flipbook.frame_count)
+                    pool_size = 50   # matches ShotPool capacity
+                    # Per Coffee 2026-05-14 ("we stop following the
+                    # bullet"): bumped budget from 600 -> 3000 so the
+                    # trail covers the full engagement distance.  At
+                    # `spawn_per_meter = 15` (~7 cm spacing), 3000
+                    # particles draws a ~200 m visual trail = ~4 km
+                    # at the 20x slowdown.  Beyond typical test
+                    # engagements; trim if memory becomes an issue
+                    # (50 systems * 3000 * 9*4 bytes ~= 5 MB total).
+                    per_pool_particles = 3000
+                    for _ in range(pool_size):
+                        # one_shot_pool=True: per-projectile system
+                        # follows the rules in particles.py
+                        # ParticleSystem.__init__ -- max_particles is
+                        # the SOLE per-shot budget; dead slots are
+                        # never reused; particles die at alpha-zero.
+                        ps = ParticleSystem(
+                            self.shot_trail_flipbook,
+                            max_particles=per_pool_particles,
+                            one_shot_pool=True)
+                        # Hardcoded trail tunables (no slider mirror).
+                        # Distance-based emission (spawn_per_meter > 0)
+                        # makes density a function of bullet travel,
+                        # not of dt -- so the trail follows the round
+                        # at any speed.  spawn_rate is ignored when
+                        # spawn_per_meter > 0 + emitter has prev_pos.
+                        # Per Coffee 2026-05-14 ("reduce emitter
+                        # count per m to 5"): 5 particles/m at the
+                        # default 75 m/s visual bullet speed gives
+                        # 375 spawns/s -- enough to read as a tight
+                        # streak without piling up overdraw.  At
+                        # 20 cm spacing the 0.25 m start_size still
+                        # overlaps slightly so the trail reads as a
+                        # continuous line.
+                        ps.spawn_per_meter  = 5.0
+                        ps.spawn_rate       = 2000.0  # fallback, not used here
+                        ps.start_size       = 0.25
+                        ps.end_size         = 0.75
+                        ps.speed            = 0.0
+                        ps.drag             = 0.0
+                        # `lifetime` is RE-SET in `_fire_round` based
+                        # on the shot's gun -> sight distance (the
+                        # "needed fade factor" -- see _fire_round
+                        # for the dist/velocity math).  Default
+                        # here is a sane fallback if a shot fires
+                        # before that override runs.
+                        ps.lifetime         = 2.5
+                        # Per Coffee 2026-05-14 ("my tracer looks
+                        # like a comet.  the fading"): fade starts
+                        # at frame 0 (= particle birth) and ends at
+                        # frame N (= particle death) so every
+                        # particle is on a smooth alpha gradient.
+                        # The bullet end (youngest particles) sits
+                        # at full alpha; the gun end (oldest) is
+                        # nearly transparent.  This replaces the
+                        # earlier "full alpha for 60%, fade over
+                        # the last 40%" curve that produced a
+                        # long bright streak with only the tail
+                        # dimming -- the comet look the user
+                        # called out.
+                        ps.fade_start_frame = 0.0
+                        ps.fade_end_frame   = n_frames
+                        # Per Coffee 2026-05-14 ("its aging alpha
+                        # backwards"): no fade-in for tracer
+                        # particles.  Real tracers are BRIGHTEST
+                        # at the bullet (= just-born particles)
+                        # and dim with age as the burn cools, so
+                        # the legacy smoke-style fade-in (alpha
+                        # ramps up from 0 over the first 5 frames)
+                        # inverts the look.  Zero = particle is at
+                        # full alpha from birth, then ONLY the
+                        # fade_start -> fade_end ramp applies.
+                        ps.fade_in_frames   = 0.0
+                        # Per Coffee 2026-05-14 ("make sure we are
+                        # billboarding the particles and also
+                        # randomizing rotation at start"): random
+                        # screen-plane rotation per spawned
+                        # particle, in the [0, 2pi) range, held
+                        # constant for the particle's lifetime.
+                        # Breaks up the "every billboard is the
+                        # same sprite" giveaway in the rendered
+                        # trail.  Earlier blamed for the "echo"
+                        # effect; the real cause turned out to be
+                        # fade math + position jitter, so safe to
+                        # re-enable now.  Billboarding itself is
+                        # done in particle.vert via cam_right /
+                        # cam_up axes regardless of this setting.
+                        ps.rotation_jitter  = float(2.0 * math.pi)
+                        # Per Coffee 2026-05-14 (same "echo" issue):
+                        # the default 2 cm position jitter widens
+                        # the trail into a band; when adjacent
+                        # frames' particles jitter into perpendicular
+                        # offsets they read as parallel strands.
+                        # Pin to zero so every particle lands exactly
+                        # on the lerp path point.
+                        ps.pos_jitter       = 0.0
+                        self.shot_trail_systems.append(ps)
+            except Exception as _exc_gt:
+                print(f"[viewer] gun-trail smoke disabled: "
+                      f"{_exc_gt}")
+                self.shot_trail_systems = []
+            # Back-compat sentinel; the old single-pool reference is
+            # kept None so any stale render-path checks fall through
+            # to the new per-shot systems below.
+            self.shot_trail_smoke = None
         except Exception as exc:
             print(f"[viewer] Smoke particles disabled: {exc}")
             self.particle_shader = None
@@ -1536,6 +1828,13 @@ class Viewer:
         # Slider / checkbox widget references (set by _build_ui)
         self._metal_slider       = None
         self._shine_slider       = None
+        # Mouse sensitivity slider per Coffee 2026-05-13 ("put mouse
+        # speed up 80% + add a slider in the UI settings panel to
+        # control it").  Value is a MULTIPLIER applied to the base
+        # per-pixel sensitivities (camera orbit + mouse aim).  1.0
+        # = unchanged base; default 1.8 = +80%.  Built in
+        # `_build_ui_left_panel` alongside Light / Ambient.
+        self._mouse_sens_slider  = None
         self._smoke_start_slider    = None
         self._smoke_end_slider      = None
         self._smoke_speed_slider    = None
@@ -2053,6 +2352,9 @@ class Viewer:
             self._cfg['light_value']    = float(self._metal_slider.value)
         if self._shine_slider:
             self._cfg['ambient_value']  = float(self._shine_slider.value)
+        if self._mouse_sens_slider:
+            self._cfg['mouse_aim_sens'] = float(
+                self._mouse_sens_slider.value)
         if self._normals_slider:
             self._cfg['normals_length'] = float(self._normals_slider.value)
 
@@ -2381,12 +2683,23 @@ class Viewer:
         # is whatever L_TRACK_W is set to in `_layout_widgets`.
         light_init   = float(self._cfg.get('light_value',   0.10))
         ambient_init = float(self._cfg.get('ambient_value', 0.50))
+        # Default 1.8 = the +80% bump Coffee asked for on top of the
+        # base 0.05 deg/px (camera) and 0.05/0.04 deg/px (mouse-aim).
+        mouse_sens_init = float(self._cfg.get('mouse_aim_sens', 1.8))
         self._metal_slider = self.ui.add_slider(_('Light'),   tx, cy1, tw,
                                                 value=light_init,   value_max=0.25,
                                                 group_id='lighting')
         self._shine_slider = self.ui.add_slider(_('Ambient'), tx, cy2, tw,
                                                 value=ambient_init, value_max=1.0,
                                                 group_id='lighting')
+        # Mouse sensitivity multiplier (camera orbit + mouse aim).
+        # cy2 placeholder -- final on-screen position is set in
+        # `_layout_widgets` to the row below Ambient.  Range 0.1..3.0;
+        # 1.0 = base sensitivity, 1.8 = +80% (default).
+        self._mouse_sens_slider = self.ui.add_slider(
+            _('Mouse'), tx, cy2, tw,
+            value=mouse_sens_init, value_max=3.0,
+            group_id='lighting')
 
         # Smoke particle tunables (drive the smoke ParticleSystem each
         # frame).  Initial slider values come from the per-group
@@ -3111,6 +3424,264 @@ class Viewer:
         ui._draw_quad(x + w - T, y,          T, h)  # right
         glBindVertexArray(0)
 
+    def _apply_default_camera_view(self):
+        """Snap the orbit camera to world position (0, 5, 8) looking
+        at the origin.  Used by `__init__` and the R-key reset so
+        startup and reset both land on the same view (Coffee
+        2026-05-14 "move camera to z 8.0 and y to 5.0 x 0.0 at
+        start up and r key reset view").
+
+        Camera world pos derives from orbit (yaw, pitch, distance)
+        about `center` via:
+            x = center.x + distance * cos(pitch) * sin(yaw)
+            y = center.y + distance * sin(pitch)
+            z = center.z + distance * cos(pitch) * cos(yaw)
+        For target world (0, 5, 8) about center (0, 0, 0):
+            yaw      = 0                        (=> x = 0)
+            distance = sqrt(5*5 + 8*8)
+            pitch    = atan2(5, 8)              (in degrees)
+        """
+        self.camera.center   = np.array(
+            [0.0, 0.0, 0.0], dtype=np.float32)
+        self.camera.yaw      = 0.0
+        self.camera.pitch    = math.degrees(math.atan2(5.0, 8.0))
+        self.camera.distance = math.sqrt(5.0 * 5.0 + 8.0 * 8.0)
+
+    def _flush_debug_screens_dir(self):
+        """Empty the project's debug_screens/ folder of stale debug
+        output so each app launch starts with a clean slate.
+
+        Per Coffee 2026-05-14 ("if there is a risk of ever writing
+        out side this in the process, no way"): SAFETY-FIRST
+        implementation -- multiple guards ensure we can only ever
+        delete files INSIDE the exact `<project>/debug_screens/`
+        directory.
+
+        Specifically:
+          1. Path is resolved via `os.path.realpath` on both the
+             target dir and the project root, neutralising any
+             symlinks or `..` segments.
+          2. Verifies the resolved target sits strictly UNDER the
+             project root AND its leaf basename is literally
+             `debug_screens`.  Either check failing aborts.
+          3. Only removes regular files (not directories, not
+             symlinks) -- `os.path.isfile` follows neither.
+          4. Whitelist of file extensions we ourselves write:
+             `.png` (screenshots) and `.txt` (dumps + fire_log).
+             Anything else in the folder is left untouched.
+
+        Silent on failure -- a permission error or missing folder
+        is not a reason to crash the viewer at startup.
+        """
+        try:
+            project_root = os.path.realpath(
+                os.path.dirname(os.path.dirname(__file__)))
+            target = os.path.realpath(
+                os.path.join(project_root, 'debug_screens'))
+            # Guard 1: target must sit STRICTLY under project root.
+            if not (target == os.path.join(project_root,
+                                            'debug_screens')
+                    or target.startswith(
+                        project_root + os.sep + 'debug_screens')):
+                return
+            # Guard 2: basename must be exactly `debug_screens`.
+            if os.path.basename(target) != 'debug_screens':
+                return
+            # Guard 3: must already exist (no-op if first launch).
+            if not os.path.isdir(target):
+                return
+            allowed_exts = ('.png', '.txt')
+            removed = 0
+            for name in os.listdir(target):
+                path = os.path.join(target, name)
+                # Skip subdirectories and symlinks -- isfile()
+                # returns False for both (it follows links but a
+                # broken/missing target also returns False).
+                if not os.path.isfile(path):
+                    continue
+                if os.path.islink(path):
+                    continue
+                # Extension whitelist -- only the debug files we
+                # produce.  Anything unfamiliar stays.
+                if not name.lower().endswith(allowed_exts):
+                    continue
+                try:
+                    os.remove(path)
+                    removed += 1
+                except Exception:
+                    pass
+            if removed:
+                try:
+                    print(f"[debug] flushed {removed} file(s) "
+                          f"from {target}")
+                except Exception:
+                    pass
+        except Exception:
+            # Last-resort guard: a failure here must NEVER crash
+            # the viewer.  Silently fall through.
+            pass
+
+    def _dump_impact_particle_files(self, ps, slot_idx, alive_n,
+                                      spawned):
+        """Write the at-impact per-particle .txt dumps for slot
+        `slot_idx`.  Two files:
+
+          * `<ts>_particles_slot<N>.txt`  -- per-slot (idx, age,
+            alive, x, y, z) plus a monotonic-age verification pass.
+          * `<ts>_emit_pos_slot<N>.txt`   -- per-slot emitter pos
+            at spawn time (= bullet's cur_pos that frame).
+
+        Both write into `<project>/debug_screens/`.  Skipped entirely
+        when `DEBUG_FILE_DUMPS` is False (Coffee 2026-05-14 "for
+        now, stop sending debug files out").  The in-app
+        `impact slot N: ...` log line is emitted by the caller
+        regardless of this flag, so the live console signal
+        survives even with disk output off.
+        """
+        if not DEBUG_FILE_DUMPS:
+            return
+        try:
+            import time as _ttxt
+            out_dir = os.path.join(
+                os.path.dirname(
+                    os.path.dirname(__file__)),
+                'debug_screens')
+            os.makedirs(out_dir, exist_ok=True)
+            ts = _ttxt.strftime('%Y%m%d_%H%M%S')
+            txt_path = os.path.join(
+                out_dir,
+                f'{ts}_particles_slot{slot_idx}.txt')
+            with open(txt_path, 'w', encoding='utf-8') as _fh:
+                _fh.write(
+                    f"# slot {slot_idx} impact dump\n"
+                    f"# spawned={spawned}  "
+                    f"alive={alive_n}  "
+                    f"cap={ps.max}  "
+                    f"alpha_zero={ps._alpha_zero_time():.3f}s\n"
+                    f"# idx   age      alive   "
+                    f"pos_x      pos_y      pos_z\n")
+                n_dump = min(int(ps._next_slot), len(ps.alive))
+                for i in range(n_dump):
+                    _fh.write(
+                        f"{i:5d}  "
+                        f"{float(ps.age[i]):7.4f}s  "
+                        f"{int(bool(ps.alive[i])):d}     "
+                        f"{float(ps.pos[i, 0]):+9.4f}  "
+                        f"{float(ps.pos[i, 1]):+9.4f}  "
+                        f"{float(ps.pos[i, 2]):+9.4f}\n")
+                inversions = 0
+                last_age = float('inf')
+                for i in range(n_dump):
+                    a = float(ps.age[i])
+                    if a > last_age + 1e-6:
+                        inversions += 1
+                        _fh.write(
+                            f"INVERSION at idx {i}: "
+                            f"age={a:.4f}s > "
+                            f"previous={last_age:.4f}s\n")
+                    last_age = a
+                _fh.write(f"# inversions: {inversions}\n")
+            self.log(
+                f"dump -> {txt_path}  "
+                f"inversions={inversions}",
+                color=(120, 220, 180)
+                       if inversions == 0
+                       else (255, 110, 110))
+            emit_txt_path = os.path.join(
+                out_dir,
+                f'{ts}_emit_pos_slot{slot_idx}.txt')
+            with open(emit_txt_path, 'w', encoding='utf-8') as _ef:
+                _ef.write(
+                    f"# slot {slot_idx} emit-pos dump\n"
+                    f"# spawned={spawned}  "
+                    f"alive={alive_n}  "
+                    f"cap={ps.max}\n"
+                    f"# idx   emit_x     emit_y     "
+                    f"emit_z\n")
+                n_dump = min(int(ps._next_slot),
+                             len(ps.emit_pos))
+                for i in range(n_dump):
+                    _ef.write(
+                        f"{i:5d}  "
+                        f"{float(ps.emit_pos[i, 0]):+9.4f}  "
+                        f"{float(ps.emit_pos[i, 1]):+9.4f}  "
+                        f"{float(ps.emit_pos[i, 2]):+9.4f}\n")
+            self.log(
+                f"emit-pos dump -> {emit_txt_path}",
+                color=(120, 220, 180))
+        except Exception as _ex_dump:
+            self.log(
+                f"particle dump failed: "
+                f"{type(_ex_dump).__name__}: {_ex_dump}",
+                color=(255, 180, 120))
+
+    def _capture_debug_screenshot(self, label):
+        """Read the entire back-buffer, save it as PNG under
+        `<project>/debug_screens/<ts>_<label>.png`, and log the
+        absolute path to the in-app console.
+
+        Skipped entirely when `DEBUG_FILE_DUMPS` is False (Coffee
+        2026-05-14 "for now, stop sending debug files out").
+
+        Per Coffee 2026-05-14 ("can you take a screen shot at
+        partial impact of our render window so i can show you the
+        issue?  we can use it later for other debug screen caps
+        using different trigger events"): the label keys the file
+        to whichever trigger fired the capture (e.g.
+        "impact_slot_3", "muzzle_flash", "first_emit").  Same GL ->
+        PIL pipeline `_capture_alt_rect_to_clipboard` uses; just
+        writes to disk instead of clipboard.
+
+        Returns the absolute path on success, None on failure.
+        """
+        if not DEBUG_FILE_DUMPS:
+            return None
+        try:
+            import time as _t
+            from PIL import Image
+        except Exception:
+            return None
+        w = int(self.width)
+        h = int(self.height)
+        if w <= 0 or h <= 0:
+            return None
+        try:
+            glPixelStorei(GL_PACK_ALIGNMENT, 1)
+            data = glReadPixels(0, 0, w, h,
+                                 GL_RGB, GL_UNSIGNED_BYTE)
+            glPixelStorei(GL_PACK_ALIGNMENT, 4)
+            img = Image.frombytes('RGB', (w, h), data)
+            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+        except Exception as _ex_cap:
+            self.log(f"debug screenshot: capture failed: "
+                     f"{type(_ex_cap).__name__}: {_ex_cap}",
+                     color=(255, 180, 120))
+            return None
+        # Output directory: <project>/debug_screens/.  Created on
+        # first capture; not gitignored at write time but should be
+        # added to .gitignore if we ship to a repo.
+        out_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            'debug_screens')
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            return None
+        safe = ''.join(c if c.isalnum() or c in '._-' else '_'
+                       for c in str(label or 'frame'))
+        ts = _t.strftime('%Y%m%d_%H%M%S')
+        fname = f'{ts}_{safe}.png'
+        path = os.path.join(out_dir, fname)
+        try:
+            img.save(path)
+        except Exception as _ex_save:
+            self.log(f"debug screenshot: save failed: "
+                     f"{type(_ex_save).__name__}: {_ex_save}",
+                     color=(255, 180, 120))
+            return None
+        self.log(f"screenshot -> {path}", color=(120, 220, 180))
+        return path
+
     def _capture_alt_rect_to_clipboard(self, x, y, w, h):
         """Read the back-buffer rectangle at (x, y, w, h) (screen
         coords, top-left origin), convert to a PIL Image, and
@@ -3810,22 +4381,28 @@ class Viewer:
         you add or change a binding.
         """
         message = (
-            "CAMERA\n"
-            "  LMB-drag             orbit camera\n"
+            "WORLD OF TANKS DEFAULT SCHEME\n"
+            "  LMB click            fire (gun recoil)\n"
+            "  RMB drag             orbit camera (free look)\n"
+            "  Mouse motion         aim turret + gun (no button held)\n"
+            "  Mouse wheel          zoom in / out\n"
+            "  W / S                drive forward / reverse\n"
+            "  A / D                turn left / right\n"
+            "\n"
+            "CAMERA (extra)\n"
+            "  LMB-drag             orbit (legacy, same as RMB-drag)\n"
             "  Shift+LMB-drag       pan (XZ ground plane)\n"
             "  Ctrl+LMB-drag        Y-axis lift of look-at\n"
             "  Middle-mouse drag    XZ pan\n"
-            "  Mouse wheel          zoom in / out\n"
             "  C                    cycle camera mode\n"
             "                       (orbit -> side chase -> driver POV)\n"
             "\n"
-            "TANK DRIVE\n"
-            "  W / S                forward / backward\n"
-            "  A / D                yaw left / right  (E aliased to D)\n"
+            "TANK DRIVE (extra)\n"
             "  1 - 9                speed step\n"
             "  0                    stop\n"
             "  O                    toggle auto-circle drive\n"
             "  R                    reset tank + camera to defaults\n"
+            "  SPACE                fire (alternate to LMB)\n"
             "\n"
             "DISPLAY\n"
             "  F1                   this help\n"
@@ -5530,15 +6107,101 @@ class Viewer:
         pin_segments = []
         PIN_COLOR = (1.0, 0.40, 0.78)
         pin_anchors_done = {'L': False, 'R': False}
-        # Per Coffee 2026-05-13 ("move face coloring of the
-        # tracks ... to the debug enabled state"): bind the pad
-        # shader once and set the face-debug flag from self._debug
-        # before the per-renderer draw loop.  Uniform persists
-        # across the subsequent `shader.use()` calls inside
-        # `TrackPadRenderer.render` (same program, GL retains
-        # uniform state per program).
+        # Per Coffee 2026-05-13 ("lets go ahead and add PBR to the
+        # segment models. load once, use everywhere"): bind the pad
+        # shader once with the full per-frame PBR state (lights,
+        # IBL textures, slider knobs).  Each TrackPadRenderer.render
+        # below then binds only its OWN material textures (units
+        # 0..3) and issues an instanced draw -- the global state
+        # set here is shared across every pad mesh on every side,
+        # so the cost of building the lighting environment is paid
+        # once per frame, not per renderer.
         try:
             self.pad_shader.use()
+
+            # Lights -- same three-light ring the main mesh path
+            # uses.  Computed by the surrounding render() above
+            # using `base_angle` + `step`; we recompute here from
+            # frame_count + orbit_lights so the pad pass doesn't
+            # depend on a local var leak from the parent function.
+            base_angle = (np.radians(self.frame_count * 0.5)
+                          if self.orbit_lights else 0.0)
+            step = 2.0 * np.pi / float(self.NUM_LIGHTS)
+            light_positions = [
+                (self.LIGHT_RADIUS * np.cos(base_angle + i * step),
+                 self.LIGHT_HEIGHT,
+                 self.LIGHT_RADIUS * np.sin(base_angle + i * step))
+                for i in range(self.NUM_LIGHTS)]
+            self.pad_shader.set_vec3_array(
+                'light_pos', light_positions)
+
+            # Camera world position from the inverse view rotation.
+            R = view[:3, :3]
+            t = view[:3,  3]
+            eye = -R.T @ t
+            self.pad_shader.set_vec3(
+                'view_pos',
+                float(eye[0]), float(eye[1]), float(eye[2]))
+
+            # Slider knobs -- mirror the main mesh path so the
+            # pads track the same Light / Ambient / NMap / AO
+            # state as the rest of the tank.
+            self.pad_shader.set_float(
+                'metal_scale',
+                self._metal_slider.value
+                if self._metal_slider else 1.0)
+            self.pad_shader.set_float(
+                'shine_scale',
+                self._shine_slider.value
+                if self._shine_slider else 1.0)
+            self.pad_shader.set_int(
+                'use_normal_map',
+                1 if self.use_normal_map else 0)
+            self.pad_shader.set_int(
+                'invert_shine',
+                1 if (self._invert_shine_cb
+                      and self._invert_shine_cb.checked) else 0)
+            # WoT pad textures use GA-encoded normals (same as the
+            # rest of the chassis); imported FBX would use plain
+            # RGB but pads are pkg-only so this is always 1.
+            self.pad_shader.set_int('is_GA_normal', 1)
+
+            # IBL bind -- units 4/5/6 match mesh.frag.  We re-bind
+            # them here even though the main mesh pass already did
+            # because some intervening pass (terrain / picker /
+            # debug overlays) may have touched the active unit.
+            if self.skybox:
+                if self.skybox.irradiance_id:
+                    glActiveTexture(GL_TEXTURE4)
+                    glBindTexture(GL_TEXTURE_CUBE_MAP,
+                                  self.skybox.irradiance_id)
+                    self.pad_shader.set_int('irradiance_map', 4)
+                    self.pad_shader.set_int('has_irradiance', 1)
+                else:
+                    self.pad_shader.set_int('has_irradiance', 0)
+                if self.skybox.brdf_lut_id:
+                    glActiveTexture(GL_TEXTURE5)
+                    glBindTexture(GL_TEXTURE_2D,
+                                  self.skybox.brdf_lut_id)
+                    self.pad_shader.set_int('brdf_lut', 5)
+                    self.pad_shader.set_int('has_brdf_lut', 1)
+                else:
+                    self.pad_shader.set_int('has_brdf_lut', 0)
+                if self.skybox.cubemap_id:
+                    glActiveTexture(GL_TEXTURE6)
+                    glBindTexture(GL_TEXTURE_CUBE_MAP,
+                                  self.skybox.cubemap_id)
+                    self.pad_shader.set_int('prefiltered_map', 6)
+                    self.pad_shader.set_int('has_prefiltered', 1)
+                else:
+                    self.pad_shader.set_int('has_prefiltered', 0)
+            else:
+                self.pad_shader.set_int('has_irradiance',  0)
+                self.pad_shader.set_int('has_brdf_lut',    0)
+                self.pad_shader.set_int('has_prefiltered', 0)
+
+            # Face-debug flag (Coffee 2026-05-13 "move face
+            # coloring ... to the debug enabled state").
             self.pad_shader.set_int(
                 'u_show_face_debug',
                 1 if getattr(self, '_debug', False) else 0)
@@ -6075,10 +6738,11 @@ class Viewer:
         # Make sure the dict ref is published back -- in case
         # _pending_chassis_info was freshly minted None above.
         self._pending_chassis_info = ci
-        for (side, n, y_lo, y_hi) in loaded:
-            print(f'[track-sag] {side} curve: {n} samples  '
-                  f'Y range [{y_lo:+.3f}, {y_hi:+.3f}] m  '
-                  f'(authored sag from skinned-track ribbon)')
+        if TRACK_PHYSICS_VERBOSE:
+            for (side, n, y_lo, y_hi) in loaded:
+                print(f'[track-sag] {side} curve: {n} samples  '
+                      f'Y range [{y_lo:+.3f}, {y_hi:+.3f}] m  '
+                      f'(authored sag from skinned-track ribbon)')
 
     def _wire_homie_to_physics(self):
         """Compute the homie chain at BIND pose (no suspension
@@ -6166,9 +6830,10 @@ class Viewer:
         n_R = len(bottom['right']) if bottom['right'] is not None else 0
         self.tank_physics.set_homie_bottom_run(
             bottom['left'], bottom['right'])
-        print(f"[homie-physics] chain bottom run -> physics "
-              f"plane fit: L={n_L} pads  R={n_R} pads  "
-              f"(was wheel-hub samples)")
+        if TRACK_PHYSICS_VERBOSE:
+            print(f"[homie-physics] chain bottom run -> physics "
+                  f"plane fit: L={n_L} pads  R={n_R} pads  "
+                  f"(was wheel-hub samples)")
 
     def _compute_homie_chain_for_frame(self, tp):
         """Build the home-brewed wheel-tangent chain for the
@@ -6205,6 +6870,8 @@ class Viewer:
             if getattr(self, '_homie_diag_emitted', False):
                 return
             self._homie_diag_emitted = True
+            if not TRACK_PHYSICS_VERBOSE:
+                return
             print('[homie-diag] chain build skipped: ' + reason)
             print(f'  segmentLength={ci.get("segmentLength")}  '
                   f'segmentsCount={ci.get("segmentsCount")}  '
@@ -6797,7 +7464,8 @@ class Viewer:
                     msg += (f'  sample[{sample_key}] '
                             f'Y: {sample_pre_y:+.4f} -> '
                             f'{sample_post_y:+.4f}')
-                print(msg)
+                if TRACK_PHYSICS_VERBOSE:
+                    print(msg)
                 self._track_bone_log_t = now
         return out
 
@@ -8022,6 +8690,868 @@ class Viewer:
         # Re-arm the one-shot drive diagnostic so changing speed
         # mid-drive re-prints the position line on the next keypress.
         self._drive_keys_seen = False
+
+    def _capture_aim_pivots(self):
+        """Populate `_turret_pivot_chassis` + `_gun_pivot_chassis` from
+        the first turret / gun submesh's bind-model-matrix translation
+        column, and load yaw / pitch limits from the cached gun XML
+        info.  Idempotent: re-running once both pivots are non-None
+        is a no-op.  Called from the per-frame pose composer so it
+        runs after `bind_model_matrix` has been saved.
+
+        Pivots are in CHASSIS-LOCAL space (the same frame the
+        bind_model_matrix carries the component offset in).  Limits
+        come from `_pending_chassis_info['gun']`:
+            * minPitch / maxPitch -- depression / elevation in degrees
+            * turretYawLimits     -- "min/max" comma-pair OR empty for
+                                     full 360 traverse
+        """
+        if (self._turret_pivot_chassis is not None
+                and self._gun_pivot_chassis is not None):
+            return  # already populated this load
+        for m in self.meshes:
+            comp = getattr(m, 'component', '')
+            bm = getattr(m, 'bind_model_matrix', None)
+            if bm is None:
+                continue
+            if (comp == 'turret'
+                    and self._turret_pivot_chassis is None):
+                self._turret_pivot_chassis = (
+                    float(bm[0, 3]), float(bm[1, 3]), float(bm[2, 3]))
+            elif (comp == 'gun'
+                    and self._gun_pivot_chassis is None):
+                self._gun_pivot_chassis = (
+                    float(bm[0, 3]), float(bm[1, 3]), float(bm[2, 3]))
+            if (self._turret_pivot_chassis is not None
+                    and self._gun_pivot_chassis is not None):
+                break
+
+        # Per Coffee 2026-05-13 ("you still dont have the clamp on
+        # rotation"): turret + gun limits live on the FULL info dict
+        # (`info['turret']`, `info['gun']`), NOT on the chassis
+        # subsection.  `_pending_chassis_info` is only `info['chassis']`
+        # so `ci.get('turret')` / `ci.get('gun')` returned empty and
+        # we fell back to the -180/+180 + 60 dps defaults regardless
+        # of the tank.  Now source from `self._active_set.tank_info`,
+        # the full parsed info that VehicleXMLLoader.parse_info built
+        # and stashed at tank-load time.
+        full_info = (getattr(
+            getattr(self, '_active_set', None), 'tank_info', None)
+            or {})
+        gun = full_info.get('gun') or {}
+        # Per Coffee 2026-05-13 ("we have a pre fix that is killing
+        # us" + "-65 is up pitch.  max is pitch down"): WoT ships
+        # <pitchLimits><minPitch>/<maxPitch> as CURVES (pairs of
+        # yaw_fraction + pitch_at_yaw) in a SIGN CONVENTION
+        # OPPOSITE TO OURS:
+        #     WoT minPitch -> ELEVATION (rotation UP, stored as
+        #                     a negative number; more negative =
+        #                     more up).
+        #     WoT maxPitch -> DEPRESSION (rotation DOWN, stored
+        #                     as a positive number; larger value
+        #                     = more down).
+        # Our convention is +pitch = up, -pitch = down.  So:
+        #     our_pitch_max =  -(min of minPitch curve)   (positive)
+        #     our_pitch_min =  -(max of maxPitch curve)   (negative)
+        # = swap + negate, picking the most-permissive value across
+        # the yaw axis (curves vary on hull-mask TDs).
+        def _parse_pitch_curve(raw, want_min):
+            try:
+                toks = (raw or '').replace(',', ' ').split()
+                nums = [float(t) for t in toks]
+            except (TypeError, ValueError):
+                return None
+            # Pairs are (yaw_fraction, pitch_at_yaw); odd-indexed are
+            # the pitch samples.  Scalar fallback for tanks that
+            # didn't ship a curve.
+            if len(nums) == 1:
+                pitches = nums
+            else:
+                pitches = nums[1::2]
+            if not pitches:
+                return None
+            return min(pitches) if want_min else max(pitches)
+
+        raw_min = gun.get('minPitch')
+        raw_max = gun.get('maxPitch')
+        # min(minPitch curve) -- most negative = MOST ELEVATION
+        most_up   = _parse_pitch_curve(raw_min, want_min=True)
+        # max(maxPitch curve) -- largest positive = MOST DEPRESSION
+        most_down = _parse_pitch_curve(raw_max, want_min=False)
+        # Negate to convert to our +up convention.
+        if most_up   is not None:
+            self._aim_pitch_max_deg = -float(most_up)
+        if most_down is not None:
+            self._aim_pitch_min_deg = -float(most_down)
+        # `turretYawLimits` is either empty (= no limit, full 360
+        # traverse) or "minDeg maxDeg" / "minDeg, maxDeg".  Empty
+        # leaves the defaults (-180 .. +180) intact.
+        yl_raw = (gun.get('turretYawLimits') or '').strip()
+        if yl_raw:
+            try:
+                parts = [p for p in yl_raw.replace(',', ' ').split()
+                         if p]
+                if len(parts) >= 2:
+                    self._aim_yaw_min_deg = float(parts[0])
+                    self._aim_yaw_max_deg = float(parts[1])
+            except (TypeError, ValueError):
+                pass
+        # Turret + gun rotation rate caps from the XML.  Both stored
+        # in degrees per second.  Defaults survive if the XML omits
+        # the field (rare on stock tanks; some modded ones drop it).
+        turret = full_info.get('turret') or {}
+        try:
+            self._aim_turret_yaw_rate_dps = float(
+                turret.get('rotationSpeed',
+                           self._aim_turret_yaw_rate_dps))
+        except (TypeError, ValueError):
+            pass
+        try:
+            self._aim_gun_pitch_rate_dps = float(
+                gun.get('rotationSpeed',
+                        self._aim_gun_pitch_rate_dps))
+        except (TypeError, ValueError):
+            pass
+
+        # Clamp initial yaw / pitch into the new envelope.  Mirror
+        # the clamp on the target so the integrator has a sane goal.
+        self._turret_yaw_deg = max(self._aim_yaw_min_deg,
+                                    min(self._aim_yaw_max_deg,
+                                        self._turret_yaw_deg))
+        self._gun_pitch_deg  = max(self._aim_pitch_min_deg,
+                                    min(self._aim_pitch_max_deg,
+                                        self._gun_pitch_deg))
+        self._target_turret_yaw_deg = self._turret_yaw_deg
+        # Per Coffee 2026-05-13 ("the damn gun is still rotating
+        # wrong"): one-line diagnostic at tank load so we can see
+        # exactly what the XML shipped vs. what our envelope ended
+        # up being.  Read this in the in-window log AND the cmd
+        # window before doing more sign-flip guesswork.
+        try:
+            raw_min = gun.get('minPitch', '?')
+            raw_max = gun.get('maxPitch', '?')
+            msg = (
+                f"[aim-limits] gun XML minPitch={raw_min!r} "
+                f"maxPitch={raw_max!r}  -> envelope "
+                f"({self._aim_pitch_min_deg:+.2f}, "
+                f"{self._aim_pitch_max_deg:+.2f}) deg  "
+                f"turret yaw=({self._aim_yaw_min_deg:+.1f}, "
+                f"{self._aim_yaw_max_deg:+.1f}) deg  "
+                f"rates yaw={self._aim_turret_yaw_rate_dps:.1f} "
+                f"pitch={self._aim_gun_pitch_rate_dps:.1f} dps")
+            print(msg)
+            try:
+                self.log(msg, color=(220, 220, 120))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Per Coffee 2026-05-14 ("G78 recoils the gun fine..  A38
+        # does not recoil.. run loads side by side and catalog"):
+        # comprehensive per-gun-submesh dump.  Walks every gun mesh
+        # at load and prints the eight ingredients the recoil path
+        # actually depends on, so loading the working + non-working
+        # tank in two sessions and diff-ing the lines tells us
+        # which ingredient differs.
+        try:
+            from .gun_recoil import pick_recoil_bone as _pick_recoil
+            gun_mesh_idx = 0
+            for _m in self.meshes:
+                if getattr(_m, 'component', '') != 'gun':
+                    continue
+                pal = list(getattr(_m, 'bone_palette', None) or [])
+                bi = getattr(_m, 'bone_indices', None)
+                bw = getattr(_m, 'bone_weights', None)
+                n_verts = (len(getattr(_m, 'positions', []))
+                           if hasattr(_m, 'positions') else 0)
+                has_iii = bi is not None and getattr(bi, 'size', 0) > 0
+                has_ww  = bw is not None and getattr(bw, 'size', 0) > 0
+                picked = _pick_recoil(pal) if pal else None
+                pick_byte = (picked * 3) if picked is not None else -1
+                # Histogram of iii byte values across slots 0..3.
+                iii_hist = ''
+                if has_iii:
+                    import numpy as _np
+                    try:
+                        bi_arr = _np.asarray(bi).reshape(-1, 4)
+                        slot_stats = []
+                        for slot in range(4):
+                            u, c = _np.unique(bi_arr[:, slot],
+                                              return_counts=True)
+                            slot_stats.append(
+                                '{' + ','.join(
+                                    f'{int(b)}x{int(n)}'
+                                    for b, n in zip(u, c)) + '}')
+                        iii_hist = (' iii_per_slot=['
+                                    + ' '.join(slot_stats) + ']')
+                    except Exception as _eh:
+                        iii_hist = f' (hist err: {_eh})'
+                # (R,G) pair histogram so we can confirm (3,3) /
+                # (0,3) / (0,6) populations per tank.
+                rg_hist = ''
+                if has_iii:
+                    import numpy as _np
+                    try:
+                        bi_arr = _np.asarray(bi).reshape(-1, 4)
+                        rg = (bi_arr[:, 0].astype(int) * 1000
+                              + bi_arr[:, 1].astype(int))
+                        u, c = _np.unique(rg, return_counts=True)
+                        pairs = [f'({int(v)//1000},{int(v)%1000})x{int(n)}'
+                                 for v, n in zip(u, c)]
+                        rg_hist = ' (R,G)=[' + ' '.join(pairs) + ']'
+                    except Exception:
+                        pass
+                line = (
+                    f"[gun-cat] mesh#{gun_mesh_idx} "
+                    f"verts={n_verts} "
+                    f"skin={'Y' if has_iii and has_ww else 'N'} "
+                    f"pal_len={len(pal)} pal={pal} "
+                    f"pick_idx={picked} pick_byte={pick_byte}"
+                    f"{rg_hist}{iii_hist}")
+                print(line)
+                try:
+                    self.log(
+                        f"gun#{gun_mesh_idx} "
+                        f"skin={'Y' if has_iii and has_ww else 'N'} "
+                        f"pal={len(pal)} pick={picked}",
+                        color=(180, 220, 255))
+                except Exception:
+                    pass
+                gun_mesh_idx += 1
+            if gun_mesh_idx == 0:
+                print("[gun-cat] no gun submeshes in self.meshes")
+        except Exception as _ec:
+            print(f"[gun-cat] dump failed: "
+                  f"{type(_ec).__name__}: {_ec}")
+        self._target_gun_pitch_deg  = self._gun_pitch_deg
+
+    def _cursor_in_render_window(self, x, y):
+        """Return True iff (x, y) is inside the 3D render viewport
+        (not over the left info panel, the right tree panel, the
+        bottom console, or otherwise outside the scene region).
+        Used to gate the mouse-driven camera-orbit aim controls per
+        Coffee 2026-05-13 ("limit mouse gun aim controls if the
+        mouse is inside the render window").
+
+        Bounds match the `scene_x` / `scene_w` / `console_h`
+        computation the renderer uses for `glViewport` so the
+        active region the user sees and the input-acceptance region
+        match 1:1.
+        """
+        try:
+            scene_x = self.ui.info_left_inset(self.INFO_PANEL_W)
+        except Exception:
+            scene_x = self.INFO_PANEL_W
+        scene_right = self.width - self.TREE_PANEL_W
+        try:
+            console_h = (self.ui.console.height_for_layout()
+                         if self.ui.console else 0)
+        except Exception:
+            console_h = 0
+        scene_bottom = self.height - console_h
+        return (scene_x <= int(x) < scene_right
+                and 0 <= int(y) < scene_bottom)
+
+    def _advance_aim_integrator(self, dt):
+        """Move actual yaw / pitch toward their mouse-driven targets,
+        capped by the XML-defined `rotationSpeed` for each axis.
+        Per Coffee 2026-05-13 ("please obey travel speed limits" +
+        "the rotation is not clamped for sure").
+
+        Yaw uses SHORTEST-PATH wraparound: dy = target - current
+        wraps into [-180, +180] so a target on the other side of
+        the +/-180 boundary takes the short way around (~20 deg)
+        instead of the long way (~340 deg).  Without this the
+        turret looked uncapped because the integrator would drive
+        it the long way for several seconds at the XML rotation
+        rate, ignoring how close the short path actually was.
+
+        Pitch doesn't wrap -- gun pitch is bounded by the
+        depression/elevation envelope (typically -10..+25 deg)
+        with no wraparound boundary in the range.
+
+        Both axes also have the actual angle CLAMPED into the
+        XML envelope after the integrator step so a stale prior
+        value can't sit outside the limit forever.
+        """
+        if (self._turret_pivot_chassis is None
+                or self._gun_pivot_chassis is None):
+            return
+        max_dyaw   = float(self._aim_turret_yaw_rate_dps) * max(dt, 0.0)
+        max_dpitch = float(self._aim_gun_pitch_rate_dps)  * max(dt, 0.0)
+
+        # ---- Yaw: shortest-path delta, rate-clamp, then envelope-clamp.
+        dy = float(self._target_turret_yaw_deg) - float(self._turret_yaw_deg)
+        # Wrap into (-180, +180] so we take the short path across
+        # the +/-180 boundary.  while-loops are cheap (max 1 iter
+        # in practice since both target+current stay near [-180,
+        # +180]).
+        while dy >  180.0: dy -= 360.0
+        while dy < -180.0: dy += 360.0
+        if   dy >  max_dyaw: dy =  max_dyaw
+        elif dy < -max_dyaw: dy = -max_dyaw
+        new_yaw = float(self._turret_yaw_deg) + dy
+        # Keep the actual yaw in [-180, +180] so subsequent shortest-
+        # path math always sees a small delta.  Only matters for
+        # full-traverse turrets; restricted-yaw tanks (-15..+15) are
+        # already inside the wrap range.
+        while new_yaw >  180.0: new_yaw -= 360.0
+        while new_yaw < -180.0: new_yaw += 360.0
+        # Envelope clamp -- redundant when target was already clamped
+        # to the same range, but cheap insurance for any code path
+        # that writes _turret_yaw_deg directly.
+        new_yaw = max(self._aim_yaw_min_deg,
+                       min(self._aim_yaw_max_deg, new_yaw))
+        self._turret_yaw_deg = new_yaw
+
+        # ---- Pitch: linear, no wraparound, envelope-clamped.
+        dp = float(self._target_gun_pitch_deg) - float(self._gun_pitch_deg)
+        if   dp >  max_dpitch: dp =  max_dpitch
+        elif dp < -max_dpitch: dp = -max_dpitch
+        new_pitch = float(self._gun_pitch_deg) + dp
+        new_pitch = max(self._aim_pitch_min_deg,
+                         min(self._aim_pitch_max_deg, new_pitch))
+        self._gun_pitch_deg = new_pitch
+
+    def _aim_point_on_terrain(self, eye, fwd, max_distance_m=1500.0,
+                              step_m=1.0):
+        """Ray-march `eye + t*fwd` against the loaded terrain heightmap
+        and return the world-space XYZ of the first ground intersection,
+        or None when the ray climbs / runs out of range without hitting.
+
+        Coarse-then-refine: 1m steps until the ray drops below the
+        terrain surface, then linearly interpolate between the last
+        above-ground and first below-ground sample to get a sub-step
+        hit position.  Adequate for aim resolution at 1500m -- the
+        ground sample error is bounded by the heightmap's own
+        bilinear interpolation noise long before the 1m step is
+        the limiting factor.
+
+        Returns None when:
+          * no terrain is loaded
+          * the ray points upward and never re-enters the heightmap
+          * the ray runs past `max_distance_m` without hitting
+
+        Caller fall-back: shoot to `eye + max_distance_m * fwd` as a
+        sky point so the gun still has a defined aim direction.
+        """
+        if self.terrain is None or not hasattr(self.terrain,
+                                                'sample_height'):
+            return None
+        # Per Coffee 2026-05-13 ("targeting off the map area causes
+        # strange behaving.  stop looking for ground intersection
+        # if we are off the map in any direction"): clamp the march
+        # to within the terrain's XZ bounds.  `terrain.world_size`
+        # is the full edge length; the map spans
+        # [-world_size/2, +world_size/2] on both X and Z.  Any sample
+        # outside that region bilinear-samples a boundary cell and
+        # returns junk that looks like a flat plane at Y=0, which
+        # produced bogus hits behind the tank or far off-map.
+        try:
+            half_world = 0.5 * float(self.terrain.world_size)
+        except Exception:
+            half_world = None
+        def _on_map(x, z):
+            if half_world is None:
+                return True   # unknown bounds -- behave like before
+            return (-half_world <= x <= half_world
+                    and -half_world <= z <= half_world)
+        eye = np.asarray(eye, dtype=np.float64)
+        fwd = np.asarray(fwd, dtype=np.float64)
+        # Ray origin off-map -- nothing to hit, bail immediately.
+        if not _on_map(float(eye[0]), float(eye[2])):
+            return None
+        try:
+            last_y = float(self.terrain.sample_height(
+                float(eye[0]), float(eye[2])))
+        except Exception:
+            return None
+        last_dy = float(eye[1] - last_y)
+        last_t  = 0.0
+        t = float(step_m)
+        while t <= max_distance_m:
+            px = float(eye[0] + t * fwd[0])
+            py = float(eye[1] + t * fwd[1])
+            pz = float(eye[2] + t * fwd[2])
+            # Ray has walked off the heightmap -- terminate.  No
+            # extrapolation, no boundary-clamp hit; the aim simply
+            # says "no ground there".
+            if not _on_map(px, pz):
+                return None
+            try:
+                ty = float(self.terrain.sample_height(px, pz))
+            except Exception:
+                break
+            dy = py - ty
+            if dy <= 0.0 and last_dy > 0.0:
+                # Crossed the surface between last_t and t.  Solve
+                # for the t where the ray's Y equals the linearly
+                # interpolated terrain Y.  The interp on terrain
+                # height is implicit in this single linear blend
+                # because the two surfaces are close to planar
+                # at 1m granularity.
+                frac = last_dy / max(last_dy - dy, 1e-9)
+                t_hit = last_t + frac * (t - last_t)
+                return np.array([
+                    float(eye[0] + t_hit * fwd[0]),
+                    float(eye[1] + t_hit * fwd[1]),
+                    float(eye[2] + t_hit * fwd[2])],
+                    dtype=np.float32)
+            last_t  = t
+            last_dy = dy
+            t += step_m
+        return None
+
+    def _drive_aim_from_aim_state(self, view, chassis_pose, proj=None):
+        """Per Coffee 2026-05-13 ("we need that projected point").
+
+        Project the current MOUSE CURSOR position from screen-space
+        into world-space via the inverse view-projection matrix,
+        ray-cast against the terrain heightmap, and set the turret
+        yaw + gun pitch TARGETS so the tank seeks that exact world
+        point.
+
+        Workflow per frame:
+          1. Read mouse pos via pygame.mouse.get_pos().
+          2. If cursor is OUTSIDE the 3D render viewport (over UI
+             panels or off-window), leave previous aim untouched.
+          3. Translate cursor pos -> viewport-relative pixels ->
+             NDC ([-1, +1] both axes, Y flipped from window space).
+          4. Unproject NDC near + far points via inv(proj @ view).
+             Ray origin = near-plane point; direction = far - near.
+          5. Ray-march against terrain -> hit_world (blue ball).
+             If no hit (sky / off-map), leave previous target
+             intact so the turret keeps slewing rather than
+             freezing.
+          6. Transform hit to chassis-local; solve target turret
+             yaw + gun pitch so the gun forward (after Ry/Rx)
+             points at the hit.
+
+        Replaces the earlier mouse-delta-accumulator scheme.  Now
+        the ball lands exactly where the cursor is, and the turret
+        + gun chase the cursor at the XML-defined rotation rates.
+        """
+        if (self._turret_pivot_chassis is None
+                or self._gun_pivot_chassis is None):
+            return
+        if proj is None:
+            try:
+                proj = self.camera.get_projection_matrix()
+            except Exception:
+                return
+        # ---- 1+2. mouse pos + viewport gate -------------------------------
+        try:
+            mx, my = pygame.mouse.get_pos()
+        except Exception:
+            return
+        if not self._cursor_in_render_window(mx, my):
+            return   # keep last target -- gun/turret continue slewing
+        # ---- 3. screen -> NDC --------------------------------------------
+        try:
+            scene_x = self.ui.info_left_inset(self.INFO_PANEL_W)
+        except Exception:
+            scene_x = self.INFO_PANEL_W
+        scene_w = max(1, int(self.camera.width))
+        scene_h = max(1, int(self.camera.height))
+        # Viewport-relative pixel coords.  Top of viewport = window
+        # y=0 (camera doesn't carry a top inset on this build).
+        vx = float(mx - scene_x)
+        vy = float(my)
+        ndc_x = 2.0 * vx / float(scene_w) - 1.0
+        ndc_y = 1.0 - 2.0 * vy / float(scene_h)
+        # ---- 4. unproject -------------------------------------------------
+        vp = np.asarray(proj, dtype=np.float64) @ np.asarray(
+            view, dtype=np.float64)
+        try:
+            vp_inv = np.linalg.inv(vp)
+        except np.linalg.LinAlgError:
+            return
+        near_clip = np.array([ndc_x, ndc_y, -1.0, 1.0],
+                              dtype=np.float64)
+        far_clip  = np.array([ndc_x, ndc_y, +1.0, 1.0],
+                              dtype=np.float64)
+        near_w = vp_inv @ near_clip
+        far_w  = vp_inv @ far_clip
+        if abs(near_w[3]) < 1e-9 or abs(far_w[3]) < 1e-9:
+            return
+        near_w /= near_w[3]
+        far_w  /= far_w[3]
+        origin_world = near_w[:3]
+        fwd_world = far_w[:3] - near_w[:3]
+        fl = float(np.linalg.norm(fwd_world))
+        if fl < 1e-9:
+            return
+        fwd_world = fwd_world / fl
+
+        # ---- 5. terrain ray-cast -----------------------------------------
+        # Per Coffee 2026-05-13 ("no i have no pitch" -- T92 case):
+        # when the aim ray misses terrain (sky / above-horizon / off
+        # the heightmap), DON'T bail out without updating the target
+        # -- otherwise tanks with no depression (T92 SPG: envelope
+        # 0..+65) can't get a positive target either, because their
+        # only valid aim window is above the horizon where the
+        # terrain ray misses by design.  Sky-fallback: use a far
+        # point along the camera-forward ray as the synthetic hit so
+        # the gun still tracks the aim direction.  Ball is hidden
+        # (no real ground contact) but the angles compute.
+        hit_world = self._aim_point_on_terrain(origin_world, fwd_world)
+        if hit_world is None:
+            self._aim_hit_world = None
+            hit_world = origin_world + 1500.0 * fwd_world
+        else:
+            self._aim_hit_world = np.asarray(hit_world, dtype=np.float32)
+
+        # ---- 6. solve target yaw + pitch ---------------------------------
+        cp_mat = np.asarray(chassis_pose, dtype=np.float64)
+        Rc = cp_mat[:3, :3]
+        tc = cp_mat[:3, 3]
+        hit_chassis = Rc.T @ (np.asarray(hit_world, dtype=np.float64)
+                              - tc)
+        gx, gy, gz = self._gun_pivot_chassis
+        dx_l = float(hit_chassis[0] - gx)
+        dy_l = float(hit_chassis[1] - gy)
+        dz_l = float(hit_chassis[2] - gz)
+        dlen = math.sqrt(dx_l * dx_l + dy_l * dy_l + dz_l * dz_l)
+        if dlen < 1e-6:
+            return
+        dx_n = dx_l / dlen
+        dy_n = dy_l / dlen
+        dz_n = dz_l / dlen
+        target_pitch_rad = math.asin(max(-1.0, min(1.0, dy_n)))
+        target_yaw_rad   = math.atan2(-dx_n, -dz_n)
+        ty_deg = math.degrees(target_yaw_rad)
+        tp_deg = math.degrees(target_pitch_rad)
+        if not self._aim_yaw_locked:
+            self._target_turret_yaw_deg = max(
+                self._aim_yaw_min_deg,
+                min(self._aim_yaw_max_deg, ty_deg))
+        self._target_gun_pitch_deg = max(
+            self._aim_pitch_min_deg,
+            min(self._aim_pitch_max_deg, tp_deg))
+
+    def _aim_yaw_pitch_matrices(self):
+        """Return (yaw_mat, pitch_mat) -- two 4x4 row-major numpy
+        matrices that compose into the per-frame turret / gun pose:
+
+            turret model = chassis_pose @ yaw_mat @ bind_model
+            gun    model = chassis_pose @ yaw_mat @ pitch_mat @ bind_model
+
+        `yaw_mat`   rotates about chassis-local +Y at the turret pivot.
+        `pitch_mat` rotates about chassis-local +X at the gun pivot
+                    (applied BEFORE yaw in matrix order, so the pitch
+                    axis is correctly in the bind frame and the yaw
+                    sweeps the pitched gun around the turret pivot).
+
+        Returns (identity, identity) when pivots haven't been
+        captured yet -- ensures the composer falls through to the
+        bind pose.
+        """
+        I = np.eye(4, dtype=np.float32)
+        if (self._turret_pivot_chassis is None
+                or self._gun_pivot_chassis is None):
+            return I, I
+
+        px, py, pz = self._turret_pivot_chassis
+        gx, gy, gz = self._gun_pivot_chassis
+
+        ya = math.radians(float(self._turret_yaw_deg))
+        cy, sy = math.cos(ya), math.sin(ya)
+        # T(p) @ Ry(yaw) @ T(-p)
+        yaw_mat = np.array([
+            [ cy, 0.0,  sy,  px - (cy * px + sy * pz)],
+            [0.0, 1.0, 0.0,  0.0],
+            [-sy, 0.0,  cy,  pz - (-sy * px + cy * pz)],
+            [0.0, 0.0, 0.0,  1.0],
+        ], dtype=np.float32)
+
+        pa = math.radians(float(self._gun_pitch_deg))
+        cp, sp = math.cos(pa), math.sin(pa)
+        # T(g) @ Rx(pitch) @ T(-g)
+        pitch_mat = np.array([
+            [1.0, 0.0, 0.0,  0.0],
+            [0.0,  cp, -sp,  gy - ( cp * gy - sp * gz)],
+            [0.0,  sp,  cp,  gz - ( sp * gy + cp * gz)],
+            [0.0, 0.0, 0.0,  1.0],
+        ], dtype=np.float32)
+
+        return yaw_mat, pitch_mat
+
+    def _aim_ray_segments(self, chassis_pose):
+        """Build the aim-ray line segment list for `LineBatch.update`.
+
+        Returns a list of one tuple `((sx,sy,sz),(ex,ey,ez),(r,g,b))`
+        or an empty list when no gun pivot is known.  Start = gun
+        pivot transformed into world by chassis_pose + turret yaw
+        (pitch about gun pivot leaves the pivot itself fixed).
+        End   = start + 1500m along the gun forward axis (= negative
+        chassis-local Z, rotated through pitch then yaw then chassis).
+        """
+        if self._gun_pivot_chassis is None:
+            return []
+        yaw_mat, pitch_mat = self._aim_yaw_pitch_matrices()
+        gx, gy, gz = self._gun_pivot_chassis
+        # Start: gun pivot in chassis-local -> apply yaw (pitch is
+        # about pivot itself, no shift) -> apply chassis_pose.
+        gp_chassis = np.array([gx, gy, gz, 1.0], dtype=np.float32)
+        gp_yawed   = yaw_mat @ gp_chassis
+        gp_world   = (chassis_pose @ gp_yawed)[:3]
+        # Forward direction: gun-mesh local -Z (chassis-front convention)
+        # -> pitch -> yaw -> chassis rotation (no translation).
+        fwd_local = np.array([0.0, 0.0, -1.0, 0.0], dtype=np.float32)
+        fwd_after = (chassis_pose @ yaw_mat @ pitch_mat @ fwd_local)[:3]
+        n = np.linalg.norm(fwd_after)
+        if n < 1e-6:
+            return []
+        fwd_after = fwd_after / n
+        end_world = gp_world + float(self._aim_ray_length_m) * fwd_after
+        # Two-tone: bright cyan for visibility against terrain + sky.
+        color = (0.20, 0.95, 1.0)
+        return [(tuple(float(v) for v in gp_world),
+                 tuple(float(v) for v in end_world),
+                 color)]
+
+    # Visualisation slowdown factor for the debug projectile.  Per
+    # Coffee 2026-05-13 ("for testing.. slow it way down for now do
+    # we csn visualize") -- WoT shells fly 700-1500 m/s which makes
+    # the ball cross the terrain in well under one frame; divide
+    # by this factor so the round is actually visible.  Set to 1.0
+    # later for real-time speed.
+    _PROJECTILE_VIS_SLOWDOWN = 20.0
+
+    def _fire_round(self):
+        """Fire one debug-projectile round.  Per Coffee 2026-05-13
+        ("lets fire red spheres at the terrain first and test we
+        can shoot and stop a round" + "get info on rounds velocity
+        and wire in to travelling on target vector").
+
+        Per Coffee 2026-05-14 ("I am seeing multiple starts of
+        emitter trails.  why?"): logs one line per call so the
+        user can count fire events vs. visible trails -- if N
+        trails appear for one click, this print fires N times
+        when called from N different events / paths.
+
+        Pulls muzzle position from the live chassis + turret-yaw +
+        gun-pitch composition, captures the current `_aim_hit_world`
+        as the target stop-point, looks up the active gun's default
+        shell speed in `tank_info['shells']`, scales it by
+        `_PROJECTILE_VIS_SLOWDOWN`, and arms a Shot slot.  When the
+        ball is off-map / sky (no hit), the projectile flies along
+        the gun forward axis to a far point (1500m) and times out
+        with the rest of the slot.
+
+        Safe to call when no tank is loaded -- silently does
+        nothing if pivots haven't been captured yet.
+        """
+        # Per Coffee 2026-05-14 ("use our console for output.. clear
+        # it each shot before writing to it"): every fire wipes the
+        # in-app console and writes a fresh report.  Keeps the
+        # output focused on the just-fired round so distance /
+        # budget / spawn-density numbers are easy to read.
+        self.log_clear(status='Fire')
+        # Per Coffee 2026-05-14 ("multiple tracers showing.  its
+        # like i am firing 3-4 times. are we starting more than
+        # one emitter for some reason?"): list active slots BEFORE
+        # the new shot is dispatched so we can distinguish
+        # "1 click but 4 trails appeared" (a real bug -- a single
+        # fire is starting multiple PS systems) from "4 clicks
+        # accumulated, each slot legitimately draining" (expected,
+        # since slots stay rented while particles fade).  If you
+        # see N>0 at the top of every click's report, those are
+        # leftover trails from prior fires, not duplicates of
+        # this one.
+        _pre_active = [
+            i for i, sh in enumerate(self.shots.shots)
+            if sh.active
+        ]
+        self.log(f"pre-fire active slots: "
+                 f"{_pre_active if _pre_active else 'none'}")
+        if (self._gun_pivot_chassis is None
+                or self.tank_physics is None):
+            return None
+        try:
+            chassis_pose = np.asarray(
+                self.tank_physics.chassis_matrix(),
+                dtype=np.float32)
+        except Exception:
+            return None
+        yaw_mat, pitch_mat = self._aim_yaw_pitch_matrices()
+        # Muzzle world position: gun pivot (chassis-local) through
+        # turret yaw (pitch is about the pivot itself so no shift),
+        # then chassis_pose.  Plus a short forward push along the
+        # gun barrel so the visible round doesn't spawn inside the
+        # mantlet.
+        gp_chassis = np.array([
+            self._gun_pivot_chassis[0],
+            self._gun_pivot_chassis[1],
+            self._gun_pivot_chassis[2],
+            1.0,
+        ], dtype=np.float32)
+        gp_yawed   = yaw_mat @ gp_chassis
+        gp_world   = (chassis_pose @ gp_yawed)[:3]
+        fwd_local  = np.array([0.0, 0.0, -1.0, 0.0], dtype=np.float32)
+        fwd_after  = (chassis_pose @ yaw_mat @ pitch_mat @ fwd_local)[:3]
+        fl = float(np.linalg.norm(fwd_after))
+        if fl < 1e-9:
+            return None
+        fwd_world = fwd_after / fl
+        # Muzzle position.  Per Coffee 2026-05-14, every gun visual
+        # ships one or more `HP_gunFire*` nodes naming the exact
+        # points the round leaves the barrel(s).  Single-gun tanks
+        # have one (`HP_gunFire`); twin-gun tanks have two
+        # (`HP_gunFire_L` / `HP_gunFire_R`) and alternate between
+        # them.  The cursor `_gun_muzzle_next_idx` walks the list
+        # modulo len so a single-muzzle tank stays at 0, a twin-gun
+        # tank flips L/R/L/R.
+        # Each muzzle is gun-mesh-local (already Z-flipped to GL at
+        # parse time); it rides through the same pitch (about gun
+        # pivot) and yaw (about turret pivot) the gun mesh does, so
+        # we compose it into chassis space at the gun's bind
+        # position first, then push through the standard chain.
+        # Falls back to a heuristic forward-push for tanks shipping
+        # no HP_gunFire at all.
+        if self._gun_muzzles_local_gl:
+            n_mz = len(self._gun_muzzles_local_gl)
+            idx = self._gun_muzzle_next_idx % n_mz
+            mz_local = self._gun_muzzles_local_gl[idx]
+            self._gun_muzzle_next_idx = (idx + 1) % n_mz
+            mz_chassis = np.array([
+                self._gun_pivot_chassis[0] + float(mz_local[0]),
+                self._gun_pivot_chassis[1] + float(mz_local[1]),
+                self._gun_pivot_chassis[2] + float(mz_local[2]),
+                1.0,
+            ], dtype=np.float32)
+            muzzle = (chassis_pose @ yaw_mat @ pitch_mat @ mz_chassis)[:3]
+        else:
+            BARREL_LENGTH_M = 3.0   # nominal -- exact length not critical
+            muzzle = gp_world + BARREL_LENGTH_M * fwd_world
+
+        # Target = current ball hit, or sky-fallback 1500m forward.
+        target_world = self._aim_hit_world
+        if target_world is None:
+            target_world = muzzle + 1500.0 * fwd_world
+
+        # Per Coffee 2026-05-14 ("i want to see how many particles
+        # should fit in from gun to impact"): the ideal particle
+        # count = engagement distance * spawn_per_meter.  Compare
+        # to a trail PS's `max_particles` to see whether the budget
+        # is enough to keep the trail continuous all the way from
+        # gun to impact.  Numbers go to the in-app console (already
+        # cleared at top of this method) so each shot's report
+        # stands alone.
+        _spm = 15.0   # mirror of trail PS spawn_per_meter
+        _budget = '?'
+        if self.shot_trail_systems:
+            _spm = float(getattr(
+                self.shot_trail_systems[0], 'spawn_per_meter', _spm))
+            _budget = self.shot_trail_systems[0].max
+        _dist = float(np.linalg.norm(
+            np.asarray(target_world, dtype=np.float32)
+            - np.asarray(muzzle,      dtype=np.float32)))
+        _ideal = int(round(_dist * _spm))
+        self.log(f"muzzle  ({muzzle[0]:+.2f}, "
+                 f"{muzzle[1]:+.2f}, {muzzle[2]:+.2f})")
+        self.log(f"target  ({target_world[0]:+.2f}, "
+                 f"{target_world[1]:+.2f}, {target_world[2]:+.2f})")
+        self.log(f"dist            {_dist:7.2f} m")
+        self.log(f"spawn_per_meter {_spm:7.1f}")
+        self.log(f"ideal particles {_ideal:7d}")
+        self.log(f"budget          {_budget!s:>7}")
+        if isinstance(_budget, int) and _ideal > _budget:
+            self.log(f"  -> trail will exhaust "
+                     f"{(1.0 - _budget/max(_ideal,1))*100:.0f}% before "
+                     f"impact",
+                     color=(255, 180, 90))
+
+        # Look up the default shell's speed in m/s from the parsed
+        # gun XML.  `_active_set.tank_info['shells']` is the list
+        # populated by VehicleXMLLoader._read_shells -- typically the
+        # FIRST entry is the default AP round.  Fall back to 50 m/s
+        # for visualisation if nothing's loaded yet.
+        shell_speed_mps = 50.0
+        try:
+            info = getattr(self._active_set, 'tank_info', None) or {}
+            shells = info.get('shells') or []
+            if shells:
+                raw = (shells[0].get('speed') or '').strip()
+                if raw:
+                    shell_speed_mps = max(0.1, float(raw))
+        except Exception:
+            pass
+        vis_speed = shell_speed_mps / max(0.01,
+            float(self._PROJECTILE_VIS_SLOWDOWN))
+        new_shot = self.shots.fire(muzzle, fwd_world, target_world,
+                                    velocity_mps=vis_speed)
+        # Per Coffee 2026-05-14 (one-shot trail pool, rule 2): the
+        # only way a one-shot system reuses slots is a full
+        # `reset_pool` at slot-rent time.  That zeros every
+        # per-particle field, the spawn accumulator, the round-robin
+        # emitter index, AND the monotonic `_next_slot` cursor so
+        # the next 600 spawns start cleanly at slot 0.  No-op for
+        # the never-fired-yet case.
+        if (new_shot is not None
+                and self.shot_trail_systems):
+            try:
+                slot_idx = self.shots.shots.index(new_shot)
+                ps = self.shot_trail_systems[slot_idx]
+                ps.reset_pool()
+                # Per Coffee 2026-05-14 ("cap max particles to the
+                # ideal count at each shot"): trim the spawn cap so
+                # this shot emits exactly enough particles to cover
+                # gun -> impact at the current density.  Short shots
+                # don't burn budget; long shots are clamped to the
+                # underlying buffer capacity (= len(ps.alive)) so we
+                # never index past the numpy arrays.  `_next_slot`
+                # already gates emission against `ps.max`, so this
+                # is the only line that needs to change.
+                ps.max = max(1, min(_ideal, len(ps.alive)))
+                # Per Coffee 2026-05-14 ("calculate needed fade
+                # factor based of vector length of fire point to
+                # sight point"): set this shot's particle lifetime
+                # to the bullet's flight time (= dist / velocity).
+                # Result: the FIRST particle (born at the muzzle)
+                # ages to exactly `lifetime` at impact, so its
+                # alpha hits 0 the moment the bullet stops.  Later
+                # particles (born along the path) persist past
+                # impact for `lifetime - age_at_impact` -- the
+                # trail rolls up from gun toward impact rather
+                # than vanishing all at once.  Clamped to a 0.5 s
+                # floor so a point-blank shot still gets a brief
+                # visible streak.  Shader's fade_start/end are
+                # frame-fractions of `lifetime` so they auto-scale.
+                _flight_time = _dist / max(0.1, vis_speed)
+                ps.lifetime = max(0.5, float(_flight_time))
+                self.log(f"slot            {slot_idx:7d}")
+                self.log(f"cap             {ps.max:7d}")
+                self.log(f"lifetime        {ps.lifetime:7.2f} s")
+                # Per Coffee 2026-05-14 ("multiple tracers showing"):
+                # append every fire to a persistent log file so the
+                # full click history is preserved across runs.  Even
+                # if the in-app console gets cleared between fires,
+                # this file shows N fires per N clicks.  Gated on
+                # DEBUG_FILE_DUMPS so the file write is skipped
+                # entirely when on-disk dumps are off.
+                if DEBUG_FILE_DUMPS:
+                    try:
+                        import time as _ftxt
+                        log_path = os.path.join(
+                            os.path.dirname(os.path.dirname(__file__)),
+                            'debug_screens', 'fire_log.txt')
+                        os.makedirs(
+                            os.path.dirname(log_path), exist_ok=True)
+                        with open(log_path, 'a', encoding='utf-8') as _fh:
+                            _fh.write(
+                                f"{_ftxt.strftime('%Y-%m-%d %H:%M:%S')}  "
+                                f"slot={slot_idx}  "
+                                f"dist={_dist:.2f}m  "
+                                f"ideal={_ideal}  "
+                                f"cap={ps.max}  "
+                                f"pre_active={_pre_active}\n")
+                    except Exception:
+                        pass
+            except (ValueError, IndexError):
+                pass
+        return new_shot
 
     def _update_emitters_for_chassis_pose(self, chassis_pose):
         """Transform every smoke / fire emitter through `chassis_pose`
@@ -11976,6 +13506,29 @@ class Viewer:
             self.meshes   = []
             all_positions = []
             self._exhaust_points = []   # filled per-component below
+            # Per Coffee 2026-05-13: invalidate aim pivots so the new
+            # tank captures its own turret / gun rotation centres and
+            # XML pitch / yaw limits via `_capture_aim_pivots`.  Yaw /
+            # pitch state itself is preserved so reloading the same
+            # tank keeps the aim where it was.
+            self._turret_pivot_chassis = None
+            self._gun_pivot_chassis    = None
+            # Authoritative muzzle points from the gun's visual file
+            # (`HP_gunFire` / `HP_gunFire_L` / `HP_gunFire_R` ...).
+            # Per Coffee 2026-05-14 -- twin-gun tanks ship both an
+            # _L and _R marker; we walk every `hp_gunfire*` node and
+            # alternate between them at fire time.  Sorted by node
+            # name so the L/R order is deterministic.
+            # Empty list falls back to the legacy `gp + BARREL_LENGTH_M
+            # * fwd` heuristic in `_fire_round` (rare; defensive for
+            # tanks with no HP_gunFire at all).  Stored in gun-mesh-
+            # local GL coords (the visual file is BW; we negate Z at
+            # parse time).
+            self._gun_muzzles_local_gl  = []
+            # Round-robin cursor across the muzzle list.  Bumped once
+            # per fire; modulo len() so a single-muzzle tank just
+            # stays at 0 forever.
+            self._gun_muzzle_next_idx   = 0
             # Fire/damage spawn points reset to empty too -- only get
             # populated below when `damaged=True` and the per-component
             # walk finds HP_Fire_* nodes.
@@ -12057,6 +13610,47 @@ class Viewer:
                                 'pos':       world_pos,
                                 'fwd':       fwd_gl,
                             })
+
+                # ---- Gun muzzle hardpoints (HP_gunFire / _L / _R) -------
+                # Per Coffee 2026-05-14 ("HP_gunFire_R and
+                # HP_gunFire_L ... search for first.  We will need a
+                # way to alternate between the locations after each
+                # shot").  Every node whose identifier starts with
+                # `hp_gunfire` is treated as a muzzle: single-gun
+                # tanks ship one (`HP_gunFire`), twin-gun tanks ship
+                # two (`HP_gunFire_L` / `_R`).  Sorted by name so the
+                # alternation order is deterministic (L precedes R
+                # alphabetically, the same convention WoT uses for
+                # the firing sequence).  Position is gun-mesh-local
+                # BigWorld; we Z-flip at parse time so the runtime
+                # path can compose without extra transforms.
+                if vis and label == 'gun':
+                    try:
+                        xml_root = VehicleXMLLoader._read_visual_nodes(vis)
+                        if xml_root is not None:
+                            transforms = (
+                                VisualLoader.get_node_world_transforms(
+                                    xml_root))
+                            hp_items = [
+                                (nm, pf[0]) for nm, pf
+                                in transforms.items()
+                                if nm.startswith('hp_gunfire')
+                            ]
+                            hp_items.sort(key=lambda x: x[0])
+                            for nm, pos_bw in hp_items:
+                                mz = np.array([
+                                    float(pos_bw[0]),
+                                    float(pos_bw[1]),
+                                    -float(pos_bw[2]),
+                                ], dtype=np.float32)
+                                self._gun_muzzles_local_gl.append(mz)
+                                print(f"    {nm} (mesh-local GL): "
+                                      f"({mz[0]:+.4f}, "
+                                      f"{mz[1]:+.4f}, "
+                                      f"{mz[2]:+.4f})")
+                    except Exception as _exc_mz:
+                        print(f"    HP_gunFire parse failed: "
+                              f"{type(_exc_mz).__name__}: {_exc_mz}")
 
                 # ---- Fire / damage spawn points (damaged tanks only) ----
                 # HP_Fire_* nodes only matter when the user loaded the
@@ -12495,30 +14089,35 @@ class Viewer:
                                     '.visual_processed')
                             break
                     if not vehicle_base:
-                        print(f"[homie] no vehicle pkg path on any "
-                              f"chassis mesh; primitives_zip seen: "
-                              f"{chass_pz_seen}")
+                        if TRACK_PHYSICS_VERBOSE:
+                            print(f"[homie] no vehicle pkg path on any "
+                                  f"chassis mesh; primitives_zip seen: "
+                                  f"{chass_pz_seen}")
                     elif self._pkg_extractor is None:
-                        print(f"[homie] no PkgExtractor configured "
-                              f"-- skip {vehicle_base}")
+                        if TRACK_PHYSICS_VERBOSE:
+                            print(f"[homie] no PkgExtractor configured "
+                                  f"-- skip {vehicle_base}")
                     else:
                         visual_local = self._pkg_extractor.extract(
                             chassis_visual_path)
                         if not visual_local:
-                            print(f"[homie] {vehicle_base}: could "
-                                  f"not extract {chassis_visual_path}")
+                            if TRACK_PHYSICS_VERBOSE:
+                                print(f"[homie] {vehicle_base}: could "
+                                      f"not extract {chassis_visual_path}")
                         else:
                             bones = parse_chassis_bone_world_positions(
                                 visual_local)
                             if not bones:
-                                print(f"[homie] {vehicle_base}: bone "
-                                      f"parse returned 0 named nodes")
+                                if TRACK_PHYSICS_VERBOSE:
+                                    print(f"[homie] {vehicle_base}: bone "
+                                          f"parse returned 0 named nodes")
                             else:
                                 self._track_chassis_bones_bind = bones
-                                print(f"[homie] {vehicle_base}: "
-                                      f"{len(bones)} chassis bones "
-                                      f"parsed; chain built per-frame "
-                                      f"from wheel positions + radii")
+                                if TRACK_PHYSICS_VERBOSE:
+                                    print(f"[homie] {vehicle_base}: "
+                                          f"{len(bones)} chassis bones "
+                                          f"parsed; chain built per-frame "
+                                          f"from wheel positions + radii")
                                 # Per Coffee 2026-05-13 ("rotate
                                 # all wheels"): register drive
                                 # sprockets, idlers, and return
@@ -12606,14 +14205,16 @@ class Viewer:
                                             _ex_names,
                                             _ex_hubs,
                                             _ex_radii)
-                                        print(f"[rotation] {len(_ex_names)} "
-                                              f"extra rotating bones "
-                                              f"registered (sprockets/"
-                                              f"idlers/rollers)")
+                                        if TRACK_PHYSICS_VERBOSE:
+                                            print(f"[rotation] {len(_ex_names)} "
+                                                  f"extra rotating bones "
+                                                  f"registered (sprockets/"
+                                                  f"idlers/rollers)")
                                 except Exception as _ex_extras:
-                                    print(f"[rotation] extra-wheels "
-                                          f"wiring failed: "
-                                          f"{_ex_extras}")
+                                    if TRACK_PHYSICS_VERBOSE:
+                                        print(f"[rotation] extra-wheels "
+                                              f"wiring failed: "
+                                              f"{_ex_extras}")
                                 # Phase C: pad-mesh path resolution +
                                 # GPU upload.  Gated by chassis XML
                                 # declaring track_segment_models.
@@ -12626,10 +14227,11 @@ class Viewer:
                                 try:
                                     self._wire_homie_to_physics()
                                 except Exception as _ex_phx:
-                                    print(f"[homie-physics] wiring "
-                                          f"skipped: "
-                                          f"{type(_ex_phx).__name__}: "
-                                          f"{_ex_phx}")
+                                    if TRACK_PHYSICS_VERBOSE:
+                                        print(f"[homie-physics] wiring "
+                                              f"skipped: "
+                                              f"{type(_ex_phx).__name__}: "
+                                              f"{_ex_phx}")
                                 # Per Coffee 2026-05-11 ("there are
                                 # weights in the tank_mat_r/l_skinned
                                 # for the rubber band tracks.
@@ -12645,14 +14247,16 @@ class Viewer:
                                         vehicle_base,
                                         chassis_visual_path)
                                 except Exception as _ex_sag:
-                                    print(f"[track-sag] load skipped: "
-                                          f"{type(_ex_sag).__name__}: "
-                                          f"{_ex_sag}")
+                                    if TRACK_PHYSICS_VERBOSE:
+                                        print(f"[track-sag] load skipped: "
+                                              f"{type(_ex_sag).__name__}: "
+                                              f"{_ex_sag}")
                 except Exception as exc:
-                    import traceback
-                    print(f"[homie] load skipped: "
-                          f"{type(exc).__name__}: {exc}")
-                    traceback.print_exc()
+                    if TRACK_PHYSICS_VERBOSE:
+                        import traceback
+                        print(f"[homie] load skipped: "
+                              f"{type(exc).__name__}: {exc}")
+                        traceback.print_exc()
                 # Reset the per-render error gate so a previous
                 # tank's spline error doesn't silence this load.
                 self._track_spline_err_logged = False
@@ -12681,7 +14285,7 @@ class Viewer:
                 # is toggled on the controls get re-printed.
                 self._drive_keys_seen = False
                 # Print the wired chassis params for the new tank.
-                if _chassis_kwargs:
+                if _chassis_kwargs and TRACK_PHYSICS_VERBOSE:
                     parts = []
                     if 'radius' in _chassis_kwargs:
                         parts.append(f"r={_chassis_kwargs['radius']:.3f}")
@@ -13237,8 +14841,18 @@ class Viewer:
             self._shine_slider.track_w  = L_TRACK_W
             self._shine_slider.label_x  = 6
             self._shine_slider.value_x  = L_VAL_X
-        # Checkbox row below Ambient -- two checkboxes side by side
-        cb_row_cy = slider_y0 + 2 * ROW_H
+        # Mouse sensitivity slider -- third row in the left-panel
+        # slider stack.  Geometry mirrors Light / Ambient so the
+        # group looks like a uniform 3-slider column.
+        if self._mouse_sens_slider:
+            self._mouse_sens_slider.track_x  = L_TRACK_X
+            self._mouse_sens_slider.track_cy = slider_y0 + 2 * ROW_H
+            self._mouse_sens_slider.track_w  = L_TRACK_W
+            self._mouse_sens_slider.label_x  = 6
+            self._mouse_sens_slider.value_x  = L_VAL_X
+        # Checkbox row sits below the slider stack; pushed down one
+        # row to make space for the new Mouse slider above.
+        cb_row_cy = slider_y0 + 3 * ROW_H
         if self._invert_metal_cb:
             self._invert_metal_cb.x = 16
             self._invert_metal_cb.y = cb_row_cy - self._invert_metal_cb.size // 2
@@ -13511,6 +15125,17 @@ class Viewer:
 
     def handle_input(self):
         """Process all queued SDL events and mouse state."""
+        # Per Coffee 2026-05-13 (crash fix): `viewer_input` is used
+        # both in the MOUSEMOTION-no-button camera-orbit branch
+        # (early in this function) AND in the held-button camera
+        # branches further down.  Python treats any name assigned
+        # ANYWHERE in a function as local for the entire function,
+        # so the deferred `from . import viewer_input` at the bottom
+        # was triggering UnboundLocalError at the earlier reference.
+        # Hoisting the import to the top keeps the lazy-import
+        # benefit (no top-of-module circular-import risk) while
+        # binding the name before any reference.
+        from . import viewer_input
         for event in pygame.event.get():
             if event.type == QUIT:
                 self.running = False
@@ -13655,6 +15280,143 @@ class Viewer:
                     # entry so the view tracks the tank as it
                     # drives / rotates.
                     self._toggle_ortho_left_view()
+                elif event.key == K_SPACE:
+                    # Trigger one gun-recoil cycle.  Idempotent
+                    # while a cycle is in flight -- the state
+                    # machine in gun_recoil.GunRecoil ignores
+                    # repeat triggers until the previous return
+                    # phase has settled back to idle.
+                    try:
+                        self.gun_recoil.trigger()
+                    except Exception:
+                        pass
+                    # Fire one debug projectile from the live muzzle
+                    # toward the current ball.  Slot taken from the
+                    # 50-deep shot pool; red-sphere render handled
+                    # in the render path.
+                    try:
+                        self._fire_round()
+                    except Exception:
+                        pass
+                    # Per Coffee 2026-05-13 ("one again.. nothing"):
+                    # dual-route the diagnostic to BOTH stdout AND
+                    # the in-window log overlay.  The user runs
+                    # the launcher from a context where stdout is
+                    # not visible, so a console-only print is silent
+                    # feedback.  self.log paints onto the viewport
+                    # so it can be read directly.
+                    try:
+                        from .gun_recoil import (
+                            pick_recoil_bone as _pick_recoil,
+                            RECOIL_BONE_OVERRIDE as _override)
+                        _gm_count = 0
+                        _gm_first = None
+                        for _m in self.meshes:
+                            if getattr(_m, 'component', '') != 'gun':
+                                continue
+                            _gm_count += 1
+                            if _gm_first is None:
+                                _gm_first = _m
+                        if _gm_first is None:
+                            _msg = "no gun submeshes loaded"
+                        else:
+                            pal = getattr(_gm_first, 'bone_palette',
+                                          None) or []
+                            has_skin = (_gm_first.bone_indices is not None
+                                        and _gm_first.bone_weights is not None
+                                        and pal)
+                            picked = _pick_recoil(pal) if pal else None
+                            picked_name = (pal[picked]
+                                           if picked is not None else None)
+                            _msg = (
+                                f"gun submeshes={_gm_count} "
+                                f"skin={'Y' if has_skin else 'N'} "
+                                f"pal={list(pal)} "
+                                f"pick={picked_name!r} "
+                                f"byte={picked * 3 if picked is not None else -1} "
+                                f"dbg={bool(getattr(self, '_debug', False))} "
+                                f"ov={_override!r}")
+                            # Per Coffee 2026-05-13 ("shader not doing
+                            # its vertex shift?"): dump unique iii
+                            # byte values + a histogram so we can see
+                            # whether the recoil byte actually appears
+                            # in slot 0 of any verts.  If iii.x = 3
+                            # never occurs but the picked byte is 3,
+                            # the veto kills the recoil universally
+                            # and nothing moves -- which is exactly
+                            # the "no movement" symptom we're chasing.
+                            try:
+                                import numpy as _np
+                                bi = _gm_first.bone_indices
+                                bw = _gm_first.bone_weights
+                                if bi is not None and bi.size:
+                                    bi_arr = _np.asarray(bi)
+                                    if bi_arr.ndim == 1:
+                                        bi_arr = bi_arr.reshape(-1, 4)
+                                    # Histogram of unique values per slot.
+                                    for _slot in range(4):
+                                        u, c = _np.unique(
+                                            bi_arr[:, _slot],
+                                            return_counts=True)
+                                        _msg += (f"\n  iii[{_slot}]: " +
+                                                 ", ".join(
+                                                    f"{int(b)}:{int(n)}"
+                                                    for b, n in zip(u, c)))
+                                    # Sample 4 verts -- show their
+                                    # actual iii / ww so the user
+                                    # can cross-check against the
+                                    # debug-overlay colour they see.
+                                    bw_arr = (_np.asarray(bw).reshape(-1, 4)
+                                              if bw is not None and bw.size
+                                              else None)
+                                    samples = [0,
+                                               bi_arr.shape[0] // 4,
+                                               bi_arr.shape[0] // 2,
+                                               bi_arr.shape[0] - 1]
+                                    for _i in samples:
+                                        _ii = bi_arr[_i].tolist()
+                                        _ww = (bw_arr[_i].tolist()
+                                               if bw_arr is not None
+                                               else None)
+                                        _msg += f"\n  v[{_i}] iii={_ii} ww={_ww}"
+                            except Exception as _de:
+                                _msg += f"\n  (iii dump err: {_de})"
+                        # Per Coffee 2026-05-13 ("clean up the put put
+                        # to the cmd window.. way to verbose"):
+                        # in-window log gets a ONE-LINE summary; the
+                        # full multi-line dump goes to the sidecar
+                        # file only.  Console echoes the summary too
+                        # (one line, harmless).
+                        if _gm_first is None:
+                            _summary = "SPACE: no gun submeshes"
+                        else:
+                            _summary = (
+                                f"SPACE: pick={picked_name!r} "
+                                f"byte={picked * 3 if picked is not None else -1} "
+                                f"dbg={bool(getattr(self, '_debug', False))}")
+                        print(f"[gun-recoil] {_summary}")
+                        try:
+                            self.log(_summary, color=(255, 180, 80))
+                        except Exception:
+                            pass
+                        try:
+                            import os as _os
+                            _dump_path = _os.path.abspath(
+                                "gun_recoil_dump.txt")
+                            with open(_dump_path, "w",
+                                      encoding="utf-8") as _f:
+                                _f.write(f"[gun-recoil] SPACE: {_msg}\n")
+                        except Exception as _de:
+                            print(f"[gun-recoil] dump write failed: "
+                                  f"{_de}")
+                    except Exception as _exc:
+                        _err = f"diag failed: {_exc}"
+                        print(f"[gun-recoil] SPACE {_err}")
+                        try:
+                            self.log(f"SPACE {_err}",
+                                     color=(255, 100, 100))
+                        except Exception:
+                            pass
                 elif event.key == K_n:
                     self.use_normal_map = not self.use_normal_map
                 elif event.key == K_o:
@@ -13822,13 +15584,13 @@ class Viewer:
                                      'omega_roll_dps'):
                             if hasattr(tp, attr):
                                 setattr(tp, attr, 0.0)
-                    self.camera.yaw      = 225.0
-                    self.camera.pitch    = 30.0
-                    self.camera.center   = np.array(
-                        [0.0, 0.0, 0.0], dtype=np.float32)
-                    self.camera.distance = 10.0
-                    if self._scene_bbox is not None:
-                        self.camera.fit_to_bounds(*self._scene_bbox)
+                    # Per Coffee 2026-05-14 ("r key reset view"):
+                    # land on the canonical (0, 5, 8) -> origin
+                    # view via the shared helper, matching startup.
+                    # `fit_to_bounds` is intentionally NOT called
+                    # here -- the user wants a deterministic view
+                    # on R, not a content-fit zoom.
+                    self._apply_default_camera_view()
                     self.camera_mode = 0
                     try:
                         self.log("R: tank + camera reset, "
@@ -13922,6 +15684,29 @@ class Viewer:
                     if hit is not None:
                         self._on_xml_bar_click(hit)
                         continue
+                # Per Coffee 2026-05-13 ("WoT defaults"): LMB-down
+                # over the 3D viewport (not UI, not ALT-rect) fires
+                # the gun.  Same trigger SPACE uses; the recoil state
+                # machine is idempotent so a click-drag fires once
+                # at the click moment, then the LMB-drag continues
+                # to its other handler (camera orbit) without
+                # re-triggering.  Matches WoT's left-click fires +
+                # right-mouse aims camera scheme.
+                if (event.button == 1
+                        and not bool(pygame.key.get_mods()
+                                     & pygame.KMOD_ALT)
+                        and not self.ui.is_pointer_over_ui(mx, my)
+                        and self._gun_pivot_chassis is not None):
+                    try:
+                        self.gun_recoil.trigger()
+                    except Exception:
+                        pass
+                    # Fire one debug projectile alongside the recoil.
+                    try:
+                        self._fire_round()
+                    except Exception:
+                        pass
+
                 if event.button == 1 and self.ui.is_pointer_over_ui(mx, my):
                     # Section-header clicks come first -- they're
                     # wider hit zones than buttons (full row width)
@@ -13964,6 +15749,41 @@ class Viewer:
                 # end corner so the overlay tracks the cursor.
                 if self._alt_rect_start is not None:
                     self._alt_rect_end = event.pos
+
+                # Per Coffee 2026-05-13 ("add turret rotation and
+                # gun elevation to the mouse controls for panning
+                # while mouse up").  When NO mouse buttons are
+                # pressed, mouse motion accumulates into turret yaw
+                # and gun pitch.  Camera orbit / pan etc all gate on
+                # buttons[0/1/2] held, so the no-button branch is a
+                # clean free-space for the aim controls.  Motion is
+                # incremental (event.rel), so cursor position over
+                # a UI panel produces no jump on re-entry to the
+                # 3D viewport -- the aim just continues smoothly.
+                # Per Coffee 2026-05-13 ("i should only look around
+                # if the right mouse is down.  other wise we track
+                # sphere's location" + "we aim and the ball is
+                # placed where we aim"):
+                #   * RMB-drag      -> orbit CAMERA (handled in the
+                #                       continuous mouse-state block
+                #                       further down via apply_orbit).
+                #   * No-button mouse motion -> move AIM (chassis-
+                #                       local yaw + pitch).  The
+                #                       per-frame
+                #                       _drive_aim_from_aim_state
+                #                       ray-casts in that direction
+                #                       and places the blue ball;
+                #                       gun pitches to track ball.
+                # Camera and aim are independent: RMB swings the view
+                # without disturbing aim; mouse moves aim without
+                # touching the view.
+                # Per Coffee 2026-05-13 ("we need that projected
+                # point"): the mouse cursor's SCREEN POSITION is
+                # now the source of truth for aim, not accumulated
+                # mouse motion.  `_drive_aim_from_aim_state` reads
+                # `pygame.mouse.get_pos()` every frame and unprojects
+                # through inv(proj@view) to land the ball under the
+                # cursor.  No per-event aim accumulation needed.
 
         # Continuous mouse-button camera controls
         btns      = pygame.mouse.get_pressed()
@@ -14315,7 +16135,8 @@ class Viewer:
             # Ctrl + LM wins over Shift + LM if both held.
             # Plain LM (no modifier) still orbits.  Right-button
             # drag still zooms (independent of LEFT button).
-            from . import viewer_input
+            # `viewer_input` is now imported at the top of
+            # handle_input (see crash-fix comment there).
             # Per Coffee 2026-05-10 ("alt down should stop all
             # mouse rotations and freeze it"): when ALT is
             # held, the user is in screenshot-rectangle mode.
@@ -14384,7 +16205,20 @@ class Viewer:
                         0.05,
                         float(self._ortho_left_half_h) * factor)
                 else:
-                    viewer_input.apply_zoom_drag(self, dy)
+                    # Per Coffee 2026-05-13 ("WoT defaults"):
+                    # right-mouse-drag now ORBITS the camera (WoT's
+                    # camera-look key).  LMB orbit is still available
+                    # via the lm_down branch below for backwards
+                    # compat with the old click-and-drag scheme;
+                    # zoom-drag moved off RMB onto the mouse wheel
+                    # which already handles zoom unambiguously.
+                    # Per Coffee 2026-05-13: scale by the UI Mouse
+                    # slider so the same multiplier governs both
+                    # camera orbit and mouse aim.
+                    _sens = (self._mouse_sens_slider.value
+                             if self._mouse_sens_slider else 1.8)
+                    viewer_input.apply_orbit(
+                        self, dx * _sens, dy * _sens)
             elif lm_down and (dx or dy):
                 if self._is_ortho_active():
                     # Plain LM-drag in ortho = pan (no orbit
@@ -14404,8 +16238,15 @@ class Viewer:
                         cy += dy * mpp
                         self._ortho_left_center_local = (
                             float(cx), float(cy), float(cz))
-                else:
-                    viewer_input.apply_orbit(self, dx, dy)
+                # Per Coffee 2026-05-13 ("block left mouse from
+                # affecting view angles.. leave zoom alone"): the
+                # legacy LM-drag-orbits-camera fallback used to fire
+                # here in the non-ortho branch.  Removed -- LMB no
+                # longer rotates the view in any cam mode.  Camera
+                # orbit is RMB-drag only now; LMB click is for
+                # firing, LMB+Shift / LMB+Ctrl for pan / Y-lift
+                # (translation, not rotation); mouse wheel still
+                # zooms unchanged.
 
         self.mouse_last = list(mouse_pos)
 
@@ -14614,6 +16455,48 @@ class Viewer:
         # (toggling the visual must not pause the solver, or the
         # mesh-snap-to-bind in the else branch produces a Z jump
         # on the next toggle).
+        # Gun recoil state machine.  Hoisted ABOVE the tank-physics
+        # gate per Coffee 2026-05-13 ("shader not doing its vertex
+        # shift?" / "i see the colors so it knows what verts are
+        # what part. they just dont animate"): the original site was
+        # nested inside the tank_physics_enabled-and-terrain block,
+        # so disabling physics or running without terrain froze the
+        # recoil cycle at offset=0 -- which produced the exact
+        # "colours OK, no movement" symptom.  Update needs to run
+        # every frame whether or not the chassis physics is alive.
+        # Per Coffee 2026-05-13 ("clean up the put put"): silent
+        # tick -- no per-phase log line.  The state machine still
+        # advances; we just don't narrate it.
+        _grdt = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
+        try:
+            self.gun_recoil.update(_grdt)
+        except Exception:
+            pass
+
+        # Shot pool tick.  Per Coffee 2026-05-14 ("verify emitter
+        # starts at fire time" + observation that first emit was
+        # 0.92 m forward of muzzle): MOVED to the end of render(),
+        # after the trail-smoke builder, so cur_pos on the
+        # fire-frame is still at the muzzle when the first trail
+        # particle spawns.  See the call site below the
+        # shot_trail_smoke render.
+
+        # Impact pool tick.  Symmetric with shots.update -- advances
+        # flash/dust/scorch phases on each active hit.  No rendering
+        # yet.  See impact_pool.py.
+        try:
+            self.impacts.update(_grdt)
+        except Exception:
+            pass
+
+        # Turret yaw + gun pitch integrator is called LATER, after
+        # `chassis_pose` is fresh -- see the call below the
+        # `chassis_pose = self.tank_physics.update(...)` line.  This
+        # ordering lets `_drive_aim_from_camera` use the current
+        # chassis frame when computing target angles, then the
+        # integrator advances actual angles toward that target before
+        # the mesh-pose composer uses them.
+
         if (self.tank_physics_enabled and self.meshes
                 and self.terrain
                 and self.tank_physics is not None):
@@ -14622,6 +16505,11 @@ class Viewer:
                 if not hasattr(m, 'bind_model_matrix'):
                     m.bind_model_matrix = np.array(
                         m.model_matrix, dtype=np.float32, copy=True)
+            # Capture turret + gun pivots and aim limits once per tank
+            # load (no-op once populated).  Pivots come from the first
+            # turret/gun mesh's bind_model_matrix translation column;
+            # limits come from `_pending_chassis_info['gun']`.
+            self._capture_aim_pivots()
             # Tick the physics with the frame delta tracked in run().
             # Clamp to a reasonable minimum so a paused / single-step
             # frame doesn't make the physics solver jitter.
@@ -14644,6 +16532,20 @@ class Viewer:
             chassis_pose = self.tank_physics.update(self.terrain, dt)
             _phys_ms_raw = (_time.perf_counter() - _t_phys0) * 1000.0
             self._frame_timers['physics_update'] = _phys_ms_raw
+            # Per Coffee 2026-05-13 ("project the view vector on to
+            # the terrain.. force the gun to seek that look at
+            # point"): ray-cast camera forward against the terrain,
+            # convert hit to chassis-local, and write target turret
+            # yaw + gun pitch.  Then the integrator advances actual
+            # angles toward those targets at the XML traverse rates.
+            try:
+                self._drive_aim_from_aim_state(view, chassis_pose, proj)
+            except Exception:
+                pass
+            try:
+                self._advance_aim_integrator(_grdt)
+            except Exception:
+                pass
             # 1-Turn auto-test recorder: capture this frame's freshly-
             # computed wheel state + chassis pose BEFORE we apply the
             # pose to meshes (the recorder doesn't read mesh state,
@@ -14696,11 +16598,28 @@ class Viewer:
                 # so the FIRST frame of motion fires immediately
                 # rather than waiting for another 12-frame interval.
                 self._contact_filo_phase = self._contact_filo_period
-            # Apply chassis pose to every sub-mesh.
+            # Apply chassis pose to every sub-mesh.  Per Coffee
+            # 2026-05-13 ("add turret rotation and gun elevation"):
+            # turret submeshes get an extra yaw rotation about the
+            # turret pivot, and gun submeshes get yaw + pitch (pitch
+            # in the bind frame about the gun pivot, then yaw sweeps
+            # the pitched gun around the turret pivot).  Hull /
+            # chassis / track / wheel submeshes still see the plain
+            # chassis_pose @ bind composition.
             _t_pose0 = _time.perf_counter()
+            _yaw_mat, _pitch_mat = self._aim_yaw_pitch_matrices()
             for m in self.meshes:
-                m.model_matrix = (chassis_pose
-                                   @ m.bind_model_matrix).astype(np.float32)
+                comp = getattr(m, 'component', '')
+                if comp == 'turret':
+                    m.model_matrix = (chassis_pose @ _yaw_mat
+                                       @ m.bind_model_matrix).astype(np.float32)
+                elif comp == 'gun':
+                    m.model_matrix = (chassis_pose @ _yaw_mat
+                                       @ _pitch_mat
+                                       @ m.bind_model_matrix).astype(np.float32)
+                else:
+                    m.model_matrix = (chassis_pose
+                                       @ m.bind_model_matrix).astype(np.float32)
             self._frame_timers['mesh_pose_apply'] = (
                 (_time.perf_counter() - _t_pose0) * 1000.0)
             # Total tank-math wall time still reported on the
@@ -14824,19 +16743,18 @@ class Viewer:
         # below builds nothing and just runs the per-bone console
         # dump -- the actual segment-build + draw lives later in
         # render() near the look-at crosshair.
-        if (self._debug
-                and self.tank_physics_enabled and self.tank_physics is not None
-                and self.meshes
-                and self.show_terrain and self.terrain
-                and len(self.tank_physics.last_wheel_world)):
-            tp     = self.tank_physics
-            # ---- Live console dump of per-bone angles ----------------
-            # Clear + reprint every frame so the user gets a real-time
-            # readout of what each wheel's suspension is doing.  Slows
-            # the frame loop noticeably (one cls + N print() calls per
-            # tick) but Professor Coffee explicitly accepted that
-            # cost ("i dont care if it slows it down").
-            self._dump_bone_angles_to_console(tp)
+        # Per Coffee 2026-05-13 ("stop sending physics in a loop too..
+        # its bombing out cmd window"): the per-frame
+        # `_dump_bone_angles_to_console(tp)` call that lived here
+        # used to clear+reprint the live wheel-state table every
+        # tick.  Useful when actively diagnosing suspension issues
+        # but unwanted noise the rest of the time -- and it ran
+        # whenever Debug was on, which is also how the gun-recoil
+        # red-vert overlay gates, so the user couldn't get the
+        # overlay without the spam.  Disabled here; the helper
+        # method `_dump_bone_angles_to_console` is kept around so
+        # it can be wired to a one-shot button or hotkey later
+        # without re-implementing the formatter.
 
         # ---- Hull bounding-box overlay -------------------------------
         # Draws a wireframe AABB around every component=='hull' mesh.
@@ -14951,7 +16869,40 @@ class Viewer:
             has_skin_data = (mesh.bone_indices is not None
                              and mesh.bone_weights is not None
                              and palette)
-            if (has_skin_data
+            # Per Coffee 2026-05-13 ("gun recoil next, guns are
+            # skinned"): gun-component meshes pull their bone-matrix
+            # array from `self.gun_recoil` instead of TankPhysics.
+            # tank_physics.py is locked as of 1.119.0 so the recoil
+            # offset can't live there.  Gun palette is small (usually
+            # 1-3 bones), so the cost of building one extra matrix
+            # array per gun submesh is negligible.
+            is_gun_mesh = (getattr(mesh, 'component', '') == 'gun')
+            # Per Coffee 2026-05-14 ("FORGET ABOUT BONE IDs"): no
+            # picker, no palette-index math.  The recoil-byte filter
+            # is the literal constant 3 (= the (R,G)=(3,3) colour
+            # pattern that identifies recoil verts on every WoT gun
+            # regardless of which bone byte 3 actually addresses
+            # in this tank's palette).  The translation is pushed
+            # to the shader as `u_gun_recoil_translation` so we
+            # don't need to know which palette slot the recoil
+            # bone happens to live at -- G78 ships it at idx 1, A38
+            # at idx 0; both work.
+            recoil_byte = -1
+            recoil_translation = (0.0, 0.0, 0.0)
+            if has_skin_data and is_gun_mesh:
+                bones = self.gun_recoil.bone_matrix_array(palette)
+                active.set_mat4_array('u_bones', bones)
+                active.set_int('u_skinned', 1)
+                recoil_byte = 3
+                # Pull the recoil translation from gun_recoil's
+                # current offset directly (mesh-local +Z direction
+                # by default; see gun_recoil.RECOIL_AXIS).
+                from .gun_recoil import RECOIL_AXIS
+                t = [0.0, 0.0, 0.0]
+                axis = max(0, min(2, int(RECOIL_AXIS)))
+                t[axis] = float(self.gun_recoil.offset_m)
+                recoil_translation = tuple(t)
+            elif (has_skin_data
                     and self.tank_physics_enabled
                     and self.tank_physics is not None):
                 bones = self.tank_physics.bone_matrix_array(palette)
@@ -14959,6 +16910,9 @@ class Viewer:
                 active.set_int('u_skinned', 1)
             else:
                 active.set_int('u_skinned', 0)
+            active.set_int('u_gun_recoil_byte', recoil_byte)
+            active.set_vec3('u_gun_recoil_translation',
+                            *recoil_translation)
 
             # Per-bone state array (size MAX_BONES = 64, must match
             # mesh.vert).  Default 0 (no highlight); each wheel name
@@ -14983,6 +16937,16 @@ class Viewer:
                     if pi < MAX_BONES:
                         wheel_state_arr[pi] = int(per_wheel_state[i])
                         mode = 1 if (self._highlight_contacts and self._debug) else 0
+            # Per Coffee 2026-05-13 ("red i guess"): force contact-mode
+            # ON for gun submeshes when Debug is enabled, so the
+            # recoil-vert red highlight in mesh.vert fires.  The wheel-
+            # state path above only flips mode when chassis wheels are
+            # known to physics -- gun meshes never satisfy that
+            # condition, so without this we'd never see the recoil
+            # bone overlay even with Debug on.
+            if (is_gun_mesh and recoil_byte >= 0
+                    and getattr(self, '_debug', False)):
+                mode = 1
             active.set_int_array('u_wheel_state', wheel_state_arr)
             active.set_int('u_contact_mode', mode)
 
@@ -15309,6 +17273,19 @@ class Viewer:
         # ref.  No JSON write here -- mouse-up handles that.
         self._persist_all_sliders(write_json=False)
 
+        # ---- Phase C step 3: instanced track-pad render --------------
+        # Per Coffee 2026-05-13 ("engine smoke after tracks are
+        # drawn"): the per-frame instanced track-pad draw was
+        # previously called after the smoke pass at the very end of
+        # render(); moved here so the engine-exhaust smoke composites
+        # OVER the tracks.  Alpha-blended particles need every
+        # opaque surface they overlap to already be in the
+        # framebuffer; otherwise the smoke writes depth + colour at
+        # its position and the tracks fail the subsequent depth
+        # test where the smoke was, producing the "smoke punches a
+        # hole in the tracks" artifact.
+        self._render_track_pad_instanced(view, proj)
+
         # ---- Smoke particles ----------------------------------------------
         # Update + render the billboard flipbook system.  Update advances
         # the simulation by this frame's dt (computed in run() before
@@ -15357,6 +17334,151 @@ class Viewer:
             self.fire_smoke_particles.update(self._frame_dt)
             self.fire_smoke_particles.render(
                 self.particle_shader, view, proj)
+
+        # ---- Per-projectile trail smoke ---------------------------------
+        # Coffee 2026-05-13 ("short smoke trail.. nearly faint" + "use
+        # the sliders for the other smoke emitters" + "tracer smoke
+        # is firing again one all emitters have died").  Each frame:
+        #   1. Build emitter list from active shots that are still
+        #      in flight (`projectile_alive`).  When no shots are in
+        #      flight the list is empty -- which we MUST still publish
+        #      so the ParticleSystem's spawn loop sees zero emitters
+        #      and stops spawning.  The earlier "skip if has_alive
+        #      false" path left stale emitter positions in the
+        #      system; the next time a shot fired, the in-place
+        #      update of those stale slots produced a phantom burst.
+        #   2. Mirror tunables from the engine-exhaust smoke sliders
+        #      every frame so dialing the UI updates both at once.
+        #   3. update + render runs every frame the system exists --
+        #      cheap when no particles are alive, and lets already-
+        #      spawned particles fade out cleanly after a round ends.
+        if self.shot_trail_systems:
+            try:
+                # Per Coffee 2026-05-14 ("each particle has its own
+                # emitter pool... dont use a common shared pool"):
+                # iterate the parallel arrays.  Each shot slot has
+                # its own ParticleSystem; we set its emitter to the
+                # shot's current position (if in flight), advance,
+                # render -- all per-slot, fully isolated.  Slots
+                # whose shots are inactive or have no alive
+                # particles get cheap early-outs.
+                for slot_idx, ps in enumerate(self.shot_trail_systems):
+                    s = self.shots.shots[slot_idx]
+                    if s.active and s.projectile_alive:
+                        # Live emitter at the round's current pos.
+                        # `prev_pos` carries the start-of-step
+                        # position so the spawner can sweep
+                        # particles across [prev_pos, cur_pos] --
+                        # the segment the round flew this frame
+                        # that the render loop only observed as a
+                        # single sample.
+                        ps.emitters = [{
+                            'pos':      s.cur_pos.copy(),
+                            'prev_pos': s.prev_pos.copy(),
+                            'fwd':      -s.fwd,
+                        }]
+                    else:
+                        # Drop the emitter so no new spawns; let
+                        # already-alive particles continue to fade.
+                        ps.emitters = []
+                    # Skip the whole tick when there's nothing live
+                    # in this system (= idle slot).  ps.alive is a
+                    # numpy bool array; any() is O(pool_size).
+                    has_live = bool(ps.alive.any())
+                    if ps.emitters or has_live:
+                        ps.update(self._frame_dt)
+                        ps.render(self.particle_shader, view, proj)
+                        # Re-check after update -- a fresh spawn or
+                        # the alpha-zero cull may have flipped it.
+                        has_live = bool(ps.alive.any())
+                    # Publish the trail's drained state back onto the
+                    # Shot so ShotPool.update keeps the slot rented
+                    # while particles are still on screen (Coffee
+                    # 2026-05-14: "the slot isn't open again until
+                    # all tracer smoke has died").  Runs every
+                    # iteration regardless of whether we ticked the
+                    # PS, so an idle slot stays released.
+                    s.trail_alive = has_live
+                    # Per Coffee 2026-05-14 ("add to output total
+                    # active particles at impact of round" +
+                    # "we are still emitting even after impact"):
+                    # catch the impact transition once per shot,
+                    # log the running counts, AND hard-freeze the
+                    # emitter by clamping ps.max DOWN to the number
+                    # already spawned.  The emitters=[] guard above
+                    # already stops new spawns, but pinning max to
+                    # _next_slot is a belt-and-braces -- no
+                    # accumulator carry-over or off-by-one in the
+                    # distance accumulator can leak through.
+                    if (s.active
+                            and s.impact_pos is not None
+                            and not s.impact_logged):
+                        alive_n = int(ps.alive.sum())
+                        spawned = ps._next_slot
+                        ps.max  = spawned   # freeze: no more spawns
+                        ps._spawn_accum = 0.0
+                        # Count OTHER active shot slots so we can
+                        # tell visually-overlapping trails apart
+                        # from the impacting shot itself.  If
+                        # `other_active=3`, the screenshot will
+                        # show 4 trails (this one + 3 others).
+                        # Per Coffee 2026-05-14 image analysis
+                        # ("multiple streams of particles") --
+                        # need to know how many shots contributed
+                        # to the visible smoke at impact time.
+                        other_active = [
+                            i for i, sh in enumerate(self.shots.shots)
+                            if sh.active and i != slot_idx
+                        ]
+                        self.log(
+                            f"impact slot {slot_idx}: "
+                            f"alive={alive_n}  "
+                            f"spawned={spawned}  "
+                            f"cap_was={ps.max}  "
+                            f"other_active={other_active or 'none'}")
+                        s.impact_logged = True
+                        # Per Coffee 2026-05-14 ("take a screen shot
+                        # at partial impact ... we can use it later
+                        # for other debug screen caps using different
+                        # trigger events"): capture the back-buffer
+                        # at the impact frame so the user can see the
+                        # tracer state at the critical moment.  Safe
+                        # to call from inside the render path -- the
+                        # back-buffer holds whatever we've drawn so
+                        # far this frame (= terrain + tank + trails),
+                        # which is what we want.
+                        try:
+                            self._capture_debug_screenshot(
+                                f'impact_slot{slot_idx}_'
+                                f'other{len(other_active)}')
+                        except Exception:
+                            pass
+                        # Per Coffee 2026-05-14 ("for now, stop
+                        # sending debug files out"): the per-impact
+                        # particles / emit-pos dumps go through a
+                        # helper that early-exits when DEBUG_FILE_DUMPS
+                        # is False, so no .txt files are created.
+                        # In-app impact-stats line above still prints.
+                        self._dump_impact_particle_files(
+                            ps, slot_idx, alive_n, spawned)
+            except Exception as _ex_trail:
+                if not getattr(self, '_trail_err_logged', False):
+                    print(f"[shot-trail] render failed: "
+                          f"{type(_ex_trail).__name__}: {_ex_trail}")
+                    self._trail_err_logged = True
+
+        # Now advance the shot pool -- AFTER the trail builder has
+        # already emitted at the pre-tick cur_pos.  This way the
+        # first trail particle on the fire frame spawns at the
+        # muzzle (cur_pos == self.pos), then this update bumps the
+        # round forward for the next frame's trail spawn.  Same
+        # 1-frame ordering choice applies to ages / phases; they
+        # advance one frame later but no visible artefact.
+        try:
+            _grdt2 = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
+            self.shots.update(_grdt2)
+        except Exception:
+            pass
 
         # ---- Fire particles (damaged tanks only) -------------------------
         # Same flipbook-billboard machinery as smoke, separate
@@ -15776,14 +17898,11 @@ class Viewer:
             self._frame_timers['spline_overlay'] = (
                 (_time.perf_counter() - _t_spl0) * 1000.0)
 
-        # ---- Phase C step 3: instanced track-pad render --------------
-        # One draw call per loaded pad Mesh.  Per-pad transforms are
-        # built from the spline's current pad_pos array (commit 1:
-        # translation only, no rotation).  Cheap: the arr is built
-        # via numpy from the same `_track_left_rigid_pads` cache the
-        # spline overlay uses, uploaded once per frame, drawn in 1
-        # `glDrawElementsInstanced` per Mesh.
-        self._render_track_pad_instanced(view, proj)
+        # Per Coffee 2026-05-13 ("engine smoke after tracks are
+        # drawn"): track-pad instanced render moved to BEFORE the
+        # smoke section earlier in render() so engine + fire smoke
+        # composite OVER the tracks.  This site no longer fires --
+        # left as documentation of where it used to live.
 
         # ---- Contact-trail FIFO render (blue spheres) ----------------
         # Draws a small blue sphere at each point currently in the
@@ -15837,6 +17956,102 @@ class Viewer:
             # of those passes can't cause this draw to "float".)
             glEnable(GL_DEPTH_TEST)
             self.lookat_lines.render(self.color_shader, view, proj)
+
+        # Aim ray.  Single cyan line from the gun pivot in world space
+        # 1500m along the gun's forward axis (= chassis -Z rotated by
+        # turret yaw + gun pitch + chassis pose).  Per Coffee 2026-05-13
+        # ("cast a ray to where gun is pointing from start to 1500m
+        # down range").  Drawn AFTER the chassis / mesh / wireframe
+        # passes with depth test on so it occludes correctly behind
+        # the terrain + own-hull at long distance.  Per Coffee
+        # 2026-05-14 ("put it in the debug on button switch"):
+        # gated on `self._debug` so it only renders when the right-
+        # panel Debug checkbox is on; off by default keeps the
+        # render clean for normal gameplay / screenshots.
+        if (self._debug
+                and self._gun_pivot_chassis is not None
+                and self.meshes
+                and self.tank_physics is not None):
+            try:
+                _chassis = np.asarray(
+                    self.tank_physics.chassis_matrix(),
+                    dtype=np.float32)
+                _segs = self._aim_ray_segments(_chassis)
+                if _segs:
+                    self.aim_ray_lines.update(_segs)
+                    glEnable(GL_DEPTH_TEST)
+                    self.aim_ray_lines.render(
+                        self.color_shader, view, proj)
+            except Exception as _ex_aim:
+                if not getattr(self, '_aim_ray_err_logged', False):
+                    print(f"[aim-ray] render failed: "
+                          f"{type(_ex_aim).__name__}: {_ex_aim}")
+                    self._aim_ray_err_logged = True
+
+        # Aim-point marker.  Per Coffee 2026-05-13 ("draw a blue
+        # ball at intersections to test"): place a small blue
+        # sphere at the camera-ray / terrain hit world position
+        # so we can verify the projection visually before
+        # touching gun-pitch math.  `_aim_hit_world` is None when
+        # the ray missed (= sky-fallback) so the sphere skips.
+        if self._aim_hit_world is not None:
+            try:
+                hx, hy, hz = (float(self._aim_hit_world[0]),
+                              float(self._aim_hit_world[1]),
+                              float(self._aim_hit_world[2]))
+                hit_model = np.array([
+                    [1.0, 0.0, 0.0, hx],
+                    [0.0, 1.0, 0.0, hy],
+                    [0.0, 0.0, 1.0, hz],
+                    [0.0, 0.0, 0.0, 1.0],
+                ], dtype=np.float32)
+                glEnable(GL_DEPTH_TEST)
+                self.aim_hit_sphere.render(
+                    self.color_shader, hit_model, view, proj)
+            except Exception as _ex_aim_ball:
+                if not getattr(self, '_aim_ball_err_logged', False):
+                    print(f"[aim-ball] render failed: "
+                          f"{type(_ex_aim_ball).__name__}: "
+                          f"{_ex_aim_ball}")
+                    self._aim_ball_err_logged = True
+
+        # Debug red projectile spheres -- one per active shot in the
+        # pool.  Per Coffee 2026-05-13 ("fire red spheres at the
+        # terrain first and test we can shoot and stop a round").
+        # Early-rejects on `shots.has_alive` so idle frames pay just
+        # one attribute load.
+        if self.shots.has_alive:
+            try:
+                glEnable(GL_DEPTH_TEST)
+                for s in self.shots.active_shots:
+                    # While projectile is in flight, draw at the
+                    # moving cur_pos.  After impact, draw at the
+                    # impact point so the round visibly STOPS there
+                    # (renders for the rest of the slot's lifetime,
+                    # i.e. until smoke would have expired -- ~1.5s).
+                    if s.projectile_alive:
+                        px, py, pz = (float(s.cur_pos[0]),
+                                      float(s.cur_pos[1]),
+                                      float(s.cur_pos[2]))
+                    elif s.impact_pos is not None:
+                        px, py, pz = (float(s.impact_pos[0]),
+                                      float(s.impact_pos[1]),
+                                      float(s.impact_pos[2]))
+                    else:
+                        continue
+                    shot_model = np.array([
+                        [1.0, 0.0, 0.0, px],
+                        [0.0, 1.0, 0.0, py],
+                        [0.0, 0.0, 1.0, pz],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ], dtype=np.float32)
+                    self.shot_sphere.render(
+                        self.color_shader, shot_model, view, proj)
+            except Exception as _ex_shot:
+                if not getattr(self, '_shot_render_err_logged', False):
+                    print(f"[shots] render failed: "
+                          f"{type(_ex_shot).__name__}: {_ex_shot}")
+                    self._shot_render_err_logged = True
 
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)

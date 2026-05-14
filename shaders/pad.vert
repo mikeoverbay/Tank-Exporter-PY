@@ -1,37 +1,31 @@
 #version 330 core
 //
-// pad.vert -- instanced track-pad vertex shader.
+// pad.vert -- PBR-capable instanced track-pad vertex shader.
 //
 // One draw call renders N copies of a pad mesh, each placed at a
 // different chassis-local transform supplied via the per-instance
 // vertex attribute `a_pad_xform` (a mat4 split across attribute
-// locations 5..8 because GLSL doesn't allow a mat4 attribute in
-// one slot).  See `glVertexAttribDivisor` setup in
-// track_pads.TrackPadRenderer for the divisor=1 binding that
-// advances the matrix once per instance.
+// locations 9..12).  See `glVertexAttribDivisor` setup in
+// track_pads.TrackPadRenderer for the divisor=1 binding.
 //
 // Pipeline:
-//   pos_world = u_chassis_pose * a_pad_xform * vec4(position, 1)
+//   model_world = u_chassis_pose * a_pad_xform
+//   pos_world   = model_world * vec4(position, 1)
 //
-// `a_pad_xform` is built CPU-side from the spline's per-pad
-// position + tangent.  In commit 1 we only translate (no
-// rotation), so each pad lands at its spline pad_pos but stays
-// axis-aligned.  Commit 2 adds the tangent-aligned rotation.
+// Outputs mirror mesh.vert's VS_OUT so the PBR fragment shader can
+// reuse the same lighting math (world-space position + normal +
+// TBN basis + uv).  No skinning -- pads are rigid instances; the
+// per-instance mat4 already places each pad on its spline anchor.
 //
-// Author: Coffee + Claude, 2026-05-09.
+// Author: Coffee + Claude, 2026-05-09 (textured pass: 2026-05-13).
 
 layout (location = 0) in vec3 position;
-layout (location = 1) in vec3 normal;     // unused in commit 1, declared so
-                                          // the same VAO layout as Mesh.build_vao
-                                          // can be reused without disabling attribs.
-layout (location = 2) in vec3 tangent;    // unused
-layout (location = 3) in vec3 binormal;   // unused
-layout (location = 4) in vec2 uv0;        // unused
+layout (location = 1) in vec3 normal;
+layout (location = 2) in vec3 tangent;
+layout (location = 3) in vec3 binormal;
+layout (location = 4) in vec2 uv0;
 
-// Per-instance mat4 split across 4 vec4 slots.  GLSL spec requires
-// mat4 to occupy 4 consecutive attribute locations -- we use
-// 9, 10, 11, 12 to leave 5/6 free for the existing `iii`/`ww`
-// skin attribs even though pads don't use them.
+// Per-instance mat4 split across 4 vec4 slots (locations 9..12).
 layout (location =  9) in vec4 a_pad_xform_row0;
 layout (location = 10) in vec4 a_pad_xform_row1;
 layout (location = 11) in vec4 a_pad_xform_row2;
@@ -42,37 +36,38 @@ uniform mat4 u_view;
 uniform mat4 u_proj;
 
 out VS_OUT {
-    vec3 normal_world;
+    vec3 position;       // world space
+    vec3 normal;         // world space (for IBL diffuse + lighting)
+    mat3 TBN;            // world-space tangent basis (normal mapping)
     vec2 uv0;
-    // Pad-local position, passed through unchanged so the
-    // fragment shader can tag faces by their dominant axis.
-    // Per Coffee 2026-05-10 ("draw x - face in red, + face
-    // in green") -- visual debug for chain-closure rotation
-    // hunts.
-    vec3 pad_local_pos;
+    vec3 pad_local_pos;  // unchanged from earlier debug path
 } vs_out;
 
 void main() {
-    // Reconstruct the per-instance transform.  Rows are uploaded
-    // in row-major order (same convention as the rest of TEPY's
-    // numpy matrices); the mat4 constructor here takes columns,
-    // so we transpose by feeding row vectors as columns.
-    mat4 pad_xform = mat4(a_pad_xform_row0,
-                          a_pad_xform_row1,
-                          a_pad_xform_row2,
-                          a_pad_xform_row3);
-    pad_xform = transpose(pad_xform);
+    // Rows uploaded row-major; mat4 ctor wants columns -> transpose.
+    mat4 pad_xform = transpose(mat4(a_pad_xform_row0,
+                                    a_pad_xform_row1,
+                                    a_pad_xform_row2,
+                                    a_pad_xform_row3));
 
-    vec4 pos_local = pad_xform * vec4(position, 1.0);
-    vec4 pos_world = u_chassis_pose * pos_local;
+    mat4 model_world = u_chassis_pose * pad_xform;
+
+    vec4 pos_world = model_world * vec4(position, 1.0);
+    vs_out.position = pos_world.xyz;
     gl_Position = u_proj * u_view * pos_world;
 
-    // Normals just rotated by chassis_pose's 3x3 (no scale assumed
-    // in the pad transform); good enough for a flat-shaded sanity
-    // pass.  Real lighting work happens once we add the textured
-    // shader.
-    mat3 nrm_mat = mat3(u_chassis_pose) * mat3(pad_xform);
-    vs_out.normal_world = normalize(nrm_mat * normal);
-    vs_out.uv0 = uv0;
+    // Normal / tangent transform via the 3x3 of the world model.
+    // Pad transforms are rigid (rotation + translation, no scale)
+    // so the simple mat3(model) is exact and avoids the cost of
+    // inverse-transpose every vertex.
+    mat3 nrm_mat = mat3(model_world);
+    vec3 N = normalize(nrm_mat * normal);
+    vec3 T = normalize(nrm_mat * tangent);
+    vec3 B = normalize(nrm_mat * binormal);
+
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    vs_out.TBN    = mat3(T * invmax, B * invmax, N * invmax);
+    vs_out.normal = N;
+    vs_out.uv0    = uv0;
     vs_out.pad_local_pos = position;
 }

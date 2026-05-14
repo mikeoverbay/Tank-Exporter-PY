@@ -152,15 +152,45 @@ class ParticleSystem:
                              absorbs the fractional remainder).
     """
 
-    def __init__(self, flipbook, max_particles=512):
+    def __init__(self, flipbook, max_particles=512, one_shot_pool=False):
         self.flipbook = flipbook
         self.max      = max_particles
+        # Per Coffee 2026-05-14, one_shot_pool=True enables the
+        # per-projectile-trail behaviour:
+        #
+        #   rule 1: `max_particles` IS the single per-shot limit.
+        #           Once that many particles have spawned, the emitter
+        #           is done -- no time limit, no spawn-rate cutoff,
+        #           nothing else; just the budget.  Particles already
+        #           alive keep updating + rendering until they all die.
+        #   rule 2: never reuse a dead slot.  A monotonic `_next_slot`
+        #           cursor walks 0 -> max and never reverses.  Once a
+        #           slot has held a particle and that particle dies,
+        #           the slot stays dead.  Only `reset_pool` brings
+        #           slots back -- called by the viewer when a new
+        #           shot rents this system's slot.
+        #   rule 3: a particle dies at alpha == 0, not at `lifetime`.
+        #           See `_alpha_zero_time`.
+        #
+        # one_shot_pool=False (default) preserves the legacy slot-reuse
+        # path for engine-exhaust / smoke / fire emitters that run
+        # continuously.
+        self.one_shot_pool = bool(one_shot_pool)
+        self._next_slot    = 0   # monotonic spawn cursor (one-shot mode)
 
         # ---- Per-particle CPU state (numpy for vectorised updates) ----------
         self.pos   = np.zeros((max_particles, 3), dtype=np.float32)
         self.vel   = np.zeros((max_particles, 3), dtype=np.float32)
         self.age   = np.zeros(max_particles,      dtype=np.float32)
         self.alive = np.zeros(max_particles,      dtype=bool)
+        # Per Coffee 2026-05-14 ("do one for the emitters location
+        # for every birth"): record the emitter's `pos` field at
+        # the moment each particle was spawned.  For tracer
+        # sweep-spawn this is the bullet's CURRENT position (=
+        # end of the swept segment for that frame), shared by all
+        # particles spawned in the same frame.  Diagnostic only --
+        # not consulted by update / render.
+        self.emit_pos = np.zeros((max_particles, 3), dtype=np.float32)
         # Screen-plane rotation (in radians) chosen at spawn time, held
         # constant for the particle's life.  Random uniform 0..2pi by
         # default in _spawn_one -- gives every smoke puff a different
@@ -169,6 +199,14 @@ class ParticleSystem:
         # to disable (legacy axis-aligned billboards).
         self.rot   = np.zeros(max_particles,      dtype=np.float32)
         self.rotation_jitter = float(2.0 * np.pi)   # full 0..2pi spread
+        # Per-particle world-space position jitter applied on top of
+        # the spawn anchor.  Default 0.02 m (= 2 cm cube) softens
+        # the plume-as-column look on smoke / engine systems.  Set
+        # to 0.0 for tracer trails where each particle should sit
+        # exactly on the lerped path point (Coffee 2026-05-14
+        # "echo of the shot" diagnosis -- the 2 cm spread was
+        # widening the trail into a visible band).
+        self.pos_jitter = 0.02
 
         # ---- Emitters: list of {'pos': vec3, 'fwd': vec3} ------------------
         self.emitters = []
@@ -187,6 +225,28 @@ class ParticleSystem:
         # being removed because the shader reads from these attributes.
         self.fade_start_frame = 75.0
         self.fade_end_frame   = 91.0
+        # Per-particle fade-in length, in flipbook frames.  Default
+        # 5 matches the legacy spawn-fade smoke systems use to soften
+        # particle pop-in.  Set to 0 to disable (= particle is at
+        # full alpha from birth) -- correct for tracer trails per
+        # Coffee 2026-05-14 ("its aging alpha backwards"): a real
+        # tracer is BRIGHTEST at ignition and dims as the burn
+        # consumes its material, so the youngest particle (at the
+        # bullet's current position) must be brightest and the
+        # oldest (at the muzzle end) must be dim.  fade_in inverts
+        # that.
+        self.fade_in_frames   = 5.0
+        # Distance-based spawning (per Coffee 2026-05-14 "we stop
+        # following the bullet").  When > 0 AND `one_shot_pool` is
+        # True AND the emitter carries a `prev_pos`, the per-frame
+        # spawn count is `spawn_per_meter * |cur_pos - prev_pos|`
+        # instead of the time-rate.  That makes trail density a
+        # property of the bullet's PATH rather than the wall clock,
+        # so the trail follows the bullet at any speed and stops
+        # only when the slot budget runs out (= trail length cap,
+        # not trail duration cap).  Default 0 disables -- legacy
+        # smoke / fire / engine emitters keep their time-rate.
+        self.spawn_per_meter = 0.0
 
         self._spawn_accum   = 0.0  # fractional spawn carry-over
         self._emitter_index = 0    # round-robin emitter selection
@@ -282,11 +342,73 @@ class ParticleSystem:
         self._spawn_accum  = 0.0
 
     # ------------------------------------------------------------------
-    def _spawn_one(self, idx, emitter):
-        """Initialise particle slot `idx` from `emitter`."""
+    def reset_pool(self):
+        """Fully repristinate the pool for a new firing cycle.
+
+        Clears every per-particle field (alive flag, age, pos, vel,
+        rot), the spawn accumulator, the round-robin emitter index,
+        the monotonic `_next_slot` cursor, AND the emitter list.
+        After this call the system is indistinguishable from a
+        freshly-constructed one and the next `update` starts spawning
+        at slot 0 again.
+
+        Per Coffee 2026-05-14 ("reset all particles in the pool.
+        remove dead flag for each particle.  reset data to zero.
+        age and such"): this is the ONLY way a one-shot pool brings
+        dead slots back to life.  The viewer calls it the instant a
+        ShotPool slot is rented for a new round.
+        """
+        self.alive[:]       = False
+        self.age[:]         = 0.0
+        self.pos[:]         = 0.0
+        self.vel[:]         = 0.0
+        self.rot[:]         = 0.0
+        self.emit_pos[:]    = 0.0
+        self._spawn_accum   = 0.0
+        self._emitter_index = 0
+        self._next_slot     = 0
+        self.emitters       = []
+
+    # ------------------------------------------------------------------
+    def _alpha_zero_time(self):
+        """Age in seconds at which a particle's alpha hits 0.
+
+        Per Coffee 2026-05-14 (rule 3 -- "once it has faded to 0
+        alpha. it is now dead.  don't wait for age to trigger it").
+
+        The shader maps `age/lifetime` linearly onto frame index
+        `[0, num_frames)`, and `fade_end_frame` is the frame where
+        alpha == 0.  Inverting that:
+
+            age_alpha0 = (fade_end_frame / num_frames) * lifetime
+
+        Clamped to `[0, lifetime]` so a misconfigured fade_end_frame
+        past `num_frames` can't extend culling past the legacy
+        lifetime cap.
+        """
+        n_frames = max(1.0, float(self.flipbook.frame_count))
+        fe = max(0.0, float(self.fade_end_frame))
+        t = (fe / n_frames) * float(self.lifetime)
+        return min(t, float(self.lifetime))
+
+    # ------------------------------------------------------------------
+    def _spawn_one(self, idx, emitter, pos_override=None):
+        """Initialise particle slot `idx` from `emitter`.
+
+        `pos_override`, when not None, replaces `emitter['pos']` as
+        the spawn anchor.  Used by tracer sweep-spawn to drop the K
+        per-frame particles ALONG the segment the round flew this
+        frame instead of all at the round's current point.
+        """
         # Slight position jitter so the plume doesn't look like a single
-        # column of overlapping cards
-        pos_jitter = np.random.uniform(-0.02, 0.02, size=3).astype(np.float32)
+        # column of overlapping cards.  Disabled (=0) for tracer
+        # trails -- see `self.pos_jitter` docstring.
+        if self.pos_jitter > 0.0:
+            pos_jitter = np.random.uniform(
+                -self.pos_jitter, self.pos_jitter,
+                size=3).astype(np.float32)
+        else:
+            pos_jitter = np.zeros(3, dtype=np.float32)
         # Cone spread on the velocity direction (~10% off-axis)
         spread = np.random.uniform(-0.10, 0.10, size=3).astype(np.float32)
         vel_dir = emitter['fwd'] + spread
@@ -296,10 +418,18 @@ class ParticleSystem:
         else:
             vel_dir = emitter['fwd']
 
-        self.pos[idx]   = emitter['pos'] + pos_jitter
+        anchor = (emitter['pos'] if pos_override is None
+                  else pos_override)
+        self.pos[idx]   = anchor + pos_jitter
         self.vel[idx]   = vel_dir * self.speed
         self.age[idx]   = 0.0
         self.alive[idx] = True
+        # Record the emitter's pos at birth time for diagnostic
+        # dumps.  We snapshot emitter['pos'] (NOT the lerp anchor)
+        # so a sweep-spawned batch all share the same emit_pos --
+        # the bullet position that frame.
+        self.emit_pos[idx] = np.asarray(
+            emitter['pos'], dtype=np.float32)
         # Random screen-plane rotation chosen ONCE at spawn and held
         # constant for the particle's lifetime.  Each smoke puff
         # therefore appears at a different starting orientation,
@@ -321,9 +451,13 @@ class ParticleSystem:
         if dt <= 0.0:
             return
 
-        # Age + cull
+        # Age + cull.  Use alpha-zero rather than `lifetime` so the
+        # slot dies the instant the particle is no longer visible
+        # (rule 3 -- "don't wait for age to trigger it").  For legacy
+        # configs where fade_end_frame == num_frames this is identical
+        # to the old `age < lifetime` cull.
         self.age[self.alive] += dt
-        self.alive &= (self.age < self.lifetime)
+        self.alive &= (self.age < self._alpha_zero_time())
 
         # Apply drag (exponential decay) and integrate position
         if np.any(self.alive):
@@ -334,19 +468,88 @@ class ParticleSystem:
         # Spawn from emitters (round-robin so each emitter gets a fair share)
         if not self.emitters or self.spawn_rate <= 0.0:
             return
-        self._spawn_accum += self.spawn_rate * len(self.emitters) * dt
+
+        # In one-shot mode the spawn cursor is monotonic; once it
+        # reaches `max` the emitter is done (rule 1).  No new spawns
+        # ever; the pool just drains via the cull above.  Rule 2 is
+        # enforced by the cursor itself never going backwards.
+        if self.one_shot_pool and self._next_slot >= self.max:
+            return
+
+        # Distance-based spawn (per Coffee 2026-05-14 "we stop
+        # following the bullet"): when the trail system has both a
+        # `spawn_per_meter` density AND an emitter with `prev_pos`,
+        # the per-frame spawn count comes from the segment length
+        # rather than wall-clock dt.  Spreads particles uniformly
+        # along the swept path regardless of bullet speed, and
+        # makes the slot budget a TRAIL LENGTH cap instead of a
+        # trail-duration cap.  Falls through to the time-rate when
+        # the density is zero or the emitter has no prev_pos (= the
+        # legacy smoke / engine emitters).
+        em0 = self.emitters[0]
+        use_distance = (
+            self.one_shot_pool
+            and self.spawn_per_meter > 0.0
+            and em0.get('prev_pos') is not None
+        )
+        if use_distance:
+            seg = (np.asarray(em0['pos'], dtype=np.float32)
+                   - np.asarray(em0['prev_pos'], dtype=np.float32))
+            seg_len = float(np.linalg.norm(seg))
+            self._spawn_accum += (self.spawn_per_meter * seg_len
+                                  * len(self.emitters))
+        else:
+            self._spawn_accum += (self.spawn_rate * len(self.emitters)
+                                  * dt)
         n_to_spawn = int(self._spawn_accum)
         self._spawn_accum -= n_to_spawn
         if n_to_spawn <= 0:
             return
 
-        dead_slots = np.where(~self.alive)[0]
-        n_spawn    = min(n_to_spawn, len(dead_slots))
-        for k in range(n_spawn):
-            slot    = dead_slots[k]
-            emitter = self.emitters[self._emitter_index % len(self.emitters)]
-            self._emitter_index += 1
-            self._spawn_one(slot, emitter)
+        if self.one_shot_pool:
+            remaining = self.max - self._next_slot
+            n_spawn   = min(n_to_spawn, remaining)
+            # Per Coffee 2026-05-14 ("we need to emit much faster.
+            # we may need to calculate time loop and fill in spots
+            # in our vector that were missed by the render loop
+            # time"): a high-velocity round at 60 FPS jumps several
+            # metres per frame, so spawning every per-frame particle
+            # at the round's CURRENT position drops a fence of
+            # discrete puffs.  Real tracers burn continuously along
+            # the trajectory, so we sweep each spawn linearly
+            # between `prev_pos` and `pos` -- the segment the round
+            # flew through this frame -- filling in the gap.
+            # Falls back to the plain emitter['pos'] when prev_pos
+            # is missing (single-point emitter, e.g. muzzle).
+            for k in range(n_spawn):
+                slot    = self._next_slot
+                emitter = self.emitters[
+                    self._emitter_index % len(self.emitters)]
+                self._emitter_index += 1
+                prev = emitter.get('prev_pos')
+                if prev is not None and n_spawn > 1:
+                    # Lerp by (k + 0.5) / n_spawn so the K spawn
+                    # points sit at the centres of K equal sub-
+                    # intervals along [prev_pos, pos] -- no point
+                    # collapses to either endpoint exactly.
+                    t = (k + 0.5) / float(n_spawn)
+                    pos_override = (
+                        prev * (1.0 - t) + emitter['pos'] * t
+                    ).astype(np.float32)
+                    self._spawn_one(slot, emitter,
+                                     pos_override=pos_override)
+                else:
+                    self._spawn_one(slot, emitter)
+                self._next_slot += 1
+        else:
+            dead_slots = np.where(~self.alive)[0]
+            n_spawn    = min(n_to_spawn, len(dead_slots))
+            for k in range(n_spawn):
+                slot    = dead_slots[k]
+                emitter = self.emitters[
+                    self._emitter_index % len(self.emitters)]
+                self._emitter_index += 1
+                self._spawn_one(slot, emitter)
 
     # ------------------------------------------------------------------
     def render(self, particle_shader, view, projection):
@@ -406,10 +609,12 @@ class ParticleSystem:
         particle_shader.set_float('u_num_frames',       float(self.flipbook.frame_count))
         particle_shader.set_float('u_fade_start_frame', self.fade_start_frame)
         particle_shader.set_float('u_fade_end_frame',   self.fade_end_frame)
-        # 5-frame fade-in softens spawn pop-in for particle streams.
-        # Matches the historical legacy behaviour the smoke / engine-
-        # exhaust look has been tuned against.
-        particle_shader.set_float('u_fade_in_frames',   5.0)
+        # Fade-in is configurable per-system.  Default 5 frames
+        # softens spawn pop-in for smoke / engine emitters; tracer
+        # trails set this to 0 so each particle is at full alpha
+        # from birth (a tracer is brightest at ignition).
+        particle_shader.set_float('u_fade_in_frames',
+                                  float(self.fade_in_frames))
 
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, self.flipbook.tex_id)

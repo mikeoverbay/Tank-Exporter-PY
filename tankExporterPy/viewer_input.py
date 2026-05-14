@@ -44,20 +44,25 @@ def apply_orbit(viewer, dx, dy):
             turret HP look-at.
     Mode 2 (driver / commander POV): rotate the head in
             chassis-local space (yaw + pitch).
+
+    Sensitivity per Coffee 2026-05-13 ("mouse rotation seep is
+    retarded fast"): 0.10 deg/px across all three modes -- 1/3 of
+    the previous 0.30 that read as flickery / over-twitchy.
     """
+    SENS = 0.05
     if viewer.camera_mode == 2:
-        viewer._head_yaw_deg   += dx * 0.3
-        viewer._head_pitch_deg += dy * 0.3
+        viewer._head_yaw_deg   += dx * SENS
+        viewer._head_pitch_deg += dy * SENS
         viewer._head_pitch_deg  = float(np.clip(
             viewer._head_pitch_deg, -85.0, +85.0))
     elif viewer.camera_mode == 1:
-        viewer._chase_yaw_deg   += dx * 0.3
-        viewer._chase_pitch_deg += dy * 0.3
+        viewer._chase_yaw_deg   += dx * SENS
+        viewer._chase_pitch_deg += dy * SENS
         viewer._chase_pitch_deg  = float(np.clip(
             viewer._chase_pitch_deg, -85.0, +85.0))
     else:
-        viewer.camera.yaw   += dx * 0.3
-        viewer.camera.pitch += dy * 0.3
+        viewer.camera.yaw   += dx * SENS
+        viewer.camera.pitch += dy * SENS
         viewer.camera.pitch  = float(np.clip(
             viewer.camera.pitch, -89.0, 89.0))
 

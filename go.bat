@@ -197,4 +197,15 @@ echo.
 echo Launching Tank Exporter PY ...
 echo.
 %PY% tankExporterPy.py %*
+set "EXIT_RC=!errorlevel!"
+:: Per Coffee 2026-05-13 ("pause cmd after run"): keep the cmd
+:: window open after the Python process exits with a non-zero
+:: status so the traceback stays visible.  Clean exits (rc=0)
+:: close the window normally; only crashes pause.
+if not "!EXIT_RC!"=="0" (
+    echo.
+    echo Tank Exporter PY exited with code !EXIT_RC!.
+    echo Press any key to close...
+    pause >nul
+)
 endlocal

@@ -2408,23 +2408,27 @@ class TankPhysics:
         Side derived from each bone's chassis-local X sign:
         X < 0 -> left -> use v_L; X >= 0 -> right -> use v_R.
         """
-        # Per Coffee 2026-05-13 ("any ground wheel R + offset to
-        # ground * Pi = distance"): rolling radius for the angle
-        # update is R + track_thickness, NOT R alone -- the chain
-        # rides on the OUTER surface of the track, which sits
-        # `track_thickness` further out than the bare wheel rim.
-        t_thick = float(getattr(self, 'track_thickness', 0.0))
+        # Per Coffee 2026-05-13 ("radius miscalculation"): for a
+        # tracked vehicle, the wheel rolls on the CHAIN'S inner
+        # face at radius R (the bare wheel rim) -- the chain's
+        # OUTER face is what touches the ground.  With no-slip at
+        # both contacts:
+        #   omega_wheel * R = chain_speed     (no slip wheel-chain)
+        #   chain_speed     = chassis_speed   (no slip chain-ground)
+        # so omega_wheel = v / R.  `track_thickness` does NOT enter
+        # the wheel-spin rate (only relevant if the wheel rolled
+        # directly on ground, which it doesn't here).
 
         # ---- Road wheels --------------------------------------
         if (self.wheel_angles_rad is None
                 or len(self.wheel_angles_rad) != len(self.wheels)):
             self.wheel_angles_rad = np.zeros(
                 len(self.wheels), dtype=np.float32)
-        R_road_eff = max(float(self.radius) + t_thick, 1e-3)
+        R_road = max(float(self.radius), 1e-3)
         for i in range(len(self.wheels)):
             x = float(self.wheels[i, 0])
             v = float(v_L) if x < 0.0 else float(v_R)
-            self.wheel_angles_rad[i] += -(v / R_road_eff) * float(dt)
+            self.wheel_angles_rad[i] += -(v / R_road) * float(dt)
 
         # ---- Extra rotating wheels ----------------------------
         if (getattr(self, 'extra_rotating_bones', None)
@@ -2435,9 +2439,9 @@ class TankPhysics:
             for i in range(len(self.extra_rotating_bones)):
                 x = float(hubs[i, 0])
                 v = float(v_L) if x < 0.0 else float(v_R)
-                R_eff = max(float(radii[i]) + t_thick, 1e-3)
+                R_i = max(float(radii[i]), 1e-3)
                 self.extra_rotating_angles_rad[i] += (
-                    -(v / R_eff) * float(dt))
+                    -(v / R_i) * float(dt))
 
     def bone_matrix_array(self, palette, max_bones=64):
         """Build the per-bone matrix array for the skinning shader.

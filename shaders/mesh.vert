@@ -93,17 +93,73 @@ uniform int  u_skinned;
 uniform int  u_contact_mode;
 uniform int  u_wheel_state[MAX_BONES];
 
+// Gun-recoil byte filter (= the iii byte value that identifies a
+// recoil vert; ALWAYS 3 per Coffee 2026-05-14 "FORGET ABOUT BONE
+// IDs.. IT IS ALWAYS INDX 0 and 1 Red and green").  -1 = disabled
+// (chassis meshes, gun off).  Set per-mesh by viewer.py
+// `_upload_skinning`.
+uniform int  u_gun_recoil_byte;
+
+// Gun-recoil translation in mesh-local space.  When set on a gun
+// mesh and the vertex matches the (R,G) recoil pattern, this
+// vec3 gets ADDED to the position directly -- bypassing the bone
+// palette entirely so it doesn't matter which palette index the
+// recoil bone happens to live at on this tank.  Set per-frame by
+// viewer.py from `gun_recoil.offset_m`.
+uniform vec3 u_gun_recoil_translation;
+
 void main() {
     // ---- Skinning matrix ---------------------------------------------
     // When skinned, build the weighted sum of bone matrices indexed
     // by iii/3.  When not skinned, the matrix collapses to the
     // identity so the rest of this shader sees a no-op skin step.
+    // Gun-recoil part identifier.  Per Coffee 2026-05-14 ("change
+    // gun rule.. red = 0 = not recoil.. red != 0 = recoil") plus
+    // ("add color rule.  red = 6 = no fire" -- WoT outsourced
+    // some tank models and the studios partially lost the colour-ID
+    // convention, leaving byte 6 in slot 0 on verts that should
+    // NOT recoil):
+    //
+    //   iii.x == 0  -> rigid / mantlet / cloth (bound to gun root).
+    //                  Does NOT recoil.
+    //   iii.x == 6  -> outsourced-model anchor, also rigid.
+    //                  Does NOT recoil.
+    //   iii.x != 0 AND iii.x != 6  -> recoil.
+    //
+    // Universal across nations regardless of palette ordering --
+    // the iii.x byte value alone determines recoil membership.
+    bool gr_force_recoil = (u_gun_recoil_byte >= 0
+                            && int(iii.x) != 0
+                            && int(iii.x) != 6);
+
     mat4 skin = mat4(1.0);
     if (u_skinned == 1) {
-        skin =   u_bones[int(iii.x) / 3] * ww.x
-               + u_bones[int(iii.y) / 3] * ww.y
-               + u_bones[int(iii.z) / 3] * ww.z
-               + u_bones[int(iii.w) / 3] * ww.w;
+        // Per-slot bone matrices.  Default to the byte-decoded
+        // `u_bones[iii/3]` for each slot; the gun-recoil veto below
+        // may rewrite some of these to identity before the weighted
+        // sum.
+        mat4 m0 = u_bones[int(iii.x) / 3];
+        mat4 m1 = u_bones[int(iii.y) / 3];
+        mat4 m2 = u_bones[int(iii.z) / 3];
+        mat4 m3 = u_bones[int(iii.w) / 3];
+
+        // Per Coffee 2026-05-14 ("FORGET ABOUT BONE IDs"): no
+        // veto needed.  The recoil translation now comes from a
+        // dedicated uniform (`u_gun_recoil_translation`) instead
+        // of being parked at a slot in the bone palette, so there's
+        // nothing to leak through the weighted sum on non-recoil
+        // verts.  iii.x == 0 verts skin normally via u_bones;
+        // iii.x != 0 verts hit the force-recoil branch below.
+
+        if (gr_force_recoil) {
+            // Recoil verts: apply translation DIRECTLY via the
+            // dedicated uniform, bypassing the bone palette
+            // entirely.  Build the translation as an identity-
+            // plus-translate matrix.
+            skin = mat4(1.0);
+            skin[3] = vec4(u_gun_recoil_translation, 1.0);
+        } else {
+            skin = m0 * ww.x + m1 * ww.y + m2 * ww.z + m3 * ww.w;
         // Per Coffee 2026-05-13 (track_mat_L_skinned X-shift):
         // BigWorld packs the per-vertex weights as 4 uint8s that
         // can round down to a sum < 255 (= < 1.0 after the
@@ -113,9 +169,10 @@ void main() {
         // weighted-sum matrix by the actual weight sum so the
         // skin acts like a true convex combination of the bone
         // matrices regardless of the source rounding.
-        float w_sum = ww.x + ww.y + ww.z + ww.w;
-        if (w_sum > 1e-4) {
-            skin /= w_sum;
+            float w_sum = ww.x + ww.y + ww.z + ww.w;
+            if (w_sum > 1e-4) {
+                skin /= w_sum;
+            }
         }
     }
 
@@ -176,6 +233,15 @@ void main() {
             && dom_idx >= 0
             && dom_idx < MAX_BONES) {
         state = u_wheel_state[dom_idx];
+    }
+
+    // Debug overlay: paint red on every recoil vert (iii.x != 0).
+    // Per Coffee 2026-05-14 ("red != 0 = recoil") -- the single
+    // iii.x byte is now the discriminator, no secondary slots
+    // involved.
+    if (u_contact_mode == 1 && u_gun_recoil_byte >= 0
+            && gr_force_recoil) {
+        state = 1;
     }
     v_wheel_state = state;
 }

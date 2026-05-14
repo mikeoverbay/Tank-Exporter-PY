@@ -7,7 +7,337 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-14
+
+### Gun recoil universal rule + tracer trails (1.154.0)
+
+Long session covering gun recoil, projectile spawn, shot pool,
+tracer particles, and assorted debug tooling.  Vapor trails are
+considered done.
+
+* **Gun recoil rule** (`shaders/mesh.vert`):
+  `gr_force_recoil = (u_gun_recoil_byte >= 0 && iii.x != 0 &&
+  iii.x != 6)`.  The recoil membership of a vertex is decided
+  by the FIRST iii byte alone, regardless of palette ordering:
+  `iii.x == 3` → recoiling barrel verts (German + most
+  nations); `iii.x == 0` → rigid mantlet / breech / hull-bolted
+  parts; `iii.x == 6` → cloth / rubber overlay on a small set
+  of outsourced models that lost the colour-ID convention.
+  Recoil translation arrives via a dedicated
+  `u_gun_recoil_translation` uniform, bypassing the bone palette
+  entirely.  Universal across G78, A38, T92, Tiger, etc.
+
+* **Aim system** (`viewer.py`): mouse-driven turret yaw + gun
+  pitch with screen-cursor unprojection, terrain raycast, XML
+  pitch-curve + turret-yaw-limit parsing, shortest-path angular
+  wrap, and a rate-limited integrator that respects the per-tank
+  rotation speed cap.
+
+* **Shot pool + projectile** (`shot_pool.py`): 50-deep
+  `ShotPool` of `Shot` slots.  Each shot carries `pos`, `fwd`,
+  `cur_pos`, `prev_pos`, `target_pos`, `projectile_alive`,
+  `impact_pos`, `velocity_mps`, `trail_alive`, `impact_logged`.
+  Velocity sourced from gun XML `<shells><speed>`, scaled by
+  `_PROJECTILE_VIS_SLOWDOWN = 20`.  Linear trajectory snaps to
+  target on impact.  Slot frees only when `smoke_phase >= 1.0`
+  AND `trail_alive == False`.
+
+* **HP_gunFire muzzle** (`viewer.py`): per-tank-load walk of the
+  gun's `.visual_processed` for every `hp_gunfire*` node.  Each
+  match's local position (Z-flipped BW → GL) is appended to
+  `_gun_muzzles_local_gl`; `_fire_round` picks via a round-robin
+  cursor so twin-gun tanks alternate L → R → L → R on
+  consecutive shots.
+
+* **Tracer trails** (`particles.py` + `viewer.py`):
+  50 dedicated `ParticleSystem` instances (one per shot slot),
+  3000-slot buffers each.  New `one_shot_pool` mode:
+  - **Rule 1** -- `max_particles` is the SOLE per-shot budget.
+  - **Rule 2** -- monotonic `_next_slot` cursor; dead slots
+    are NEVER reused.  `reset_pool()` is the only way slots
+    come back, called at fire time.
+  - **Rule 3** -- particles die at alpha-zero (computed from
+    `fade_end_frame / num_frames * lifetime`), not at
+    `lifetime`.  No second age trigger.
+  Distance-based spawn (`spawn_per_meter = 5.0`) plus sweep-
+  spawn between `prev_pos` and `cur_pos` distribute the per-
+  frame particles uniformly along the segment the bullet flew
+  -- continuous trail at any bullet speed.  Per-shot lifetime
+  = bullet flight time so the muzzle particle dies exactly at
+  impact.  `cap = ideal_particles` per shot.  Hard freeze at
+  impact: `ps.max = ps._next_slot`, `ps._spawn_accum = 0`.
+
+* **Trail look**: no fade-in (tracer is brightest at ignition);
+  fade ramp 0 → num_frames so the alpha is a smooth gradient
+  from bright bullet → invisible muzzle (comet → real tracer).
+  `pos_jitter = 0`, full random screen-plane rotation per
+  particle.  Speed + drag = 0 so particles freeze at their
+  spawn point on the path.  Billboarding via `cam_right` /
+  `cam_up` in `particle.vert`.
+
+* **Shader fade fix** (`shaders/particle.frag`): fade ramps now
+  use the CONTINUOUS `frame_t = v_t * num_frames` instead of
+  the floored `fi`.  The floored index clamped at
+  `num_frames - 1` left fade_out stalled at ~0.13 alpha, so
+  particles popped at the cull instead of fading smoothly.
+
+* **Camera default** (`viewer.py`): on startup AND on R key,
+  the orbit camera snaps to world (0, 5, 8) looking at origin
+  (`yaw=0`, `pitch=atan2(5,8)`, `distance=sqrt(89)`).  R no
+  longer calls `fit_to_bounds` -- deterministic view, not a
+  content-fit zoom.
+
+* **Aim ray on Debug toggle** (`viewer.py`): the 1500 m cyan
+  line from the gun is now gated on `self._debug`, matching
+  HP markers / wheel contact / picker overlays.
+
+* **Debug tooling**: `DEBUG_FILE_DUMPS` master switch (default
+  `False`).  When on, each shot writes a per-impact PNG +
+  particles/age dump + emit-pos dump + fire_log line under
+  `<project>/debug_screens/`.  Startup runs
+  `_flush_debug_screens_dir` with multiple safety guards
+  (path realpath, basename check, extension whitelist, no
+  symlinks) so the folder can be wiped safely at every launch.
+  In-app console gets the same per-shot stats either way.
+
+* **Track / homie logs**: master gate
+  `TRACK_PHYSICS_VERBOSE = False` silences the
+  `[track-bones]`, `[homie]`, `[homie-physics]`, `[homie-diag]`,
+  `[track-sag]`, `[rotation]`, and "chassis params from XML"
+  prints unless explicitly re-enabled.
+
+---
+
 ## 2026-05-13
+
+### Turret yaw + gun pitch + aim ray (1.122.0)
+
+Coffee: "find the guns projectile gun location in the tank def
+file.  cast a ray to where gun is pointing from start to 1500m
+down range.  add turret rotation and gun elevation to the mouse
+controls for panning while mouse up, Limits if for eachs travel
+is in the tank def xml".
+
+* **State + limits**: `Viewer._turret_yaw_deg` and
+  `_gun_pitch_deg`, clamped to `_aim_yaw_min/max_deg` +
+  `_aim_pitch_min/max_deg`.  Limits parsed from
+  `_pending_chassis_info['gun']` (the existing XML cache):
+  `<pitchLimits><minPitch>` / `<maxPitch>` → degrees;
+  `<turretYawLimits>` "min max" pair → degrees (empty = full
+  360 traverse).  Pivots come from the first turret / gun
+  submesh's `bind_model_matrix` translation column -- the same
+  chassis-local offset the loader baked from `gunPosition` plus
+  the turret offset.  See `Viewer._capture_aim_pivots`.
+
+* **Mouse aim**: when NO mouse buttons are held, MOUSEMOTION
+  events accumulate `event.rel` into yaw / pitch (0.20 / 0.15
+  deg per pixel).  Existing camera orbit / pan handlers all
+  gate on buttons[N] held, so the no-button branch is a clean
+  separate input lane.  Motion is incremental so the cursor
+  drifting over a UI panel doesn't cause an aim jump when it
+  re-enters the 3D viewport.
+
+* **Mesh pose**: the per-frame `model_matrix = chassis_pose @
+  bind_model_matrix` composer now branches by component:
+  - turret meshes  → `chassis_pose @ yaw @ bind`
+  - gun meshes     → `chassis_pose @ yaw @ pitch @ bind`
+  - everything else → unchanged
+  Order is pitch-first-then-yaw so the pitch axis stays in
+  the bind frame and the yaw sweeps the pitched gun about the
+  turret pivot.  See `Viewer._aim_yaw_pitch_matrices`.
+
+* **Aim ray**: 1500m cyan line from gun pivot along the gun's
+  forward axis (= chassis -Z rotated by pitch, yaw, and the
+  chassis pose).  Drawn via a dedicated `LineBatch` after the
+  main mesh pass.  See `Viewer._aim_ray_segments`.
+
+Coexists with the gun recoil from 1.120.0+: recoil applies in
+MESH-LOCAL space via the bone matrix array, and the turret /
+gun pitch wrap the whole component-level pose transform.  Both
+fire simultaneously without conflict.
+
+### Revert to 1.121.1 state (1.121.4)
+
+Coffee: "nope.. revert 2 back 2".
+
+1.121.2's veto-everything rule killed the recoil entirely on
+the user's tank.  Rolled the shader back to the 1.121.1 fabric
+carve-out (`ww.x >= 0.90` required for veto to fire) AND
+dropped the 1.121.3 load-time gun-palette dump.  Net file
+state matches 1.121.1.
+
+### Fabric carve-out reverted (1.121.2)
+
+Coffee: "fabrics don't recoil, they bend".
+
+1.121.1 added a `ww.x < 0.90` carve-out so fabric verts (multi-
+bone blend including the recoil bone) would partially follow
+the barrel via the weighted skin.  Wrong: the canvas mantlet
+cover is a TURRET-attached collar the barrel slides through,
+not a piece that translates with the barrel.  Letting the
+recoil contribute to the weighted blend pulled the fabric off
+its turret anchor.
+
+The "bend" Coffee wants is the visual deformation of the cloth
+as the rigid breech / barrel passes through it -- that comes
+from the OTHER authored bones in the fabric's blend moving,
+not from the recoil bone's translation.
+
+Veto now applies to every secondary-slot recoil reference
+regardless of `ww.x` (= reverted to the 1.121.0 rule).  Red
+Debug highlight reverted in step: only `iii.x == recoil_byte`
+verts glow red.
+
+### Fabric carve-out for gun recoil veto (1.121.1)
+
+Coffee: "flexible fabrics on guns are 0,6,3".
+
+Mantlet canvas covers + gun shrouds are authored as multi-bone
+blends where the recoil bone (palette index 1 -> byte 3) sits
+in the THIRD slot of `iii` with meaningful authored weight in
+`ww.z` -- the WoT signature pattern `iii = (0, 6, 3, ?)`.  The
+1.121.0 veto froze these to their non-recoil anchors, which
+would have torn the fabric away from the barrel visually when
+the gun recoiled.
+
+Refinement: the veto now only fires when `ww.x >= 0.90`, i.e.
+the vertex's weight is concentrated in slot 0 (= a rigid part
+with a stray secondary weight on the recoil bone -- the
+original "parts that animate backwards" symptom).  Real
+multi-bone blends with `ww.x < 0.90` keep the full weighted
+skin including the recoil bone's contribution, so the fabric
+stretches naturally with the authored gradient.
+
+Red Debug highlight (mesh.vert) updated to match: now paints
+both full-recoil verts (`iii.x == recoil_byte`) AND fabric
+partial-recoil verts (`ww.x < 0.90` AND any secondary slot is
+recoil) so the user can verify both populations.
+
+### Gun recoil veto + red highlight (1.121.0)
+
+Coffee: "we have the parts that animate backwards.. if of the
+III values, bone weight's that are = t0 3 recoil" + "the first
+index must be 3 to recoil" + "red i guess".
+
+1.120.0's recoil moved every vertex whose iii contained the
+recoil bone byte ANYWHERE in the 4-slot blend -- weighted by
+that slot's `ww`.  Symptom: mantlet / breech / hardpoint verts
+carried the recoil bone as a SECONDARY influence and got
+partially dragged backward.  Visible as "parts animating
+backwards" alongside the barrel.
+
+Fix in `shaders/mesh.vert`:
+
+* New uniform `int u_gun_recoil_byte` (= picked palette index
+  * 3, or -1 for non-gun meshes).
+* In the skin sum, when `u_gun_recoil_byte >= 0` AND
+  `iii.x != u_gun_recoil_byte`, any secondary slot whose iii
+  byte matches the recoil byte falls back to identity.  So
+  the recoil translation only contributes to a vertex's
+  weighted skin when iii.x (the FIRST slot) names the recoil
+  bone.
+* Chassis path is byte-for-byte unchanged: the >= 0 guard
+  short-circuits on -1.
+
+Debug overlay (Coffee "red i guess"): when Debug is on AND a
+recoil bone is picked, verts with `iii.x == u_gun_recoil_byte`
+get painted red via the existing `v_wheel_state == 1` path
+(reused so no new fragment-shader code).  `viewer.py`'s
+`_upload_skinning` forces `u_contact_mode = 1` for gun meshes
+in this case, since the wheel-state-driven mode flip only
+fires for chassis wheels.
+
+Picker (`gun_recoil.pick_recoil_bone`) also tightened: dropped
+the `G_*` fallback (was catching `G_BlendBone`, the gun root)
+and added explicit `G_Recoil` / `G_Barrel` patterns.  Bones
+not matching any pattern return None now -- safer than picking
+the root.  `RECOIL_BONE_OVERRIDE` constant added for hardcoded
+per-tank overrides when the heuristic misses.
+
+### Gun recoil on SPACE (1.120.0)
+
+Coffee: "We are going to add gun recoil next. Guns are skinned."
++ "space bar".
+
+Per the 1.119.0 lock on `tank_physics.py`, recoil state lives in
+a new standalone module `tankExporterPy/gun_recoil.py` rather
+than as a new field on TankPhysics.  The module mirrors the
+`TankPhysics.bone_matrix_array(palette)` interface so the
+viewer's existing `_upload_skinning` helper just picks which
+provider to query based on `mesh.component`:
+
+* `mesh.component == 'gun'`  -> `self.gun_recoil.bone_matrix_array(palette)`
+* otherwise (chassis skin)   -> `self.tank_physics.bone_matrix_array(palette)`
+
+State machine (one cycle per SPACE press):
+
+* OUT    -- 60 ms linear back-stroke (0 -> 0.40 m)
+* DWELL  -- 40 ms hold at full travel
+* RETURN -- 300 ms ease-out cubic forward to 0
+* IDLE   -- offset = 0, awaiting next SPACE
+
+Repeat SPACE presses while a cycle is in flight are ignored
+(idempotent trigger).
+
+Recoil bone is auto-picked from the gun's bone palette by name
+score: `recoil` (100) > `barrel` (80) > `gun` not `gunner` (60)
+> any `G_*` (40).  Highest score wins; ties broken by declaration
+order.  Tanks whose gun has no recognisable bone fall through
+to all-identity -> visually rigid, no error.
+
+Translation direction is mesh-local +Z (gun points at -Z in
+chassis convention, so +Z = backward into the turret).  Single
+axis; the bone's bind orientation is preserved.
+
+Wiring touched only the viewer (no edits to track / physics code,
+per the 1.119.0 lock):
+
+* SPACE added to `pygame.locals` import + KEYDOWN dispatch.
+* `self.gun_recoil = GunRecoil()` built once at viewer __init__.
+* `self.gun_recoil.update(dt)` called once per frame right after
+  `tank_physics.update(...)`.
+* `_upload_skinning` branches gun meshes to gun_recoil.
+* F1 help popup picks up the new SPACE binding.
+
+### PBR track-pad shader (1.119.0)
+
+Coffee: "lets go ahead and add PBR to the segment models. load
+once, use everywhere".
+
+The instanced track-pad renderer previously used a flat-color
+Lambert shader (`pad.vert` + `pad.frag` -- pre-1.119); the pad
+meshes were carrying full diffuse/normal/AO/GMM texture IDs
+from `track_pads.py`'s `PadVisualLoader` but those textures
+went unused.  This commit:
+
+* Rewrites `pad.vert` to compute a world-space TBN basis off
+  `u_chassis_pose * a_pad_xform` (no skinning -- pads are rigid
+  instances) and outputs the full mesh-style `VS_OUT { position,
+  normal, TBN, uv0, pad_local_pos }`.
+* Rewrites `pad.frag` as a slimmed sibling of `mesh.frag`:
+  Cook-Torrance specular + IBL split-sum, four PBR textures
+  (diffuse / normal / AO / GMM), three scene lights, ACES
+  tonemap.  Strips skinning, wheel-state highlight, crash
+  damage, armor color -- pad shoes don't need any of those.
+* Keeps the `u_show_face_debug` +X/-X face tint behind the
+  Debug checkbox (Coffee 2026-05-13).
+* `Viewer._render_track_pad_body` now binds the global PBR
+  state ONCE per frame before the per-renderer loop: lights,
+  view_pos, slider knobs (metal_scale / shine_scale /
+  use_normal_map / invert_shine), and IBL textures on units
+  4/5/6.  The "load once" part of the user request.
+* `TrackPadRenderer.render` binds its OWN pad mesh's textures
+  on units 0..3 each draw -- so `segment` and `segment2`
+  meshes can carry distinct materials without state bleed.
+  The "use everywhere" part: every instance in this side's
+  N-pad draw call uses the same shared material.
+* `PadShader` (shaders.py) grows `set_vec3`, `set_vec3_array`,
+  `set_float`, `get_uniform` mirroring `ShaderProgram`.
+
+Net visual: pads now respond to the scene lighting + skybox
+the same way the rest of the tank does, including normal-map
+relief, AO cavity shadow, and the gloss/metal gradient
+authored into the GMM texture.
 
 ### Wheel sag now drives the spline (1.118.117)
 

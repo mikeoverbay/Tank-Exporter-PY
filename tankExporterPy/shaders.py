@@ -417,8 +417,32 @@ class PadShader:
         glUniform4f(glGetUniformLocation(self.program, name),
                     r, g, b, a)
 
+    def set_vec3(self, name, x, y, z):
+        glUniform3f(glGetUniformLocation(self.program, name),
+                    float(x), float(y), float(z))
+
+    def set_vec3_array(self, name, positions):
+        """Upload a list of vec3s to a `uniform vec3 name[N]` array.
+
+        Used by the per-frame global-state bind in
+        `_render_track_pad_body` to push the three scene lights
+        into the pad's PBR fragment shader.
+        """
+        import numpy as _np
+        loc = glGetUniformLocation(self.program, name)
+        if loc < 0:
+            return
+        flat = _np.asarray(positions, dtype=_np.float32).reshape(-1)
+        glUniform3fv(loc, len(positions), flat)
+
+    def set_float(self, name, v):
+        glUniform1f(glGetUniformLocation(self.program, name), float(v))
+
     def set_int(self, name, v):
         glUniform1i(glGetUniformLocation(self.program, name), int(v))
+
+    def get_uniform(self, name):
+        return glGetUniformLocation(self.program, name)
 
 
 class UIShader:

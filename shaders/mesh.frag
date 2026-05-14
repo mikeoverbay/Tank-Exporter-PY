@@ -563,6 +563,14 @@ void main()
         result = mix(result, vec3(1.0, 0.05, 0.05), 0.60);
     } else if (v_wheel_state == 2) {
         result = mix(result, vec3(0.05, 1.0, 0.05), 0.60);
+    } else if (v_wheel_state == 5) {
+        // Per Coffee 2026-05-13 ("idx 1 2 and 3.. red green blue"):
+        // recoil byte in slot 2 (iii.z) -> blue tint.
+        result = mix(result, vec3(0.10, 0.30, 1.00), 0.60);
+    } else if (v_wheel_state == 6) {
+        // Recoil byte in slot 3 (iii.w) -> yellow tint, since
+        // R/G/B are taken by slots 0/1/2.
+        result = mix(result, vec3(1.00, 0.95, 0.10), 0.60);
     }
 
     if (wireframe_mode == 1) {
