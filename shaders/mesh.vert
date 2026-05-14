@@ -93,12 +93,24 @@ uniform int  u_skinned;
 uniform int  u_contact_mode;
 uniform int  u_wheel_state[MAX_BONES];
 
-// Gun-recoil byte filter (= the iii byte value that identifies a
-// recoil vert; ALWAYS 3 per Coffee 2026-05-14 "FORGET ABOUT BONE
-// IDs.. IT IS ALWAYS INDX 0 and 1 Red and green").  -1 = disabled
-// (chassis meshes, gun off).  Set per-mesh by viewer.py
-// `_upload_skinning`.
+// Gun-recoil enable gate.  -1 = disabled (chassis / hull / turret
+// meshes, or gun off).  >= 0 = gun mesh; consult
+// `u_palette_recoil[]` to decide which verts recoil.  The actual
+// byte value carried here is a historical artefact (used to be the
+// magic "byte 3 = recoil" sentinel); kept as a non-negative gate
+// flag so the shader can still skip the recoil branch when there's
+// no recoiling component to draw.
 uniform int  u_gun_recoil_byte;
+
+// Per-palette-idx recoil flag.  `u_palette_recoil[i] == 1` means
+// the bone at palette index `i` is a recoiling bone (= barrel /
+// muzzle); `== 0` means rigid / autoloader / cloth.  Uploaded by
+// `viewer.py` from `gun_palette_table.json` at every gun-mesh
+// draw; zeroed for every non-gun draw.  Per Coffee 2026-05-14:
+// the offline name-based classifier already named every bone in
+// every WoT tank's gun palette, so the runtime classification is
+// just a per-vert array lookup -- no bit-mask heuristics needed.
+uniform int  u_palette_recoil[MAX_BONES];
 
 // Gun-recoil translation in mesh-local space.  When set on a gun
 // mesh and the vertex matches the (R,G) recoil pattern, this
@@ -113,53 +125,55 @@ void main() {
     // When skinned, build the weighted sum of bone matrices indexed
     // by iii/3.  When not skinned, the matrix collapses to the
     // identity so the rest of this shader sees a no-op skin step.
-    // Gun-recoil part identifier.  Per Coffee 2026-05-14 ("change
-    // gun rule.. red = 0 = not recoil.. red != 0 = recoil") plus
-    // ("add color rule.  red = 6 = no fire" -- WoT outsourced
-    // some tank models and the studios partially lost the colour-ID
-    // convention, leaving byte 6 in slot 0 on verts that should
-    // NOT recoil):
+    // Per Coffee 2026-05-14 (3-category vertex classification):
+    // each gun vert is either pure-recoil, pure-rigid, or a
+    // STRETCH blend between a recoil slot and a rigid slot.
+    // Stretch verts (~1.3% of all gun verts across the corpus)
+    // are the cloth / rubber drape verts whose weight is split
+    // between the barrel and a mantlet anchor -- they should
+    // get a FRACTION of the recoil translation, scaled by the
+    // recoil-slot weight, so they STRETCH instead of either
+    // fully recoiling or sitting still.
     //
-    //   iii.x == 0  -> rigid / mantlet / cloth (bound to gun root).
-    //                  Does NOT recoil.
-    //   iii.x == 6  -> outsourced-model anchor, also rigid.
-    //                  Does NOT recoil.
-    //   iii.x != 0 AND iii.x != 6  -> recoil.
-    //
-    // Universal across nations regardless of palette ordering --
-    // the iii.x byte value alone determines recoil membership.
-    bool gr_force_recoil = (u_gun_recoil_byte >= 0
-                            && int(iii.x) != 0
-                            && int(iii.x) != 6);
+    // Recipe: walk all 4 slots; for any slot whose bone is in
+    // the per-tank recoil set (u_palette_recoil[i] != 0),
+    // accumulate ww[slot] * u_gun_recoil_translation.  The
+    // result is the per-vert effective translation:
+    //   * pure recoil vert: sum(ww[slot]) = ~1.0 -> full translate.
+    //   * pure rigid vert: 0 contribution -> no translate.
+    //   * 50/50 stretch vert: 0.5 * translate -> drape stretches.
+    // Skinning matrix stays a clean weighted sum of bone matrices
+    // (which are identity for gun meshes since gun_recoil.py
+    // builds an identity bone palette and uploads the translation
+    // via the uniform).
+    vec3 gr_effective_t = vec3(0.0);
+    if (u_gun_recoil_byte >= 0) {
+        int p0 = int(iii.x) / 3;
+        int p1 = int(iii.y) / 3;
+        int p2 = int(iii.z) / 3;
+        int p3 = int(iii.w) / 3;
+        if (p0 >= 0 && p0 < MAX_BONES && u_palette_recoil[p0] != 0)
+            gr_effective_t += ww.x * u_gun_recoil_translation;
+        if (p1 >= 0 && p1 < MAX_BONES && u_palette_recoil[p1] != 0)
+            gr_effective_t += ww.y * u_gun_recoil_translation;
+        if (p2 >= 0 && p2 < MAX_BONES && u_palette_recoil[p2] != 0)
+            gr_effective_t += ww.z * u_gun_recoil_translation;
+        if (p3 >= 0 && p3 < MAX_BONES && u_palette_recoil[p3] != 0)
+            gr_effective_t += ww.w * u_gun_recoil_translation;
+    }
 
     mat4 skin = mat4(1.0);
     if (u_skinned == 1) {
-        // Per-slot bone matrices.  Default to the byte-decoded
-        // `u_bones[iii/3]` for each slot; the gun-recoil veto below
-        // may rewrite some of these to identity before the weighted
-        // sum.
+        // Per-slot bone matrices.  For gun meshes these are all
+        // identity (gun_recoil.bone_matrix_array returns an
+        // identity-only palette); for chassis / wheels they
+        // carry the real per-bone transforms.
         mat4 m0 = u_bones[int(iii.x) / 3];
         mat4 m1 = u_bones[int(iii.y) / 3];
         mat4 m2 = u_bones[int(iii.z) / 3];
         mat4 m3 = u_bones[int(iii.w) / 3];
 
-        // Per Coffee 2026-05-14 ("FORGET ABOUT BONE IDs"): no
-        // veto needed.  The recoil translation now comes from a
-        // dedicated uniform (`u_gun_recoil_translation`) instead
-        // of being parked at a slot in the bone palette, so there's
-        // nothing to leak through the weighted sum on non-recoil
-        // verts.  iii.x == 0 verts skin normally via u_bones;
-        // iii.x != 0 verts hit the force-recoil branch below.
-
-        if (gr_force_recoil) {
-            // Recoil verts: apply translation DIRECTLY via the
-            // dedicated uniform, bypassing the bone palette
-            // entirely.  Build the translation as an identity-
-            // plus-translate matrix.
-            skin = mat4(1.0);
-            skin[3] = vec4(u_gun_recoil_translation, 1.0);
-        } else {
-            skin = m0 * ww.x + m1 * ww.y + m2 * ww.z + m3 * ww.w;
+        skin = m0 * ww.x + m1 * ww.y + m2 * ww.z + m3 * ww.w;
         // Per Coffee 2026-05-13 (track_mat_L_skinned X-shift):
         // BigWorld packs the per-vertex weights as 4 uint8s that
         // can round down to a sum < 255 (= < 1.0 after the
@@ -169,12 +183,16 @@ void main() {
         // weighted-sum matrix by the actual weight sum so the
         // skin acts like a true convex combination of the bone
         // matrices regardless of the source rounding.
-            float w_sum = ww.x + ww.y + ww.z + ww.w;
-            if (w_sum > 1e-4) {
-                skin /= w_sum;
-            }
+        float w_sum = ww.x + ww.y + ww.z + ww.w;
+        if (w_sum > 1e-4) {
+            skin /= w_sum;
         }
     }
+    // True iff this vert has ANY recoil contribution.  Used by
+    // the wheel-state contact overlay below for the recoil-vert
+    // debug paint (kept on the bright-red path so the visual
+    // diagnostic still highlights stretching verts).
+    bool gr_force_recoil = (length(gr_effective_t) > 1e-6);
 
     // ---- Skinned attributes ------------------------------------------
     // Apply skin BEFORE the model transform so per-bone deflections
@@ -184,6 +202,13 @@ void main() {
     vec3 norm_local = mat3(skin) * normal;
     vec3 tan_local  = mat3(skin) * tangent;
     vec3 bin_local  = mat3(skin) * binormal;
+
+    // Per Coffee 2026-05-14 (3-category vertex blend): add the
+    // weighted recoil translation to the skinned position.  The
+    // translation is a pure offset so it doesn't touch the
+    // tangent / normal / binormal basis -- those remain bone-
+    // skinned (= identity for gun meshes) above.
+    pos_local.xyz += gr_effective_t;
 
     // ---- World-space transform (unchanged from non-skinned path) -----
     vs_out.position = vec3(model * pos_local);

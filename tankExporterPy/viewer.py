@@ -746,6 +746,18 @@ class Viewer:
         # load access doesn't AttributeError).
         self._gun_muzzles_local_gl = []
         self._gun_muzzle_next_idx  = 0
+        # Per Coffee 2026-05-14 ("yes please" -- wire the table in).
+        # Per-tank recoil-bone classification, loaded once from
+        # `gun_palette_table.json` at the repo root.  Built by
+        # `cust_tools/build_gun_palette_table.py` -- name-based
+        # classifier over all 1185 WoT tanks.  Falls through to an
+        # all-zeros lookup when the file is missing (= no tank gets
+        # recoil; the legacy heuristic at line below picks up the
+        # slack).  `_palette_recoil_flags` is the per-tank 64-int
+        # array uploaded to `u_palette_recoil[]`: 1 at palette idx
+        # if it recoils, 0 otherwise.  Rebuilt per tank load.
+        self._gun_palette_table = self._load_gun_palette_table()
+        self._palette_recoil_flags = [0] * 64
         # Mouse aim mouse-sensitivity in degrees per pixel.
         self._aim_yaw_per_px   = 0.20
         self._aim_pitch_per_px = 0.15
@@ -3423,6 +3435,63 @@ class Viewer:
         ui._draw_quad(x,         y,          T, h)  # left
         ui._draw_quad(x + w - T, y,          T, h)  # right
         glBindVertexArray(0)
+
+    def _load_gun_palette_table(self):
+        """Load `gun_palette_table.json` from the repo root (one
+        directory up from this file's package).  Returns a dict of
+        {tag: entry} or {} on any failure.
+
+        Per Coffee 2026-05-14 -- the JSON is generated offline by
+        `cust_tools/build_gun_palette_table.py`.  It maps every WoT
+        tank's gun palette to recoil / rigid / autoloader / cloth
+        byte sets via a name-based classifier (0 unknowns across
+        1,185 tanks).  Loaded once at viewer startup; the runtime
+        keys into it by `tank_basename` (= XML basename without
+        `.xml`) at every `load_vehicle` call.
+        """
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            'gun_palette_table.json')
+        if not os.path.isfile(path):
+            print(f"[gun-recoil] palette table missing at {path}; "
+                  f"falling back to heuristic rule")
+            return {}
+        try:
+            import json as _json
+            with open(path, 'r', encoding='utf-8') as f:
+                data = _json.load(f)
+            tanks = data.get('tanks') or {}
+            print(f"[gun-recoil] palette table loaded: "
+                  f"{len(tanks)} tanks")
+            return tanks
+        except Exception as exc:
+            print(f"[gun-recoil] palette table load failed: "
+                  f"{type(exc).__name__}: {exc}")
+            return {}
+
+    def _build_palette_recoil_flags(self, tank_basename):
+        """Compute the per-palette-idx recoil-flag array for the
+        named tank.  Returns a 64-int list (1 at idx -> bone
+        recoils, 0 -> doesn't).  Falls back to the legacy
+        "everything except palette idx 0 and idx 2" rule when the
+        tank isn't in the table.  Stashed on self for the
+        per-frame uniform upload.
+        """
+        flags = [0] * 64
+        entry = self._gun_palette_table.get(tank_basename)
+        if entry is not None:
+            for byte in entry.get('recoil', []) or []:
+                pidx = int(byte) // 3
+                if 0 <= pidx < 64:
+                    flags[pidx] = 1
+            return flags
+        # Fallback: assume palette idx 1 is the recoiling barrel
+        # (= byte 3, the common Tiger-style convention).  Wrong for
+        # twin-gun / autoloader tanks but matches the legacy
+        # `iii.x in {0, 6}` heuristic exactly on tanks we never
+        # classified.
+        flags[1] = 1
+        return flags
 
     def _apply_default_camera_view(self):
         """Snap the orbit camera to world position (0, 5, 8) looking
@@ -9135,6 +9204,19 @@ class Viewer:
         if (self._turret_pivot_chassis is None
                 or self._gun_pivot_chassis is None):
             return
+        # Per Coffee 2026-05-14 ("it should stop looking for the
+        # aim point when we have right mouse down"): while RMB is
+        # held, the user is moving the CAMERA (orbit / pan /
+        # Y-lift), not aiming -- freeze the aim point so the
+        # turret stops chasing the cursor and stays where the
+        # user last aimed it.  Same gate the camera-modifier
+        # branches use, so the two systems can't fight over the
+        # cursor.
+        try:
+            if pygame.mouse.get_pressed()[2]:
+                return
+        except Exception:
+            pass
         if proj is None:
             try:
                 proj = self.camera.get_projection_matrix()
@@ -13437,6 +13519,13 @@ class Viewer:
         # their unique colour is baked into the texture itself.
         nation = _nation_from_xml_path(xml_path)
         tank_basename = os.path.splitext(os.path.basename(xml_path))[0]
+        # Per Coffee 2026-05-14 (gun-palette-table wire-up): look
+        # up this tank's per-palette-idx recoil flags so the
+        # per-frame shader setup can upload them via
+        # `u_palette_recoil[]`.  Falls back to a Tiger-style mask
+        # when the tank isn't in the table.
+        self._palette_recoil_flags = self._build_palette_recoil_flags(
+            tank_basename)
         # Per Coffee 2026-05-10 ("do the same for the tank def
         # file that is in scripts.pkg"): stash the canonical
         # pkg-internal path of the loaded tank's gameplay XML so
@@ -15844,12 +15933,18 @@ class Viewer:
         shift_held = self._left_shift_down
         ctrl_held  = self._left_ctrl_down
         lm_down    = self._lm_down
-        # Crosshair shows whenever LEFT-Shift OR LEFT-Ctrl is held
-        # AND the LEFT mouse button is down -- the user is
+        # Per Coffee 2026-05-14 ("remove left mouse down to move
+        # and pan and move it to right mouse down"): RMB now
+        # owns ALL camera-mutating drags (orbit, pan via Shift,
+        # Y-lift via Ctrl).  LMB is reserved for fire / UI
+        # clicks.
+        rm_down    = bool(btns[2])
+        # Crosshair shows whenever Shift OR Ctrl is held
+        # AND the RIGHT mouse button is down -- the user is
         # actively in pan / lift mode (not just brushing a
         # modifier while reading text).
         self._show_lookat_lines = bool(
-            (shift_held or ctrl_held) and lm_down)
+            (shift_held or ctrl_held) and rm_down)
 
         # Tank-driving keys: arrow keys move the tank around the
         # terrain (XZ only -- physics handles Y / pitch / roll).
@@ -16150,7 +16245,7 @@ class Viewer:
                 # see a giant delta on the first non-ALT
                 # frame after release.
                 pass
-            elif lm_down and ctrl_held and (dx or dy):
+            elif rm_down and ctrl_held and (dx or dy):
                 if self._is_ortho_active():
                     # Disable Y-lift in ortho mode -- the look-at
                     # height is governed entirely by pan (in the
@@ -16160,7 +16255,7 @@ class Viewer:
                     pass
                 else:
                     viewer_input.apply_y_lift(self, dy)
-            elif lm_down and shift_held and (dx or dy):
+            elif rm_down and shift_held and (dx or dy):
                 if self._is_ortho_active():
                     # F10 ortho pan: shift `_ortho_left_center_local`
                     # in chassis-local YZ.  Screen-right axis
@@ -16219,34 +16314,13 @@ class Viewer:
                              if self._mouse_sens_slider else 1.8)
                     viewer_input.apply_orbit(
                         self, dx * _sens, dy * _sens)
-            elif lm_down and (dx or dy):
-                if self._is_ortho_active():
-                    # Plain LM-drag in ortho = pan (no orbit
-                    # in side-view -- there's no meaningful
-                    # orbit axis for a locked-direction
-                    # orthographic projection).
-                    cl = getattr(self,
-                                  '_ortho_left_center_local', None)
-                    if cl is not None:
-                        h_pix = max(1.0,
-                                    float(self.camera.height))
-                        mpp = (2.0
-                               * float(self._ortho_left_half_h)
-                               / h_pix)
-                        cx, cy, cz = cl
-                        cz -= dx * mpp
-                        cy += dy * mpp
-                        self._ortho_left_center_local = (
-                            float(cx), float(cy), float(cz))
-                # Per Coffee 2026-05-13 ("block left mouse from
-                # affecting view angles.. leave zoom alone"): the
-                # legacy LM-drag-orbits-camera fallback used to fire
-                # here in the non-ortho branch.  Removed -- LMB no
-                # longer rotates the view in any cam mode.  Camera
-                # orbit is RMB-drag only now; LMB click is for
-                # firing, LMB+Shift / LMB+Ctrl for pan / Y-lift
-                # (translation, not rotation); mouse wheel still
-                # zooms unchanged.
+            # Per Coffee 2026-05-14 ("remove left mouse down to
+            # move and pan and move it to right mouse down"): the
+            # legacy LM-drag ortho-pan fallback is removed.  All
+            # camera movement is now RMB-driven; pan in ortho mode
+            # is reached via RMB+Shift (handled in the rm_down +
+            # shift_held branch above).  LMB does not move the
+            # camera in any mode now.
 
         self.mouse_last = list(mouse_pos)
 
@@ -16913,6 +16987,19 @@ class Viewer:
             active.set_int('u_gun_recoil_byte', recoil_byte)
             active.set_vec3('u_gun_recoil_translation',
                             *recoil_translation)
+            # Per Coffee 2026-05-14 (gun_palette_table.json wire-up):
+            # upload the per-palette-idx recoil flag array.  Set on
+            # every draw so a single gun-mesh shader program can
+            # serve every component -- the gun branch sets non-zero
+            # flags, every other branch sets all zeros so the shader
+            # can't accidentally apply recoil to a hull / turret /
+            # chassis vert.
+            if is_gun_mesh:
+                active.set_int_array('u_palette_recoil',
+                                      self._palette_recoil_flags)
+            else:
+                active.set_int_array('u_palette_recoil',
+                                      [0] * 64)
 
             # Per-bone state array (size MAX_BONES = 64, must match
             # mesh.vert).  Default 0 (no highlight); each wheel name

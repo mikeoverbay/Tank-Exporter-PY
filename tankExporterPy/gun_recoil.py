@@ -236,9 +236,20 @@ class GunRecoil:
 
     def bone_matrix_array(self, palette):
         """Build an `(N, 4, 4)` float32 row-major bone-matrix array
-        for the given gun palette.  Every bone gets identity except
-        the recoil bone (picked via `pick_recoil_bone`), which gets
-        a +Z translation of `self.offset_m`.
+        for the given gun palette.
+
+        Per Coffee 2026-05-14 ("everything recoils"): always
+        returns IDENTITY for every palette slot.  The recoil
+        translation is now applied EXCLUSIVELY via the
+        `u_gun_recoil_translation` uniform + `u_palette_recoil[]`
+        per-slot weighted mask in `mesh.vert`.  Earlier versions
+        also wrote the translation into bone[idx] here, which
+        caused a DOUBLE application -- the bone-matrix path moved
+        the (often wrongly-picked) `pick_recoil_bone` verts while
+        the shader's uniform path simultaneously moved the
+        correctly-classified verts.  Result: every vert moved.
+        Keeping the matrix all-identity makes the uniform path
+        the single source of truth.
 
         Args:
             palette (sequence[str] | None): the gun mesh's bone
@@ -246,24 +257,12 @@ class GunRecoil:
                 TankPhysics).
 
         Returns:
-            np.ndarray  shape (N, 4, 4), dtype float32.  When the
-            palette is empty or no recoil bone can be picked,
-            every matrix is identity -- the GPU skinning path
-            then collapses to bind pose for the whole mesh.
+            np.ndarray  shape (N, 4, 4), dtype float32.  Every
+            matrix is identity; the GPU skinning path therefore
+            collapses to bind pose, then the shader adds the
+            per-vert weighted recoil translation on top.
         """
         if not palette:
             return np.zeros((0, 4, 4), dtype=np.float32)
         n = len(palette)
-        out = np.tile(np.eye(4, dtype=np.float32), (n, 1, 1))
-        if self.offset_m == 0.0:
-            return out
-        idx = pick_recoil_bone(palette)
-        if idx is None:
-            return out
-        # Recoil direction: barrel slides BACKWARD along the
-        # mesh-local axis selected by RECOIL_AXIS (default +Z, the
-        # WoT chassis convention).  Single-axis translation; the
-        # bone's bind orientation is preserved.
-        axis = max(0, min(2, int(RECOIL_AXIS)))
-        out[idx, axis, 3] = float(self.offset_m)
-        return out
+        return np.tile(np.eye(4, dtype=np.float32), (n, 1, 1))

@@ -170,3 +170,19 @@ resources/d1yeqz9-*.jpg
 resources/sand.png
 resources/sand_painted.png
 resources/sand_painted_height.png
+
+# ---------------------------------------------------------------------------
+# Analysis dumps from the gun-recoil bone-classification work
+# (Coffee 2026-05-14).  All of these are regenerable by running the
+# corresponding cust_tools/ scripts -- the scripts are tracked,
+# the outputs are not.  Sizes range from ~10 KB to ~1 MB.
+# ---------------------------------------------------------------------------
+gun_iii_scan.txt
+gun_iii_triple_scan.txt
+gun_iii_unique_tuples.txt
+gun_material_fx_scan.txt
+gun_vertex_blend_scan.txt
+gun_palette_table.txt
+bit_mask_analysis.txt
+bit_combo_analysis.txt
+mask_sweep_results.txt

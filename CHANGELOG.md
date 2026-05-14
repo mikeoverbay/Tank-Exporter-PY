@@ -7,6 +7,132 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-14 (afternoon)
+
+### Per-tank gun-bone classification table + stretch-aware recoil (1.160.0)
+
+Closes "gun deform".  The recoil rule we shipped in 1.154.0
+(`iii.x not in {0, 6}`) capped at ~95 % accuracy because the
+classification semantics live in BONE NAMES, not in byte
+patterns, and palette layouts vary per tank (Tiger ships
+`G_BlendBone` at idx 0, Russian guns ship it at idx 1, twin-
+gun GB147 ships none of the simple names).  Replaced with a
+per-tank lookup table + per-slot weighted shader.
+
+* **Offline corpus walk** -- `cust_tools/scan_gun_iii.py`,
+  `scan_iii_triples.py`, `scan_vertex_blend_categories.py`,
+  `dump_all_iii_triples.py`, `find_recoil_bit_mask.py`,
+  `find_recoil_bit_combo.py`, `brute_force_mask_search.py`,
+  `scan_gun_materials.py`.  Established:
+  - WoT corpus = 1,185 parseable gun meshes (of 1,188 vehicle
+    XMLs).
+  - 221 distinct (iii.x, iii.y, iii.z) triples used anywhere;
+    iii.w is universally 0 (= SC_UBYTE4_REVERSE_PADDED slot 3
+    is padding).
+  - 94 % of all gun verts live in triples that mean different
+    things on different tanks -- no universal byte-pattern
+    classifier exists above ~97 % accuracy.
+  - The 3 vertex categories (recoil_only, rigid_only, stretch)
+    fall out of WEIGHTED bone-category membership: vert
+    classifies by which bones in its 4 slots are recoil bones
+    and what fraction of the weight is on them.  ~1.3 % of
+    all gun verts (across 167 tanks) are stretch verts that
+    blend recoil + rigid -- the cloth / rubber drapes.
+
+* **Per-tank palette table** -- `cust_tools/build_gun_palette_
+  table.py` walks every gun visual, name-classifies each
+  palette bone (`G_*` = recoil, `Gun_*` = rigid, `static_*` /
+  `joint_*` = rigid, `*Cover/Pusher/etc.` = autoloader),
+  trims to bytes actually present in the vertex stream,
+  writes `gun_palette_table.json`.  0 unknowns across the
+  corpus.  Spatial verification confirmed `G_*` bones span
+  the BARREL (Z = -5.44 to -1.43 on Tiger) and `Gun_*` bones
+  sit at the MOUNT (Z = -1.43 to -0.01) -- WoT's naming is
+  the inverse of intuition; the offline scan caught it.
+
+* **Runtime wire-up** (`tankExporterPy/viewer.py`):
+  - Startup: `_load_gun_palette_table()` reads the JSON
+    into `self._gun_palette_table` (1,185 entries).  Missing
+    file -> fall back to the Tiger-style heuristic.
+  - Per tank load: `_build_palette_recoil_flags(tag)` produces
+    a 64-int array (1 at palette idx if that bone recoils,
+    else 0) -- stashed on `self._palette_recoil_flags`.
+  - Per draw: gun meshes upload the flags as
+    `uniform int u_palette_recoil[64]`; every non-gun mesh
+    uploads all zeros so the recoil branch can't trip on
+    chassis / hull / turret verts.
+
+* **Shader** (`shaders/mesh.vert`):
+  - Replaces every byte-pattern heuristic (`iii.x in {0, 6}`,
+    `(iii.z & 1) == 0`, `iii.x bit1 == 0`) with a per-slot
+    weighted contribution:
+    ```glsl
+    vec3 gr_effective_t = vec3(0.0);
+    if (u_gun_recoil_byte >= 0) {
+        for each slot s in {x, y, z, w}:
+            if (u_palette_recoil[iii[s] / 3] != 0)
+                gr_effective_t += ww[s] * u_gun_recoil_translation;
+    }
+    pos_local.xyz += gr_effective_t;
+    ```
+  - Pure recoil vert (all weight on recoil bones) -> full
+    translation; pure rigid -> 0; stretch (50/50 mix of
+    recoil + rigid bones) -> half translation = naturally
+    interpolated drape.  Same math WoT does, just with the
+    bone classification pre-computed offline rather than
+    looked up by name at runtime.
+
+* **Double-translation bug killed** (`tankExporterPy/gun_recoil.py`):
+  `bone_matrix_array` used to fold the recoil translation into
+  `bone[pick_recoil_bone(palette)]`, which was (a) often the
+  wrong bone (`pick_recoil_bone` matched on the misclassified
+  name) and (b) applied IN ADDITION to the new shader-uniform
+  path -- so the WRONG verts moved via the bone palette while
+  the RIGHT verts moved via the uniform.  Now returns identity
+  for every palette slot; the uniform is the single source of
+  truth.
+
+* **WoT-defaults mouse split** (`tankExporterPy/viewer.py`):
+  - LMB-click  = fire (unchanged).
+  - RMB-drag (no modifier) = orbit camera (unchanged).
+  - **RMB-drag + Shift** = XZ pan (moved off LMB).
+  - **RMB-drag + Ctrl**  = Y-lift (moved off LMB).
+  - **RMB held**         = freeze aim (`_drive_aim_from_aim_state`
+    early-exits while RMB is down so the turret stops chasing
+    the cursor during camera moves).
+  - Legacy LMB-drag ortho-pan removed -- RMB+Shift handles both
+    perspective and ortho pan.
+
+* **WoT naming convention captured** (now in
+  `cust_tools/build_gun_palette_table.py` docstring + the
+  spatial verification scans):
+  - `G_BlendBone`            = THE BARREL (recoils).  Naming
+                               is the inverse of intuition.
+  - `Gun_BlendBone`          = the GUN ASSEMBLY mount (rigid).
+  - `G_R_BlendBone` /
+    `G_L_BlendBone`           = twin-barrel right / left
+                               (both recoil).
+  - `G_Cover_*`, `G_Pusher_*`,
+    `G_Close_*`, etc.         = autoloader mechanism (own
+                               anim, not recoil).
+  - `static_*`, `joint_*`,
+    `statik_*`, `Join_*`      = rigid mounts.
+
+* **Diagnostic dumps** (gitignored): `gun_iii_scan.txt`,
+  `gun_iii_triple_scan.txt`, `gun_iii_unique_tuples.txt`,
+  `gun_palette_table.txt`, `gun_material_fx_scan.txt`,
+  `gun_vertex_blend_scan.txt`, `bit_mask_analysis.txt`,
+  `bit_combo_analysis.txt`, `mask_sweep_results.txt`.  All
+  regenerable by re-running the corresponding cust_tools
+  script.
+
+Outcome: barrel slides through stationary mantle; twin barrels
+both recoil correctly on GB147; cloth drape verts stretch
+between the moving barrel and the rigid anchor.  Three
+categories from one piece of weighted math.
+
+---
+
 ## 2026-05-14
 
 ### Gun recoil universal rule + tracer trails (1.154.0)
