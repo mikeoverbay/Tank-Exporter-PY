@@ -18,7 +18,7 @@ python cust_tools/arch.py stale               # docs older than the .py they des
 |---------------------------|-----------|
 | Wheel suspension, contact classification, plane fit, drive controls, settling math, total tank weight | [`PHYSICS.md`](PHYSICS.md) |
 | The kinematic-bone-driven NURB track replacement (in progress) | [`TRACK_PHYSICS.md`](TRACK_PHYSICS.md) |
-| Render passes, draw order, mesh-skip gates (solid / wireframe / normals / picker), camera modes, look-at crosshair, shaders chosen per source | [`RENDERING.md`](RENDERING.md) |
+| Render passes, draw order, mesh-skip gates (solid / wireframe / normals / picker), camera modes, look-at crosshair, shaders chosen per source, aim cursor + shellhole decal subsystem | [`RENDERING.md`](RENDERING.md) |
 | Per-module API, file map, file-by-file class / function breakdown, WoT-specific notes table | [`../ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | DX → GL coordinate conversion (Z flip, V flip, traversal reversal) | [`../COORDINATE_SYSTEMS.md`](../COORDINATE_SYSTEMS.md) |
 | `.primitives_processed` byte format (read AND write), section layouts (bare-shared vs named-per-mesh), UV2 sidecar BPVT preamble (136 bytes!) | [`../VISUAL_PROCESSED_FORMAT.md`](../VISUAL_PROCESSED_FORMAT.md) |

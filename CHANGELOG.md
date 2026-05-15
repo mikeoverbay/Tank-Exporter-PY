@@ -9,107 +9,78 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
-### Redraw both reticle AND blue ball after shellhole decals (1.200.0)
+### Cursor draws once after shellhole decals -- final layout (1.200.0)
 
-Per Coffee 2026-05-15 ("it should draw the ball again too"
-+ "redraw both"): the second aim-marker pass now renders
-BOTH the cursor reticle (SS volumetric or flat quad, same
-branching as the first draw) AND the blue debug sphere.
-Earlier (1.198.0 - 1.199.0) the second pass only drew the
-reticle and explicitly skipped the ball; that left the
-ball under any shellhole decals it overlapped.
+Per Coffee 2026-05-15 (the multi-message iteration of
+"redraw the cursor after the shot decals are drawn" ->
+"no change.  Cursor needs to draw before tanks and other
+decals are drawn" -> "it should draw the ball again too"
+-> "if we dont redraw the cursor, the decals will draw
+over it.  can we just drop the first cursor pair draw
+now.  It's setup now before its drawn now"): final
+landing position of the projected aim marker is ONE draw
+of (reticle + ball) right after the shellhole-decal pass,
+both placed BEFORE any opaque mesh / tank render.
 
-The ball is the real win for "on top" -- it's an opaque
-mesh with depth-test enabled, so its colour write replaces
-whatever alpha-blended decal landed at those pixels.  The
-reticle redraw helps the line / tick pixels (full alpha)
-but the bulk of the cursor circle is transparent so
-decals still show through there; the ball draws the eye
-to the exact aim point regardless.
+Final per-frame order around the cursor (`viewer.py:render`):
 
-Same gates and error-log flag pattern as the first draw,
-just with its own `_aim_redraw_err_logged` so log-once
-doesn't collide.
+    terrain.render                          (writes depth)
+    shellhole-decal pass                    (alpha, no depth write)
+    aim-point marker (reticle + ball)       (one draw, depth-test on)
+    background helpers (grid + axes)
+    tank meshes (opaque)                    (writes depth)
+    transparency layers (smoke / fire / etc.)
+    debug overlays + UI
 
-### Move shellhole + cursor-redraw blocks ahead of tank render (1.199.0)
+Why this works:
 
-Per Coffee 2026-05-15 ("no change.  Cursor needs to draw
-before tanks and other decals are drawn"): the redraw I
-added in 1.198.0 was producing no visible difference
-because by the time we reached it (way downstream in the
-transparent-layer sequence), tanks had already written
-depth and the SS projector's world reconstruction was
-reading contaminated Z values -- new cursor fragments
-snapped to tank surfaces or fell outside the cube and
-discarded.
+* The shellhole decals come BEFORE the cursor, so the
+  cursor naturally renders on top of decal alpha at the
+  same world point -- no second pass needed.
+* Both the decal pass and the cursor pass operate on
+  terrain-only scene depth (neither tank meshes nor any
+  other opaque geometry has rendered yet), so the SS
+  volumetric projector's world-space reconstruction lands
+  on the right surface.  Without this, a tank rendered
+  in front of the cursor would push tank Z into the
+  scene-depth grab and the cursor's reconstruction would
+  snap onto the tank surface or discard against the cube
+  -- visually nothing would change after a decal landed.
+* The ball's depth write is left at the default ON.  In
+  the brief 1.198.0 - 1.199.0 iteration we drew the
+  cursor twice and tried various depth-mask tricks; with
+  ONE draw positioned AFTER the decal pass, the ball's
+  depth no longer contaminates the decal `_grab_scene_depth`
+  (decals already drew), so depth-write can stay on like
+  any normal opaque mesh.
 
-Fix: move BOTH the shellhole-decal block AND the cursor
-redraw block out of the transparent-layer sequence and
-into a slot right after the first aim-cursor block, BEFORE
-any opaque mesh pass.  The scene-depth grab at this earlier
-point holds only terrain Z, so the SS reconstruction lands
-on the correct surface for both passes.
+Why the late draw is safe (no startup-spiral regression):
+the 1.190.0 fix that put the cursor right after
+terrain.render was needed because the per-frame aim-hit
+projection (`_drive_aim_from_aim_state`) ran late in the
+render loop -- by the time the renderer reached the
+cursor block, `_aim_hit_world` was still stale.  That
+projection has since been moved to ~`viewer.py:18073`,
+BEFORE any render call, so the cursor's world hit is
+valid by the time the render loop reaches the new draw
+site.  The right-after-terrain anchor is no longer
+required.
 
-New per-frame order around the cursor:
+Block is NOT gated on tank load.  `_aim_hit_world` is
+set by the cursor's own terrain raycast + dome
+intersection regardless of whether a tank is loaded, so
+the cursor renders whenever the aim ray has a target.
 
-    terrain.render
-      first  cursor draw      (load-time anchor)
-      shellhole decals        (MOVED -- was downstream)
-      second cursor draw      (MOVED -- now on terrain depth)
-    background helpers (grid/axes)
-    tank meshes               (opaque -- naturally covers
-                               anything alpha-blended above
-                               at tank screen pixels)
-    other transparency layers (smoke / fire / etc.)
-
-Why this is safe: shellhole decals use `glDepthMask(GL_FALSE)`,
-so they never wrote to depth at the old position either.
-Moving them earlier doesn't lose anything -- alpha layers
-that came AFTER them (trail smoke, muzzle smoke, fire
-billboards) still draw on top via normal blending order.
-Tanks render later opaquely and depth-replace any alpha
-content at their pixels.  Visual result: shellhole decals
-still hidden behind tanks, cursor still on top of decals,
-and the cursor's SS reconstruction now actually works.
-
-### Redraw aim cursor on top of shellhole decals (1.198.0)
-
-Per Coffee 2026-05-15 ("redraw the cursor after the shot
-decals are drawn.  don't move other draw of it.  I need it
-on top and changing order will probably move loading of it
-and i dont want that"): the projected aim crosshair now
-renders TWICE per frame in the 3D pass.
-
-* **First draw** (unchanged, ~`viewer.py:18205`).  Right
-  after `terrain.render`.  This is the load-time anchor
-  that fixed the cursor-at-startup spiral in 1.190.0 --
-  hoisting it past whatever silent exception was firing
-  downstream let the cursor appear before any tank loaded.
-  **Do not move this draw** -- the order change is what
-  unblocked the boot-time render, and moving it back
-  would re-introduce that bug.
-* **Second draw (new, ~`viewer.py:18992`).**  Right after
-  the shellhole-decal block ends, before the per-projectile
-  trail smoke starts.  Mirrors the dome-vs-terrain
-  branching of the first draw but skips the blue debug
-  sphere (already painted in the first pass) and uses its
-  own `_aim_redraw_err_logged` field so log-once doesn't
-  collide with the first draw's flag.
-
-Why a redraw instead of a reorder: shellhole-decal alpha
-sat ON TOP of the reticle, partially occluding the
-crosshair right where the user actually cares about
-seeing it (the round just landed there).  Drawing the
-cursor a second time after the decal layer puts the
-reticle on top of any decals that landed since the first
-draw, without disturbing the load-time render-order fix.
-
-Why the SS reconstruction still lands on the same world
-point: the shellhole-decal pass alpha-blends without
-writing depth, so the depth buffer at this second
-`_grab_scene_depth` call still contains only terrain Z
-values -- same surface, same `local.xz + 0.5` UV
-mapping, just painted again over the decal alpha.
+Iteration churn: 1.198.0 added a second redraw of the
+reticle after shellholes.  1.199.0 hoisted the shellhole
+pass + redraw up out of the transparent-layer sequence
+so the SS reconstruction got clean depth.  Both
+intermediate states had real bugs (cursor invisible
+under decals; ball obscured by decals; depth contamination
+from first-pass ball write).  Final state in 1.200.0
+collapses the two cursor blocks back into one
+positioned where it needs to be -- after the decals --
+which the early-projection move made possible.
 
 ### Bake cursor flip into the PNG, drop dead CPU UV transform (1.197.0)
 
