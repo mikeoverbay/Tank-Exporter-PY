@@ -9,6 +9,46 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Stable dome cursor basis + skip shellhole on dome (1.203.0)
+
+Two follow-ups to 1.202.0:
+
+**(1) Stable dome cursor tangent (no more X flip on pan).**
+1.202.0's `_build_decal_matrix_surface` picked the frisvad
+seed by smallest `|n.axis|`.  For dome horizon hits the
+typical seed was +Y (since `|n.y| ≈ 0`), but when panning
+across the world XZ cardinal lines (where `n.x` or `n.z`
+crosses through 0), the seed switched to +X or +Z and the
+tangent rotated by ~90 deg discontinuously -- the cursor
+texture flipped its X axis visibly mid-pan.
+
+Fix: force seed = world +Y for dome cursors (handled
+inline in `_build_decal_matrix_surface`).  Falls back to
++X only when `|n.y| > 0.99` (zenith / nadir, where
+`cross(Y, n)` degenerates).  Tangent now varies smoothly
+as the hit sweeps around the horizon ring.
+
+**(2) Skip shellhole decal on dome impacts.**  Coffee
+("remove shellhole birth if we are on the dome when a
+shell hits"): the persistent shellhole decal doesn't make
+sense on the dome -- the dome is a backdrop, not a
+surface that bullets dig into.  The fire / dust explosion
+billboards still fire (visually consistent with terrain
+hits).
+
+Plumbing:
+* `tankExporterPy/impact_pool.py` Impact + ImpactPool.hit
+  take a new `skip_decal=False` kwarg.  Stored on the
+  Impact instance.
+* `tankExporterPy/particles.py` `ScreenSpaceDecals.
+  render_impacts` and the legacy flat-quad `Decals.render`
+  filter out impacts where `skip_decal=True`.
+* `tankExporterPy/viewer.py` `_fire_round` impact handler
+  computes `skip_decal` by comparing `|impact_pos|` to
+  `self.skydome.radius` (1 m slop to account for the snap
+  to `target_pos` and float precision).  Hits within slop
+  of the dome radius get `skip_decal=True`.
+
 ### Dome cursor fixes: depth-test on Pass 2 + bitangent flip (1.202.0)
 
 Two bugs in 1.201.0 caught + fixed:

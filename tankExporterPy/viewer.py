@@ -19170,7 +19170,36 @@ class Viewer:
                                 ln = float(np.linalg.norm(n_up))
                                 if ln > 1e-6:
                                     n_up /= ln
-                            self.impacts.hit(ip, s.fwd, n_up)
+                            # Per Coffee 2026-05-15 ("remove
+                            # shellhole birth if we are on the
+                            # dome when a shell hits"): detect
+                            # dome impacts by comparing the
+                            # impact distance to the dome
+                            # radius.  Dome hits get
+                            # `skip_decal=True` so the shellhole
+                            # render skips them; the fire / dust
+                            # explosion billboards still fire off
+                            # the same Impact (those are gated
+                            # only on `flash_phase` /
+                            # `dust_phase`, not the decal flag).
+                            _skip_decal = False
+                            if self.skydome is not None:
+                                _ip_r = float(np.linalg.norm(
+                                    np.asarray(ip,
+                                                dtype=np.float32)))
+                                _dr = float(self.skydome.radius)
+                                # Allow 1 m of slop -- impact
+                                # snaps exactly to target_pos
+                                # which was the quadratic dome
+                                # intersection, so the radius
+                                # should match within float
+                                # precision.  Slop just keeps a
+                                # near-edge terrain hit from
+                                # being falsely tagged.
+                                if abs(_ip_r - _dr) < 1.0:
+                                    _skip_decal = True
+                            self.impacts.hit(ip, s.fwd, n_up,
+                                              skip_decal=_skip_decal)
                         except Exception:
                             pass
                         # Per Coffee 2026-05-14 ("take a screen shot

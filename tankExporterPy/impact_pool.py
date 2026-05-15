@@ -75,7 +75,8 @@ class Impact:
     """
 
     __slots__ = ("active", "age", "pos", "dir_in", "normal",
-                 "flash_phase", "dust_phase", "scorch_phase")
+                 "flash_phase", "dust_phase", "scorch_phase",
+                 "skip_decal")
 
     # `is_alive` is a read-only alias for `active` so consumer code
     # can self-document early-out checks.  Per Coffee 2026-05-13
@@ -99,9 +100,17 @@ class Impact:
         self.flash_phase   = 1.0    # done by default
         self.dust_phase    = 1.0
         self.scorch_phase  = 1.0
+        # Per Coffee 2026-05-15 ("remove shellhole birth if we
+        # are on the dome when a shell hits"): when True, the
+        # shellhole-decal pass skips this impact (still gets
+        # the fire / dust explosion billboards via the
+        # impact-billboard system; only the persistent ground
+        # decal is suppressed).  Default False = decal
+        # rendered like every prior impact.
+        self.skip_decal    = False
 
     # ------------------------------------------------------------------
-    def hit(self, pos, dir_in, normal):
+    def hit(self, pos, dir_in, normal, skip_decal=False):
         """Arm this slot with a fresh impact.  Normalises `dir_in`
         and `normal` so the renderer can treat them as unit vectors.
 
@@ -112,6 +121,13 @@ class Impact:
                     normalised in place.
             normal: (3,) surface normal at the hit point.  Same
                     normalisation policy.
+            skip_decal: when True, the shellhole-decal pass
+                    skips this impact entirely (no persistent
+                    ground decal).  Fire / dust explosion
+                    billboards still fire from the same slot --
+                    they're rendered separately off `flash_phase`
+                    / `dust_phase`.  Set to True for dome
+                    impacts (no ground to paint a shellhole on).
         """
         self.active       = True
         self.age          = 0.0
@@ -129,6 +145,7 @@ class Impact:
         self.flash_phase  = 0.0
         self.dust_phase   = 0.0
         self.scorch_phase = 0.0
+        self.skip_decal   = bool(skip_decal)
 
     # ------------------------------------------------------------------
     def update(self, dt):
@@ -189,12 +206,21 @@ class ImpactPool:
         return self._alive_count > 0
 
     # ------------------------------------------------------------------
-    def hit(self, pos, dir_in, normal):
+    def hit(self, pos, dir_in, normal, skip_decal=False):
         """Arm the first inactive slot with a new impact.  Returns
-        the armed `Impact` or None when the pool is full."""
+        the armed `Impact` or None when the pool is full.
+
+        Args:
+            pos, dir_in, normal: see `Impact.hit`.
+            skip_decal: pass-through to `Impact.skip_decal`; when
+                True the shellhole-decal renderer skips this
+                impact (used for dome / no-ground impacts where
+                the explosion fire / dust effects still fire
+                but a persistent decal doesn't make sense).
+        """
         for im in self.impacts:
             if not im.active:
-                im.hit(pos, dir_in, normal)
+                im.hit(pos, dir_in, normal, skip_decal=skip_decal)
                 self._alive_count += 1
                 return im
         self.dropped_count += 1

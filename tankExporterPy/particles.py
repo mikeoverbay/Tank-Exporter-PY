@@ -1449,10 +1449,16 @@ class Decals:
 
         L = max(self.lifetime_s, 1e-3)
         half = 0.5 * self.size
+        # Per Coffee 2026-05-15 ("remove shellhole birth if we
+        # are on the dome when a shell hits"): skip impacts
+        # whose `skip_decal` flag is set.  See the SS path's
+        # `render_impacts` for the matching filter.
         live = []
         for im in impacts:
             age_frac = float(im.age) / L
             if age_frac >= 1.0:
+                continue
+            if getattr(im, 'skip_decal', False):
                 continue
             live.append((np.asarray(im.pos, dtype=np.float32),
                          np.asarray(im.normal, dtype=np.float32),
@@ -2027,28 +2033,42 @@ def _build_decal_matrix_surface(pos, normal, size_x, size_y, size_z):
         n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     else:
         n = n / nl
-    ax, ay, az = abs(float(n[0])), abs(float(n[1])), abs(float(n[2]))
-    if ax <= ay and ax <= az:
-        seed = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-    elif ay <= ax and ay <= az:
+    # Per Coffee 2026-05-15 ("decal flips X when panning left
+    # right on dome"): use world +Y as a STABLE seed for the
+    # tangent basis.  Earlier (1.201.0 - 1.202.0) we picked
+    # the seed by the smallest-|n.axis| heuristic, which
+    # makes the tangent smoothly continuous for arbitrary
+    # surfaces -- BUT for the dome the seed switched between
+    # +Y (typical horizon hits where |n.y| is the smallest)
+    # and +X / +Z (hits where n.x or n.z passes through ~0,
+    # i.e. the cardinal directions on the dome horizon).
+    # Each seed switch rotated the tangent by ~90 deg
+    # discontinuously, so panning the camera across one of
+    # those cardinal lines visibly flipped the cursor
+    # texture's X axis.  Forcing seed = +Y keeps the tangent
+    # in the world XZ plane and varies smoothly as the hit
+    # point sweeps around the dome's horizon ring.
+    #
+    # The only failure case is a hit with n almost parallel
+    # to +Y (zenith / nadir), which makes cross(Y, n) ~ 0.
+    # Falls back to +X seed in that case.
+    if abs(float(n[1])) < 0.99:
         seed = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     else:
-        seed = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        seed = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     t = np.cross(seed, n)
     t /= max(float(np.linalg.norm(t)), 1e-6)
     # Per Coffee 2026-05-15 ("Y is flipped on the dome decal.
-    # ok on terrain"): negate the bitangent so the texture's
-    # V axis aligns with screen-up at typical dome-horizon
-    # hit points.  Without this, upper-screen cube fragments
-    # sample the upper half of the cursor PNG, which contains
-    # the S area (the make_cursor.py flip + _load_decal_tex_2d
-    # flip + GL bottom-left-origin upload land N near V=0.1
-    # and S near V=0.9).  Flipping the bitangent reverses the
-    # V-axis mapping so upper screen -> lower V -> samples the
-    # N area where the user expects it.  Handedness of the
-    # local basis no longer matches a right-handed (T, B, N)
-    # frame but that doesn't matter for the shader -- the
-    # only consumer is `local.xz + 0.5` for the UV.
+    # ok on terrain"): use `cross(t, n)` instead of
+    # `cross(n, t)` so the bitangent points in world -Y at
+    # typical dome-horizon hits.  Combined with the upload
+    # chain that lands N near V=0.1 of the GL texture, the
+    # negated bitangent makes upper-screen cube fragments
+    # sample the lower half of the texture (N area) -- the
+    # right-side-up orientation the user expects.  Handedness
+    # of the local basis no longer matches a right-handed
+    # (T, B, N) frame but the only shader consumer is
+    # `local.xz + 0.5` for UV -- handedness is irrelevant.
     b = np.cross(t, n)
     t = t.astype(np.float32)
     b = b.astype(np.float32)
@@ -2248,9 +2268,19 @@ class ScreenSpaceDecals:
         if not impacts:
             return
         L = max(self.lifetime_s, 1e-3)
+        # Per Coffee 2026-05-15 ("remove shellhole birth if we
+        # are on the dome when a shell hits"): skip impacts
+        # whose `skip_decal` flag is set (dome / no-ground
+        # impacts).  The Impact instance is still active and
+        # its fire / dust explosion billboards still render
+        # elsewhere off `flash_phase` / `dust_phase`; only the
+        # shellhole decal is suppressed.  `getattr` fallback
+        # in case an older Impact serialisation made it into
+        # the pool without the new attribute.
         live = [(im.pos, im.normal, float(im.age) / L)
                 for im in impacts
-                if float(im.age) / L < 1.0]
+                if float(im.age) / L < 1.0
+                and not getattr(im, 'skip_decal', False)]
         if not live:
             return
         self._begin_pass(shader, view, proj,
