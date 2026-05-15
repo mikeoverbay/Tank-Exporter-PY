@@ -129,6 +129,20 @@ class Shot:
                  # lifetime until every tracer particle has aged
                  # past alpha-zero.
                  "trail_alive",
+                 # Per Coffee 2026-05-14 (per-gun flash duration):
+                 # WoT publishes per-gun muzzle-flash durations in
+                 # `gun_effects.xml` (timeline.end).  Captured at
+                 # fire time so the per-shot flash_phase scales
+                 # against the right gun's authored timing rather
+                 # than a hardcoded FLASH_LIFETIME_S.
+                 "flash_lifetime_s",
+                 # Per Coffee 2026-05-14 (per-gun flash scale):
+                 # captured at fire time so the in-flight flash
+                 # size stays tied to the firing gun's caliber
+                 # even if the user reloads to a different tank
+                 # mid-flight.  Both in world metres.
+                 "flash_length",
+                 "flash_thickness",
                  # Per Coffee 2026-05-14 ("add to output total active
                  # particles at impact of round"): one-shot guard so
                  # the impact-frame stats line is emitted exactly
@@ -170,10 +184,15 @@ class Shot:
         self.trail_particles_emitted = 0
         self.trail_alive      = False
         self.impact_logged    = False
+        self.flash_lifetime_s = FLASH_LIFETIME_S
+        self.flash_length     = 1.2   # default; per-tank override at fire
+        self.flash_thickness  = 0.6
 
     # ------------------------------------------------------------------
     def fire(self, pos, fwd, target_pos=None,
-             velocity_mps=PROJECTILE_SPEED_MPS_DEFAULT):
+             velocity_mps=PROJECTILE_SPEED_MPS_DEFAULT,
+             flash_lifetime_s=None,
+             flash_length=None, flash_thickness=None):
         """Arm this shot from an inactive state.
 
         Args:
@@ -220,6 +239,25 @@ class Shot:
             self.projectile_alive = True
         self.impact_pos       = None
         self.velocity_mps     = max(0.1, float(velocity_mps))
+        # Per Coffee 2026-05-14 (per-gun flash duration from
+        # WoT's gun_effects.xml).  Falls back to the default
+        # when the caller didn't pass an override.
+        if flash_lifetime_s is not None and flash_lifetime_s > 0:
+            self.flash_lifetime_s = float(flash_lifetime_s)
+        else:
+            self.flash_lifetime_s = FLASH_LIFETIME_S
+        # Per Coffee 2026-05-14 (per-gun flash scale): captured
+        # from `_active_gun_effect.light.outer_radius` at fire
+        # time so each shot retains its own gun's flash size
+        # even after the user reloads to a different tank.
+        if flash_length is not None and flash_length > 0:
+            self.flash_length = float(flash_length)
+        else:
+            self.flash_length = 1.2
+        if flash_thickness is not None and flash_thickness > 0:
+            self.flash_thickness = float(flash_thickness)
+        else:
+            self.flash_thickness = 0.6
         # Reset trail emission counter at fire time so the slot can
         # be re-used and start fresh.
         self.trail_particles_emitted = 0
@@ -243,7 +281,7 @@ class Shot:
         # at 1.0 so the renderer can read the last frame indefinitely
         # without overrunning the flipbook count.
         self.flash_phase = min(
-            1.0, self.age / max(FLASH_LIFETIME_S, 1e-6))
+            1.0, self.age / max(self.flash_lifetime_s, 1e-6))
         self.smoke_phase = min(
             1.0, self.age / max(SMOKE_LIFETIME_S, 1e-6))
         # Light decays linearly over LIGHT_LIFETIME_S then stays 0.
@@ -325,7 +363,9 @@ class ShotPool:
 
     # ------------------------------------------------------------------
     def fire(self, pos, fwd, target_pos=None,
-             velocity_mps=PROJECTILE_SPEED_MPS_DEFAULT):
+             velocity_mps=PROJECTILE_SPEED_MPS_DEFAULT,
+             flash_lifetime_s=None,
+             flash_length=None, flash_thickness=None):
         """Arm the first inactive slot.  Returns the armed Shot or
         None when the pool is full.
 
@@ -336,7 +376,10 @@ class ShotPool:
         for s in self.shots:
             if not s.active:
                 s.fire(pos, fwd, target_pos=target_pos,
-                       velocity_mps=velocity_mps)
+                       velocity_mps=velocity_mps,
+                       flash_lifetime_s=flash_lifetime_s,
+                       flash_length=flash_length,
+                       flash_thickness=flash_thickness)
                 self._alive_count += 1
                 return s
         self.dropped_count += 1

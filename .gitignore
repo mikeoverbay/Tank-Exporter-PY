@@ -44,9 +44,25 @@ TheItemList.xml
 # touches the two folders the viewer reads.  Cached atlas DDS lives
 # at resources/_wot_eff_tex.dds.  None of this ships in the repo.
 resources/_wot_eff_tex.dds
+resources/_wot_eff_tex_distortion.dds
 resources/fire_sets/
 resources/fire/
 resources/smoke/
+
+# Additional WoT atlas slices auto-extracted by
+# `ensure_runtime_flipbooks()` (see CHANGELOG 1.170.0 +
+# vapor-trails session): explosion fireball + dust + gun
+# flash + heat-haze distortion sets.  Same rule -- WoT pixels,
+# never enter the repo.
+resources/explosion_fire/
+resources/explosion_dust/
+resources/gun_flash/
+resources/gun_flash_distortion/
+
+# Local debug-dump probes written during atlas-region hunting
+# (cust_tools/extract_wot_fire_atlas.py + ad-hoc inspection
+# scripts).  Regenerable; never useful to commit.
+resources/_atlas_probes_*.png
 
 # Legacy explosion flipbook from an earlier flipbook source -- also
 # WoT-derived, no longer used by the viewer.  Listed defensively in
@@ -149,6 +165,28 @@ vfxbin/
 # first launch.
 # ---------------------------------------------------------------------------
 resources/gun_trail/
+
+# ---------------------------------------------------------------------------
+# Shell-impact decals (`maps/decals_pbs/PBS_ShellHole_*_AM.dds`)
+# pulled from WoT's shared_content / map pkgs at first launch by
+# `cust_tools/extract_wot_shellhole_decals.ensure_runtime_decals()`.
+# Same Wargaming-pixel rule as the fire / smoke atlases -- can't
+# ship the bytes.  The fallback procedural scorch (resources/
+# scorch.png from `cust_tools/make_scorch_texture.py`) is the
+# local seed if no pkg is configured; also gitignored since it's
+# trivially regenerable.
+# ---------------------------------------------------------------------------
+resources/decals_pbs/
+resources/scorch.png
+
+# ---------------------------------------------------------------------------
+# Map-specific WoT skydome panoramas (e.g.
+# `maps/skyboxes/01_Karelia_sky/skydome/sky_karelia_forward.dds`).
+# Pulled from `01_karelia.pkg` (and future-equivalents) at first
+# launch by `cust_tools/extract_wot_karelia_sky.ensure_karelia_sky()`.
+# Wargaming pixels -- never enter the repo.
+# ---------------------------------------------------------------------------
+resources/skyboxes/
 
 # ---------------------------------------------------------------------------
 # Heightmaps / reference images of unknown / WoT provenance.

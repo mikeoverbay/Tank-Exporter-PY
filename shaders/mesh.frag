@@ -94,6 +94,28 @@ uniform int         crash_channel_offset;  // 0/1/2, rotates which channel
 uniform vec3  light_pos[NUM_LIGHTS];
 uniform vec3  view_pos;
 
+// ---- Muzzle-flash omni point light ------------------------------------------
+// Per Coffee 2026-05-14 ("the light should be omni?  yes"): WoT's
+// gun_effects.xml <light> block describes an omnidirectional point
+// at HP_gunFire that lights surrounding geometry during a shot --
+// no direction field, just position + inner/outer radius + a
+// 4-keyframe color animation.  We mirror that with one set of
+// uniforms uploaded once per frame (the viewer picks the brightest
+// currently-active flash; off when none are firing).
+//
+//   u_mflash_intensity == 0  -> entire contribution skipped.
+//   distance < u_mflash_inner -> full color contribution.
+//   inner < distance < outer -> smoothstep falloff.
+//   distance > u_mflash_outer -> zero contribution.
+//
+// Lambertian NdotL handles the angular falloff so back-facing
+// surfaces (e.g. the rear of the tank) stay dark for free.
+uniform vec3  u_mflash_pos;
+uniform vec3  u_mflash_color;       // 0..N (pre-scaled by tint × intensity)
+uniform float u_mflash_intensity;   // 0 = off
+uniform float u_mflash_inner;
+uniform float u_mflash_outer;
+
 // ---- Feature flags ----------------------------------------------------------
 uniform int   use_normal_map;
 uniform int   is_GA_normal;
@@ -541,6 +563,26 @@ void main()
                    * (sSpec_i + diff_i + spec_i * perceptualRoughness * 6.0);
     }
     result += Lo_direct * (10.0 * metal_scale / float(NUM_LIGHTS));
+
+    // ---- Muzzle-flash omni contribution -------------------------------------
+    // Per Coffee 2026-05-14: add the per-frame muzzle-flash omni
+    // light BEFORE the tonemap so it tonemaps alongside the rest.
+    // No-op when u_mflash_intensity <= 0 (no active flash).
+    if (u_mflash_intensity > 0.0) {
+        vec3 dL = u_mflash_pos - fs_in.position;
+        float d = length(dL);
+        if (d > 1e-4 && d < u_mflash_outer) {
+            vec3 L = dL / d;
+            float falloff = 1.0 - smoothstep(u_mflash_inner,
+                                              u_mflash_outer, d);
+            float ndl = max(dot(N, L), 0.0);
+            result += (u_mflash_color
+                      * u_mflash_intensity
+                      * falloff
+                      * ndl
+                      * diffuseColor);
+        }
+    }
 
     // ACES filmic tonemap then sRGB gamma
     result = ACESFilm(result);

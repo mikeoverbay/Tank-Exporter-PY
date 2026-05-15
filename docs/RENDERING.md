@@ -16,26 +16,45 @@ recurring source of bugs (rubber-band track-skip is one such case
 ## Per-frame pass order
 
 ```
-1.  Background (sky, grid, axes, light spheres -- depth test off)
-2.  Procedural terrain (textured displaced quad)
-3.  Tank physics step (if Susp + Terrain + tank loaded)
-       chassis_pose = tank_physics.update(...)
-       for m in self.meshes: m.model_matrix = chassis_pose @ m.bind_model_matrix
-4.  Solid mesh pass        -- main PBR / imported / shaded shader
-5.  Wireframe overlay      -- iff Wireframe toggle (line GL_LINE pass)
-6.  Surface-normal debug   -- iff Normals slider > 0 (geometry-shader pass)
-7.  Hardpoint markers      -- iff Debug (HP_* sphere + arrow gizmos)
-8.  Particles              -- smoke + fire flipbooks (camera-billboarded)
-9.  Contact-stars overlay  -- iff Susp + Debug (per-wheel terrain markers)
-10. Hull bbox              -- iff Debug (chassis AABB wireframe)
-11. Picker FBO (off-screen)-- iff Pick Tri toggle
-12. Picker overlay         -- highlights the picked triangle
-13. Look-at crosshair      -- iff middle-mouse held (PINK lines)
-14. UI (panels, tree, dialogs)
-15. Physics-timer overlay  -- iff Susp (grass-green text upper-left)
+ 1.  Skybox (camera-locked infinite via z=w trick; depth_test on,
+       depth_write off)
+ 2.  SkyDome (finite-radius sphere at world origin, equirect
+       panorama OR cubemap; depth_test OFF, depth_write OFF;
+       two passes for seam-blend per 1.185.3)
+ 3.  Terrain (procedural displaced grid; depth_test on, depth_write on;
+       u_world_clip_radius discards past dome circle)
+ 4.  Aim-point marker (per 1.190.0 -- crosshair reticle + blue ball
+       at _aim_hit_world; gated on _aim_hit_world is not None;
+       SS-projector for terrain hits / flat-quad for dome hits)
+ 5.  Background helpers (grid, axes; depth test off)
+ 6.  Look-at crosshair (iff middle-mouse held -- PINK lines)
+ 7.  Aim ray (iff Debug + tank loaded -- single cyan line down-range)
+ 8.  Tank physics step (if Susp + Terrain + tank loaded)
+        chassis_pose = tank_physics.update(...)
+        clamp tank_physics.pos.xz to (dome_radius - 3) (per 1.192.0)
+        for m in self.meshes: m.model_matrix = chassis_pose @ m.bind_model_matrix
+ 9.  Solid mesh pass        -- main PBR / imported / shaded shader
+10.  Wireframe overlay      -- iff Wireframe toggle (line GL_LINE pass)
+11.  Surface-normal debug   -- iff Normals slider > 0 (geometry-shader pass)
+12.  Hardpoint markers      -- iff Debug (HP_* sphere + arrow gizmos)
+13.  Particles (ALPHA group): shot_trail smoke -> muzzle smoke ->
+       fire_billboards -> impact dust -> shellhole decals
+14.  Particles (ADDITIVE group): muzzle flash -> impact fire
+15.  Contact-stars overlay  -- iff Susp + Debug (per-wheel terrain markers)
+16.  Hull bbox              -- iff Debug (chassis AABB wireframe)
+17.  Picker FBO (off-screen)-- iff Pick Tri toggle
+18.  Picker overlay         -- highlights the picked triangle
+19.  UI (panels, tree, dialogs)
+20.  Physics-timer overlay  -- iff Susp (grass-green text upper-left)
 ```
 
-Items 4-6 ALL iterate `self.meshes`.  Item 11 also iterates meshes
+The ALPHA-then-ADDITIVE rule (13 -> 14) matters: alpha layers drawn
+AFTER an additive layer darken the additive pixels via the
+`(1 - src_alpha)` term, even when the alpha layer is supposed to
+be physically BEHIND.  See 1.172.0 CHANGELOG for the muzzle-flash
+darkening bug fix.
+
+Items 9-11 ALL iterate `self.meshes`.  Item 17 also iterates meshes
 (in `picker.py:362`).  Skip filters MUST be applied to all four
 sites consistently or you get phantoms (the hull is wireframed
 through the rubber-band track ribbon you skipped, etc.).
@@ -198,3 +217,57 @@ no toggle needed.
 
 The most common bug class here is "I added a skip but missed a
 pass."  The picker is the easiest one to forget.
+
+---
+
+## Subsystems landed in the 2026-05-15 session
+
+(Cross-references; full write-ups in `CHANGELOG.md` and
+`hand_off/HANDOFF_2026-05-15_dome_and_cursor.md`.)
+
+* **SkyDome** -- `tankExporterPy/skybox.py`, classes `SkyDome`
+  + `SkyDomeShader`.  Procedural UV sphere centered at world
+  origin, radius = `terrain.world_size / 2`.  Samples WoT's
+  Karelia panorama from `resources/skyboxes/01_Karelia_sky/
+  skydome/sky_karelia_forward.png` (auto-extracted by
+  `cust_tools/extract_wot_karelia_sky.py`) OR the existing
+  cubemap as a fallback.  Shaders: `shaders/skydome.vert`,
+  `shaders/skydome.frag` (cubemap), `shaders/skydome_equirect
+  .frag` (panorama).  Manual LOD from world-direction
+  derivatives -- avoids the atan2 seam-mip artefact.  Two
+  passes per frame with 0.01-deg Y rotation between draws
+  to soften the wrap seam.
+
+* **Screen-space decal projector** -- `tankExporterPy/particles
+  .py`, class `ScreenSpaceDecals`.  Ported from nuTerra's
+  `DecalProject.{vert,frag}`.  Each decal is a unit cube
+  with the frag stage reading the scene depth buffer (grabbed
+  via `Viewer._grab_scene_depth` + `glCopyTexImage2D` into a
+  `GL_TEXTURE_2D`).  World-space reconstruction via pre-
+  multiplied `inv(proj * view * decal_matrix)`; clip outside
+  `[-0.5, +0.5]^3`; UV is `local.xz + 0.5` (world XZ ground
+  plane).  Used for shellhole impact decals AND the aim
+  crosshair on terrain hits.
+
+* **Aim cursor projector** -- `tankExporterPy/particles.py`,
+  class `AimCrosshair` (flat-quad fallback) and the SS-decal
+  path above.  `Viewer._drive_aim_from_aim_state` tags each
+  hit as `'terrain'` / `'dome'` / `'sky'`; the render
+  dispatches to SS-decal (terrain) or flat-quad (dome) based
+  on the kind.  Cursor.png ships with the repo (regenerate
+  via `cust_tools/make_cursor.py`).
+
+* **Impact effects** -- `tankExporterPy/particles.py`, class
+  `ImpactBillboards`.  One-shot animated billboards driven
+  off `ImpactPool`.  Fire (additive) + dust (alpha)
+  flipbooks sliced from WoT's `eff_tex.dds` at atlas region
+  (1024, 1024) by `cust_tools/extract_wot_fire_atlas.py`.
+
+* **Dome containment** -- `scene.Camera.max_eye_radius`
+  clamps the orbit + chase eye to within the dome; viewer
+  post-physics clamps `tank_physics.pos.xz` to the same
+  radius; `terrain.frag u_world_clip_radius` discards
+  fragments past the dome's horizontal circle; `_fire_round`
+  intersects the gun ray with the dome as the final
+  fallback so out-of-map shots terminate on the dome
+  surface and trigger impact effects.

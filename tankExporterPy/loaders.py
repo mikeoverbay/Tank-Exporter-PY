@@ -3360,6 +3360,18 @@ class VehicleXMLLoader:
                     'maxAmmo', 'reloadTime', 'aimingTime',
                     'shotDispersionRadius', 'invisibilityFactorAtShot',
                 })
+                # Per Coffee 2026-05-14 (gun-effects wire-up): the
+                # gun's XML tag is its id in the per-nation
+                # components/guns.xml -- expose it so the runtime
+                # can look up the named muzzle-flash spec
+                # (`<effects>` field -> `shot_main_mb`, etc.).
+                info['gun']['_tag'] = top_gun.tag
+                # Capture the in-vehicle `<effects>` reference too
+                # (some tanks override the gun's default effect).
+                eff_in_vehicle = (top_gun.findtext('effects')
+                                  or '').strip()
+                if eff_in_vehicle:
+                    info['gun']['_effects'] = eff_in_vehicle
                 # Pitch / yaw limits ("gun deflection")
                 pl = top_gun.find('pitchLimits')
                 if pl is not None:

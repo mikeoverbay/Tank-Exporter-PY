@@ -7,6 +7,1821 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-15 (early morning)
+
+### Bake cursor flip into the PNG, drop dead CPU UV transform (1.197.0)
+
+Per Coffee 2026-05-15 ("UVs are created in the projection
+shader. Don't do that if you are. It isnt working anyway.
+Just flip the image you made"): correctly diagnosed the
+prior problem -- the cursor on terrain hits goes through
+the screen-space `decal_project.frag`, which COMPUTES UVs
+from world-space reconstruction:
+
+    vec2 tex_uv = local.xz + 0.5;
+
+So the per-vertex UV transform I'd added in 1.195.x /
+1.196.x was completely ignored on the active path -- only
+the flat-quad fallback (dome hits) would have honoured it.
+The "flip didn't work" symptom was the screen-space path
+sampling the unflipped texture.
+
+Fix: bake the up-down flip into the source PNG.
+
+* `cust_tools/make_cursor.py` -- after `build_cursor()`
+  draws the reticle in standard compass orientation, call
+  `img.transpose(Image.FLIP_TOP_BOTTOM)` before saving.
+  Resulting `Cursor.png` has N at the bottom of the image
+  and S at the top so the screen-space projector's
+  `local.xz + 0.5` mapping reads it correctly: bottom of
+  image (N) lands at world +Z (= forward), top (S) at -Z
+  (= back), E stays right (+X), W stays left (-X).
+* `tankExporterPy/particles.py AimCrosshair` -- removed
+  `flip_v` and `rotation_z_deg` instance attrs.  Removed
+  the CPU UV transform loop in `render()`.  Per-vertex
+  UV list is now the canonical (0,0)..(1,1) quad with no
+  manipulation -- the flat-quad path still uses these UVs
+  via `DecalShader`'s vertex stream, but the screen-space
+  path ignores them in favour of its world-reconstruction
+  formula.
+
+### AimCrosshair up-down flip via `flip_v` knob (1.196.3)
+
+Per Coffee 2026-05-15 ("the cursor needs up down flipped"):
+re-introduced ONE vertical-flip knob on `AimCrosshair` (no
+`flip_x` -- the user only needs the up-down flip).
+
+* `__init__` -- new `self.flip_v = True` (default flipped --
+  what the user wants) + `self.rotation_z_deg = 0.0`.
+* `render()` UV transform -- when `flip_v` is True, every
+  vertex's V is mirrored (`v = 1 - v`) before the optional
+  Z-rotation around the (0.5, 0.5) centre.  Computed CPU-side
+  before the VBO upload; shader stays a plain
+  `texture(albedo, uv)` sample.
+
+After the flat-quad projector's frisvad basis lays the cursor
+on a +Y-up surface (terrain or dome), the reticle now reads
+right-side-up to the user.  Both knobs are live-mutable for
+future tweaks.
+
+### Drop AimCrosshair flip_x / flip_y knobs (1.196.1)
+
+Per Coffee 2026-05-15 ("remove image flips on the curser we
+added last this version"): the regenerated `Cursor.png` in
+1.196.0 already ships with the correct compass orientation
+(N top, E right, S bottom, W left), so the `flip_x` /
+`flip_y` attributes added in 1.195.0 were dead weight.
+
+* `tankExporterPy/particles.py AimCrosshair.__init__` --
+  `flip_x` and `flip_y` instance attrs removed.
+* `render()` UV transform simplified: drop the per-axis
+  scale step.  Pipeline is now {centre at 0.5, rotate by
+  `rotation_z_deg`, un-centre} -- four multiplies + adds
+  per vertex when the rotation is non-zero, identity-fast
+  when it's the default 0.0.
+
+`rotation_z_deg` stays exposed for callers that want to spin
+the reticle (e.g. align with a chassis heading) -- single Z
+knob, no flip axes underneath.
+
+### Regenerate Cursor.png with correct compass orientation (1.196.0)
+
+Per Coffee 2026-05-15 ("can you remake my curser file so the
+headings initials are not upside down or backwards?"): the
+original `resources/Cursor.png` (sourced from nuTerra) had
+S at top, N upside-down at bottom, and E / W rotated 90 deg
+to read from outside the ring.  Regenerated the texture so
+every letter is in the standard compass position AND
+right-side-up:
+
+    N at top    (12 o'clock)
+    E at right  ( 3 o'clock)
+    S at bottom ( 6 o'clock)
+    W at left   ( 9 o'clock)
+
+New `cust_tools/make_cursor.py` script -- regeneratable, ships
+with the repo, uses Pillow's `ImageDraw` for a fully-procedural
+reticle.  Style preserved: double-ring outer band, central
+target circle with centre dot, four horizontal + vertical
+crosshair arms with 10 tick marks each (the 5th tick is
+longer so the eye can count without straining), green
+compass letters.  Transparent background; 512 x 512.
+
+`tankExporterPy/particles.py AimCrosshair` -- reset the
+orientation knobs back to no-op defaults:
+
+    flip_x         = False    (was True)
+    flip_y         = False    (was True)
+    rotation_z_deg = 0.0      (was 180)
+
+The previous flip+180-deg combo was mathematically identity
+anyway (flip-X + flip-Y + rot-180 = double 180-deg rotation
+= original), so the new file renders correctly without any
+UV transform.  The rotation knob stays exposed in case a
+future caller wants to spin the reticle (e.g. align with a
+chassis heading).
+
+With the WoT-convention frisvad basis on a +Y-up surface
+(tangent = +Z forward, bitangent = +X right) the reticle's
+labels now align with world axes automatically: N points
+along world +Z (forward), E along +X (right), etc.
+
+### AimCrosshair flip-X / flip-Y / rotation-Z, CPU side (1.195.0)
+
+Per Coffee 2026-05-15 ("flip our curser image in x and y and
+rotate it 180%. send a rotation on Z to it" + "we can pre
+rotate before shader"):
+
+* `tankExporterPy/particles.py AimCrosshair.__init__` -- three
+  new instance attrs:
+    - `flip_x = True`
+    - `flip_y = True`
+    - `rotation_z_deg = 180.0`
+  All applied to the per-vertex UVs CPU-side before VBO
+  upload.  Shader stays a plain `texture(albedo, uv)` -- no
+  per-frame uniform plumbing or UV matrix.
+
+* `render()` UV transform pipeline (per vertex):
+    1. Centre the canonical UV at (0.5, 0.5).
+    2. Negate X / Y axes when their flip flag is set.
+    3. Rotate 2-D by `rotation_z_deg` around the centre.
+    4. Un-centre back to (0..1).
+  Pre-computed cos/sin outside the vertex loop -- six per-frame
+  multiplies + adds total for the whole quad.
+
+* `import math` added to the top of `particles.py`.
+
+Tunables are live -- flipping a flag or bumping
+`rotation_z_deg` at runtime changes the next frame's reticle
+without restarting.  Default 180-deg rotation makes the
+reticle read upright once the frisvad basis lays the quad on
+a +Y-up surface (terrain) or onto the dome via the inward
+sphere normal.
+
+### XML bar -- cursor stays visible over the dropdown (1.194.1)
+
+Per Coffee 2026-05-15 ("can you please fix the 'the matrix
+files' dropdown bar and its contents to allow the mouse to be
+visible? it needs to deal with that drop down height changing
+after tank loads"): `_update_cursor_visibility` consulted
+`UIManager.is_pointer_over_ui` to keep the OS cursor visible
+over floating UI -- but the XML tab bar at the top of the
+central viewport is painted by `_render_xml_bar` (a viewer
+method, not a `UIManager` widget), so the UI-pointer check
+returned False there and the cursor went dark the moment it
+crossed onto the bar.
+
+Fix: when `is_pointer_over_ui` says no, also call
+`self._xml_bar_hit(mx, my)`.  Non-None return means the
+pointer is in the header row OR (when expanded) inside any
+of the expanded-tab rects.  Both rect lists
+(`_xml_bar_header_rect` and `_xml_bar_tab_rects`) are
+repopulated EVERY frame by `_render_xml_bar` from the live
+`_xml_bar_height()` value, so the hit-test automatically
+tracks the bar's current size -- collapsed / expanded /
+before / after tank load, no special-casing needed.
+
+### Cursor projects onto the dome on sky shots (1.194.0)
+
+Per Coffee 2026-05-15 ("if the curser is outside of the dome, i
+want it to be projected on to the dome. it will need to be
+front face aligned to the guns vector dome angles"): when the
+cursor's terrain raycast misses, the aim system now intersects
+the gun ray with the skydome sphere and places the cursor at
+the dome surface point, tangent-aligned via the inward sphere
+normal.
+
+* `Viewer.__init__` -- new fields `self._aim_hit_normal`
+  (precomputed normal for non-terrain hits) and
+  `self._aim_hit_kind` (`'terrain'` / `'dome'` / `'sky'`).
+* `_drive_aim_from_aim_state` -- terrain raycast miss branch
+  now solves the quadratic `|origin + t*fwd|^2 = R^2` against
+  `self.skydome.radius`.  Forward root (positive t) gives the
+  dome hit point P.  Inward sphere normal `-P/|P|` stored on
+  `_aim_hit_normal`; kind stored as `'dome'`.  When no dome
+  is available it falls through to the old `'sky'` behaviour
+  (`_aim_hit_world = None`, gun gets a synthetic 1500m sky
+  endpoint for yaw/pitch targeting).
+* `Viewer.render` aim block -- branches on `_aim_hit_kind`:
+    - `'dome'` -> flat-quad projector with the stored inward
+      normal.  Screen-space path skipped because the dome
+      renders with depth-write OFF so the SS reconstruction
+      would fall outside the cube and discard.
+    - `'terrain'` (default) -> existing behaviour: SS projector
+      if depth-grab succeeds, flat-quad fallback otherwise,
+      finite-difference terrain normal.
+
+The cursor's textured face now points back along the inward
+sphere normal -- that's the direction toward the camera area
+-- so the decal reads "stuck to the inside of the dome at the
+gun's hit angle".
+
+### Remove red projectile debug sphere (1.193.2)
+
+Per Coffee 2026-05-15 ("remove the red ball that tracks with
+the bullets location"): the red `shot_sphere` was a debug
+marker drawn at every active shot's current position (in-
+flight) or impact position (post-impact) -- holdover from
+the 2026-05-13 "fire red spheres at the terrain first" test.
+The smoke trail + muzzle flash + impact billboards already
+communicate the projectile's flight clearly, so the bare
+sphere was just visual noise.
+
+Removed the per-frame loop in `Viewer.render` that walked
+`self.shots.active_shots` and called `self.shot_sphere.render`.
+The `self.shot_sphere = Sphere(...)` instance stays allocated
+in `__init__` (cheap, idle) in case a future debug toggle
+wants it back; only the render path is gone.
+
+### Remove redundant 2-D screen-overlay crosshair (1.193.1)
+
+Per Coffee 2026-05-15 ("that curser on load we could not fix
+is working because we changed the render order of it"): the
+2-D screen-overlay crosshair landed in 1.187.0 to paint
+`Cursor.png` at the viewport centre while no tank was
+loaded.  Once 1.190.0 moved the world-projected aim cursor
+to render right after terrain, that change unblocked the
+projected cursor at startup -- so the static 2-D overlay
+was now redundant + would render alongside the world-tracked
+one (two crosshairs visible at startup).
+
+Removed every reference in `tankExporterPy/viewer.py`:
+
+  * 5 init fields (`_load_cross_tex` / `_program` / `_vao` /
+    `_vbo` / `_size_px`).
+  * The `_render_load_crosshair` method.
+  * The render-loop call site + its try / err-log.
+  * The teardown cleanup block (4 GL-object delete clauses).
+
+Net: only the world-projected cursor remains.  Drawn at the
+mouse-aimed terrain point both at startup AND after tank
+load, courtesy of the post-terrain render-order change.
+
+### Terrain clip past dome radius (1.193.0)
+
+Per Coffee 2026-05-15 ("clip drawing map out side dome
+radius"): the heightmap mesh extends to the corners of a
+`world_size x world_size` square, but the skydome only covers
+a `world_size / 2`-radius circle.  Terrain pixels past that
+circle used to paint over the dome's underside near the
+horizon.
+
+Fix:
+
+* `shaders/terrain.frag` -- new `u_world_clip_radius` uniform
+  + a top-of-`main` discard:
+  ```
+  float d2 = world_pos.x^2 + world_pos.z^2;
+  if (d2 > radius^2) discard;
+  ```
+  Cheap (no sqrt; one length2 + compare).  Pure clip; no
+  alpha falloff because the terrain pass is intentionally
+  opaque.
+* `tankExporterPy/terrain.py Terrain` -- class-level
+  `world_clip_radius = 1e9` default (no-op when the viewer
+  hasn't written a real value).  `render()` feeds it as
+  `u_world_clip_radius`.
+* `tankExporterPy/viewer.py` -- right after the SkyDome is
+  built, sets `self.terrain.world_clip_radius =
+  skydome.radius` so the heightmap stops drawing at the
+  dome's footprint exactly.
+
+Net: the heightmap's square corners are clipped, the terrain
+edge follows the dome's horizontal circle, and the sky
+underside no longer competes with terrain pixels near the
+horizon.
+
+### Tank + camera clamped inside the dome (1.192.0)
+
+Per Coffee 2026-05-15 ("tank and camera can NOT go out side
+the dome"): clamps applied in three places so neither the
+chassis position nor the camera eye can exit the skydome's
+inner sphere.
+
+* `scene.Camera` -- new `self.max_eye_radius` attribute
+  (default `inf` = no clamp).  `get_view_matrix` clamps the
+  computed eye to that radius: when the orbit distance
+  would push the eye past the dome boundary, the eye is
+  scaled back along the eye-origin ray.  Look-at direction
+  + up vector untouched, so the orbit angle still reads the
+  same to the user -- just zoomed in to the dome's edge.
+
+* `Viewer.__init__` -- after the SkyDome is built, sets
+  `self.camera.max_eye_radius = skydome.radius - 5.0`.
+  Five-metre margin keeps the eye visibly off the sky
+  surface (avoids depth-precision squinting near the dome).
+
+* `Viewer.render` -- after `tank_physics.update(...)`,
+  reads the tank's XZ horizontal position.  If
+  `sqrt(x*x + z*z) > skydome.radius - 3`, scales (x, z) back
+  along the origin ray so the tank sits on the inner-dome
+  cylinder.  Mutates `tank_physics.pos` in place + re-reads
+  `chassis_matrix()` so the rest of the frame sees the
+  clamped pose.  Y is driven by terrain, doesn't need
+  clamping.
+
+* `Viewer._anchored_view_matrix` -- chase cam (and any
+  non-orbit mode) clamps the computed `eye` against
+  `self.camera.max_eye_radius` with the same scale-along-
+  origin-ray recipe before the gluLookAt call.
+
+`tank_physics.py` itself is NOT edited (per the locked-files
+rule); we just mutate the public `pos` attribute, same as
+the existing `_saved_tank_pose` restore path does.
+
+### Unlimited shot range -- dome triggers impact (1.191.0)
+
+Per Coffee 2026-05-15 ("remove range limit on gun.. if it hits
+the dome, its done and should trigger the explosion emitter"):
+removed the fixed range cap on the gun in `Viewer._fire_round`
+and added a ray-vs-sphere intersection against the skydome as
+the final fallback.
+
+Two stages in the target-resolution:
+
+  1. **Terrain raycast** -- same `_aim_point_on_terrain` call
+     as before, but `max_distance_m` widened to `3 * dome_radius`
+     (so any plausible terrain hit fits while the 1m march
+     still terminates).
+  2. **Dome intersection** -- if the terrain raycast misses
+     (sky shot, off-map, no terrain in path), solve the
+     quadratic
+     ```
+     | muzzle + t * fwd | ^ 2  =  R ^ 2
+     ```
+     for the FORWARD intersection (positive t).  R =
+     `world_size / 2` matches the `SkyDome` in `Viewer.__init__`.
+     Muzzle is inside the dome so the quadratic has exactly one
+     positive root.
+
+The resulting `target_world` flows through the existing shot-
+pool pipeline -- `Shot.update` stamps `impact_pos = target_pos`
+when the projectile arrives, the viewer's per-frame
+impact-transition block detects the flip and calls
+`self.impacts.hit(impact_pos, fwd, normal)`, and the existing
+impact billboards / decals render at the dome-surface point.
+
+Practical effect: a shot aimed at sky now travels until it
+hits the inside of the dome -- you'll see the impact
+explosion (dust + fireball, smoke) at whatever point on the
+dome the shell would punch through.
+
+### Projected cursor renders right after terrain (1.190.0)
+
+Per Coffee 2026-05-15 ("draw projected cursor right after
+terrain and before anything else"): moved the aim-point
+marker block (screen-space crosshair + flat-quad fallback +
+blue debug ball) out of the late site (right before the UI
+overlay pass) and inserted it immediately after
+`self.terrain.render(...)`.
+
+Effects:
+
+  * The screen-space decal projector now reads scene depth
+    that contains ONLY terrain -- no tank or particles in
+    the way -- so the projection lands cleanly on the ground
+    where the cursor's terrain raycast computed.
+  * Tank meshes + particles + impact decals all draw ON TOP
+    of the cursor.  The cursor reads as a ground marker the
+    rest of the scene paints over.
+  * Replaced the old block with a one-line comment pointer
+    so future readers can find the new home easily.
+
+`_aim_hit_world` is still updated by the unconditional
+`_drive_aim_from_aim_state` call later in the frame -- when
+the marker renders right after terrain, it uses the PREVIOUS
+frame's hit world.  One-frame lag is invisible at 60+ FPS.
+
+### Chase cam horizon-locked (yaw only) (1.189.0)
+
+Per Coffee 2026-05-15 ("chase camera stays planer to x and y.
+i does not follow the tanks x y z rotations"): the chase cam
+was transforming `eye_local` and `target_local` through the
+FULL chassis matrix -- which includes the chassis pitch + roll
+from `tank_physics.update`.  Result: camera rolled / pitched
+with the tank on slopes.
+
+Fix in `Viewer._anchored_view_matrix` (chase branch only):
+strip pitch + roll from the chassis rotation before the
+common `chassis @ eye_local` transform.  Built a yaw-only
+chassis matrix by:
+
+  * Extracting the chassis-local +Z direction's world image
+    (`chassis[:3, 2]`).
+  * Projecting that vector onto world XZ (drop the Y
+    component), normalising what remains.
+  * Building a fresh 3x3 yaw-only rotation:
+      [[ cy, 0, sy],
+       [  0, 1,  0],
+       [-sy, 0, cy]]
+    where `sy / cy` come from the projected forward direction.
+  * Reusing the chassis world translation (so the camera
+    still tracks the tank's position).
+
+Then `chassis` (local var) is overwritten with the yaw-only
+matrix for the rest of the chase-cam branch.  The common
+`up_local = +Y` transform below picks up the new rotation's
+identity-Y column, so the up vector stays world +Y -- the
+camera never rolls.
+
+Commander branch (`camera_mode == 2`) untouched -- still uses
+the full chassis rotation since the "driver POV" should tilt
+with the tank.
+
+### Chase cam auto-active on tank load (1.188.0)
+
+Per Coffee 2026-05-15 ("when a tank loads the camera should be
+set to the back the tank looking ahead and down.  I want the
+chase cam to be active after the tank is loaded"):
+`Viewer.load_vehicle` now sets:
+
+  * `self.camera_mode      = 1`       (chase, was 0 / orbit)
+  * `self._chase_yaw_deg   = 0.0`     (eye DIRECTLY behind tank)
+  * `self._chase_pitch_deg = 20.0`    (lifted so view tilts down)
+  * `self._chase_distance  = 15.0`    (default zoom)
+
+In chassis-local convention `yaw=0` is +Z (behind, since the
+visible-front lives at -Z) and positive pitch lifts the eye --
+combined, the camera sits behind + above the chassis looking
+ahead and down at the turret hardpoint.
+
+The `C` key still cycles `orbit -> chase -> commander` as before
+so the user can drop back to orbit / commander views on demand.
+The orbit yaw / pitch state isn't touched so flipping back to
+orbit returns to whatever orbit pose was active before the
+tank load.
+
+### Load-time screen-overlay crosshair (1.187.0)
+
+Per Coffee 2026-05-15 ("just make the render window a
+crosshair at load time" + "hide it when a tank is loaded"):
+draw `resources/Cursor.png` as a 2-D textured quad at the
+centre of the 3D viewport when no tank is loaded.  Once a
+tank is loaded (`self.meshes` non-empty) the overlay
+suppresses itself.
+
+Implementation (`tankExporterPy/viewer.py`):
+
+* `Viewer.__init__` -- four lazy-init fields:
+  `_load_cross_tex` / `_load_cross_program` /
+  `_load_cross_vao` / `_load_cross_vbo`, plus
+  `_load_cross_size_px = 128` for the on-screen pixel size.
+* `_render_load_crosshair(scene_x, console_h, scene_w,
+  scene_h)` -- new method.  Early-out when `self.meshes` is
+  non-empty (= a tank is loaded) OR the viewport is
+  degenerate.  First call builds resources:
+    - Compiles a tiny textured-NDC-quad shader (re-uses the
+      Splash module's `_VS` / `_FS` strings since it already
+      supports the texture + tint uniforms we want).
+    - Loads `Cursor.png` into a `GL_TEXTURE_2D` with mipmaps
+      + CLAMP_TO_EDGE.
+    - Allocates a 6-vert dynamic VAO/VBO.
+  Per-frame builds an NDC quad sized
+  `size_px / scene_{w,h}` so the crosshair stays a fixed
+  128 px on screen regardless of window size.  Alpha-blended
+  draw with depth test off so it composites on top of
+  whatever's behind.
+* `Viewer.render` -- calls `_render_load_crosshair(...)`
+  inside the scene viewport, right before the UI overlay
+  pass switches back to full-window.
+* Cleanup wired into the viewer teardown path so the
+  texture / VAO / VBO / program get freed.
+
+### Mass revert of the cursor-at-startup experiment (1.186.0)
+
+Per Coffee 2026-05-15 ("revert to before we tried to show the
+curser at start up"): all of 1.185.4 through 1.185.14 was a
+debugging spiral chasing a "cursor invisible at startup" issue
+that compounded.  Reverted to functional 1.185.3 state where
+the cursor appears once a tank loads:
+
+  * `Viewer.__init__` -- `self._aim_hit_world = None` (was
+    seeded to (0,0,0) in 1.185.5).
+  * `_drive_aim_from_aim_state` -- restored
+    `self._aim_hit_world = None` on sky / off-map raycast
+    miss (was preserving last hit in 1.185.6).
+  * Removed `_set_default_aim_hit_world()` method + the call
+    from `run()` after splash cleanup (1.185.4).
+  * Removed the per-frame live-aim-readout block (status
+    line, gate diagnostics, cube diagnostics, depth-grab
+    status) -- console no longer spammed every frame
+    (1.185.7 / .8 / .9 / .13).
+  * Removed the always-rendered origin reference sphere
+    (1.185.11).
+  * Merged blue debug ball back into the same try-block as
+    the crosshair render (split in 1.185.10 -- not needed
+    in the working state).
+  * `DecalShader` instance re-coupled to shellhole PNG
+    existence -- compiled only when `PBS_ShellHole_10_AM.png`
+    is on disk (was unconditional in 1.185.8).
+  * `_grab_scene_depth` restored to one try / one print()
+    on failure (was status-string-tracked in 1.185.12 / .13).
+  * Removed the hoisted depth-grab call in render's
+    live-readout area (1.185.14).
+  * Aim crosshair render block: restored simple
+    `if SS available else flat-quad` elif chain (the
+    `show_terrain`-gated SS-or-fallback expansion in
+    1.185.5 / .8 is gone).
+
+Net behaviour: cursor + ball reappear when a tank is loaded
+and the user moves the mouse over the viewport, exactly as
+before this debugging round.  All extraction / texture
+loading paths (shellhole NM/GMM extracts on disk, etc.)
+are unchanged on disk; only the runtime gates moved.
+
+### Hoist depth grab to live-readout site (1.185.14)
+
+Per Coffee 2026-05-15 (`depth_grab_status: never called`): the
+aim render block (~2000 lines later in `render()`) was never
+reached -- something in between (terrain pass, mesh pass,
+particles, etc.) throws an exception or returns early, and
+the SS branch that calls `_grab_scene_depth` is never hit.
+
+Fix: hoist the depth-grab call up to the live-readout site
+right after `_drive_aim_from_aim_state`.  The texture allocates
+regardless of what bombs out downstream in render().  The aim
+render still uses the cached `_scene_depth_tex` once / if it
+runs.
+
+Trade-off: at the new site the depth buffer holds the PREVIOUS
+frame's content (most of the opaque scene hasn't drawn yet
+this frame).  For a screen-space decal that's a one-frame
+visual lag -- invisible at 60 fps and totally fine for the
+crosshair which moves with the mouse.
+
+Once you confirm `depth_grab_status: ok`, we can dig into
+WHICH downstream pass is throwing.
+
+### Persistent depth-grab status in live readout (1.185.13)
+
+Per Coffee 2026-05-15 ("no scene depth texture was created..
+check for errors"): my own per-frame `log_clear()` was wiping
+the depth-grab error messages I added in 1.185.12.  They fired
+ONCE on frame 0, then the next frame's clear wiped them before
+the user could read.
+
+Fix: store the result on `self._depth_grab_status` (string)
+and add a fourth line to the per-frame live readout:
+`depth_grab_status: <result>` -- green when ok, red on any
+failure.  Possible values now visible every frame:
+
+  * `ok` -- grab succeeded
+  * `bail w=X h=Y` -- viewport was 0
+  * `alloc <ExceptionType>: <msg>` -- texture allocation
+    raised (glGenTextures / glTexImage2D / glTexParameteri)
+  * `copy <ExceptionType>: <msg>` -- glCopyTexImage2D raised
+  * `never called` -- the SS render branch hasn't reached
+    `_grab_scene_depth` yet (= one of the upstream gates
+    -- show_terrain, aim_crosshair_ss, etc. -- is False
+    each frame, OR an earlier exception is bailing out of
+    the render block before reaching the SS branch)
+
+### Depth-grab failure now visible in console (1.185.12)
+
+Per Coffee 2026-05-15 (`scene_depth_tex=185  <-- was zero at
+load. never created texture needed`): the depth grab was
+failing silently at startup -- the texture id stayed at 0 for
+the first frame(s), the screen-space crosshair couldn't
+project, AND the user got no diagnostic because the failure
+message went through `print()` to stdout.
+
+Rewrote `_grab_scene_depth`:
+
+  * Three separate failure paths now route through
+    `self.log(..., color=red)` so they're visible in the
+    in-app console:
+      - `bailing: w=X h=Y` (degenerate viewport)
+      - `alloc failed: <type>: <msg>` (glGenTextures /
+        glTexImage2D / glTexParameteri raised)
+      - `copy failed: <type>: <msg>` (glCopyTexImage2D raised)
+  * Success path also logs ONCE at first allocation:
+    `allocated tex=<id> (WxH)` in green.
+
+Restart and watch the console -- you'll see exactly which
+step bails on the first frame.  Likely candidates:
+
+  1. The first call lands BEFORE the GL context is fully
+     valid (rare; the splash already exercised the context).
+  2. `w` / `h` are 0 at frame 0 (viewport not yet sized).
+  3. `glCopyTexImage2D` returns ENUM error because the
+     framebuffer's depth attachment isn't readable at the
+     moment we ask.
+
+### Fixed origin reference marker (1.185.11)
+
+Per Coffee 2026-05-15 ("z flipped?"): added an
+ALWAYS-RENDERED reference sphere at world (0, 0, 0) so we can
+distinguish two failure modes:
+
+  * if the ORIGIN marker is visible but the AIM ball isn't:
+    the ball-rendering code path works -- the bug is in
+    `_aim_hit_world` (maybe a sign flip in the unprojection,
+    or the camera default puts the hit point off-screen).
+  * if NEITHER marker is visible: the ball-rendering path
+    itself is broken (color_shader uniform, depth state,
+    blend state, etc.).
+  * if both appear: the system is working; restart your
+    session to pick up the latest binaries.
+
+Marker reuses `self.aim_hit_sphere` (blue) at world origin.
+Wrapped in its own try / log so any exception lands in the
+in-app console with the error type + message.
+
+### Split aim ball + crosshair into separate try blocks (1.185.10)
+
+Per Coffee 2026-05-15 ("I can not see the cursor until I load
+a tank"): the aim-marker block in `Viewer.render` had the
+crosshair AND the blue ball inside ONE try/except.  When the
+crosshair branch (surface-normal sample, screen-space decal,
+flat-quad fallback) threw at frame 0 -- before any tank load
+warmed up the codepath -- the except handler swallowed the
+exception and the BALL never drew either.  Once a tank loaded,
+something in the warmup state succeeded and the entire block
+ran cleanly.
+
+Fix: render the ball in its OWN try-block BEFORE the crosshair
+logic, so an exception in the decal projector only kills the
+crosshair render; the ball still draws.  Also route both
+exception logs through `self.log(..., color=(255, 110, 110))`
+so the error shows up in the in-app console (not just stdout),
+visible at runtime without watching a terminal.
+
+### Live console: cube + depth-grab diagnostics (1.185.9)
+
+Per Coffee 2026-05-15 ("is our cube not created either?"):
+extended the live aim-status console with the actual cube
+geometry + scene-depth state so we can rule those out as
+gates:
+
+  `cursor_cube_idx=36  shellhole_cube_idx=36  scene_depth_tex=N`
+
+`cursor_cube_idx == 36` confirms the unit cube
+(`build_unit_cube_vbo()` returns 36 indices = 12 tris) lives
+inside the screen-space `aim_crosshair_ss` projector.  Same
+for the shellhole projector.  `scene_depth_tex > 0` confirms
+`_grab_scene_depth()` succeeded at least once -- if it's 0
+the SS crosshair has nothing to project against.
+
+The cube ISN'T a separate engine object -- each ScreenSpaceDecals
+instance owns its own VAO/VBO/EBO for the cube (via
+`build_unit_cube_vbo()` in its `__init__`).  So when
+`ss_cursor=True` the cube is already there; this line just
+confirms the index count looks right.
+
+### Aim diagnostics + decouple DecalShader from shellhole PNG (1.185.8)
+
+Per Coffee 2026-05-15 ("do we have the texture to project?
+maybe that is only happening if we load a tank?"):
+
+Two fixes:
+
+* `Viewer.__init__` -- decoupled the DecalShader compile from
+  the shellhole PNG existence.  Previously
+  `self.decal_shader = DecalShader()` only happened inside an
+  `if os.path.isfile(_decal_png):` block, so without a
+  shellhole extract the shader stayed None, which in turn
+  prevented `AimCrosshair` (the flat-quad fallback projector)
+  from loading.  Now `DecalShader()` is compiled
+  unconditionally; only `shellhole_decals` stays conditional
+  on the actual shellhole PNG.
+
+* Live console readout extended with the gate state.  Now
+  the per-frame line shows:
+  `ss_cursor=True  ss_shader=True  flat_cursor=True
+   flat_shader=True  ball=True  terrain=True  show=False`
+  -- green when every gate is set, red when any is missing.
+  Lets the user spot which gate is open / closed without
+  ad-hoc print statements.  (`show=False` for `show_terrain`
+  is the most common "why isn't the cursor visible" cause --
+  the screen-space crosshair needs terrain in the depth
+  buffer to project onto.)
+
+### Live console readout of aim world position (1.185.7)
+
+Per Coffee 2026-05-15 ("clear the console and put the world
+space postion in there so we can see if we are at least getting
+a projectiong" + "live updates"): every frame the render path
+now does `log_clear(status='Aim')` + `log("aim world: (x, y, z)")`
+right after the per-frame `_drive_aim_from_aim_state` call.
+The console shows the current `_aim_hit_world` in cyan when set,
+or a red "<none>" when the value is missing.
+
+Diagnostic for confirming the screen->world unprojection +
+raycast are landing on a real terrain point.  When the user
+sees `aim world: (+1.23, +0.05, -4.56)` they know the
+projection is working even if the crosshair / ball isn't
+visible for some other reason (depth grab, render gate, etc.).
+
+### Aim cursor: stop wiping _aim_hit_world on sky miss (1.185.6)
+
+Per Coffee 2026-05-15 ("i have no cursor.  is there a gate
+stoping it from being seen? Tank loaded? not loaded? ready set
+go?"): YES -- inside `_drive_aim_from_aim_state` (which runs
+EVERY frame), when the cursor's terrain raycast missed (sky /
+above horizon / off-map) the function set
+`self._aim_hit_world = None`.
+
+Both the crosshair and the blue ball gate on
+`if self._aim_hit_world is not None:` -- so any time the user's
+cursor pointed at the sky, both markers disappeared the next
+frame.  The 1.185.5 default-init + seed-raycast did set the
+value but it got wiped on the very first `_drive_aim_from_aim_
+state` call after startup.
+
+Fix: when the per-frame ray misses terrain, just don't touch
+`_aim_hit_world` -- leave it at whatever last valid value (or
+the (0,0,0) default).  The gun-targeting solve below still gets
+the synthetic 1500m sky-fallback point for its yaw/pitch math,
+so the turret keeps tracking the cursor direction.
+
+### Default aim ball + crosshair fallback at startup (1.185.5)
+
+Per Coffee 2026-05-15 ("i have no cursor at start" + "i need
+the ball too, it looks amazing"): two combined fixes so the
+crosshair AND blue ball both show on frame 0:
+
+* `Viewer.__init__` -- `self._aim_hit_world` is now seeded
+  with `(0, 0, 0)` instead of `None`.  The blue debug sphere
+  + crosshair render blocks both gate on `_aim_hit_world is
+  not None`, so a None init left them dark until the user
+  moved the mouse.  Origin default keeps them visible from
+  frame 0; the `_set_default_aim_hit_world()` raycast in
+  `run()` then refines to the actual terrain hit a beat
+  later.
+
+* `Viewer.render` -- the screen-space (volumetric) crosshair
+  branch is now gated on `self.show_terrain AND terrain is
+  not None`.  Without terrain in the depth buffer the
+  screen-space cube's reconstruction reads depth=1.0 (far
+  plane) at every pixel and the unit-cube clip discards
+  everything -> invisible crosshair.  The flat-quad
+  `aim_crosshair` legacy projector doesn't have that
+  dependency (just draws a textured quad in world space),
+  so it now runs as the fallback whenever the screen-space
+  path doesn't actually draw -- including when terrain is
+  hidden, the depth grab fails, or the ss pipeline didn't
+  initialise.
+
+`_set_default_aim_hit_world` also got chatty -- prints the
+eye / fwd / hit (or miss-with-reason) so we can debug when
+the seed raycast bails.
+
+### Default aim crosshair at app load (1.185.4)
+
+Per Coffee 2026-05-15 ("i want my curser on at end of app
+load... where it points can be just a default head position...
+same math for finding where point when a tank is loaded"):
+seed `self._aim_hit_world` once at startup so the aim crosshair
+appears on the very first frame instead of waiting for the
+user to move the mouse over the viewport.
+
+New `Viewer._set_default_aim_hit_world()` helper -- pulled
+straight from the camera-eye / camera-forward decomposition
+the rest of the file uses (eye = -R^T * t, forward = -R[2]).
+Feeds those into `self._aim_point_on_terrain(eye, fwd)`, the
+SAME raycast `_drive_aim_from_aim_state` uses when a tank is
+loaded.  Stash the result on `_aim_hit_world` so the crosshair
+renderer picks it up on frame 0.
+
+Called from `Viewer.run()` right after the splash cleanup, so
+the camera + terrain are guaranteed initialised by then.
+No-op when the terrain isn't loaded.
+
+Logs `[viewer] default aim hit: (x, y, z)` so the seed value
+is visible in the console.
+
+### Skydome two-pass rotated seam blend (1.185.3)
+
+Per Coffee 2026-05-15 ("double render map with depth write off.
+draw, rotate _ .01 degree and draw skydome again"): the dome
+is now drawn TWICE per frame, with a 0.01-degree Y-axis
+rotation applied between the passes:
+
+  Pass 1: `u_alpha = 1.0`, view = caller-supplied (opaque).
+  Pass 2: `u_alpha = 0.5`, view = view * Ry(0.01 deg) (alpha
+          blend over pass 1).
+
+The tiny rotation shifts the equirect wrap seam between the
+two draws; combined via 50/50 alpha blend the visible line
+softens into a faint smear instead of a hard discontinuity.
+
+Both passes keep depth test OFF + depth write OFF (the
+backdrop convention from 1.185.2).  Render order in
+`Viewer.render` is still: Skybox -> SkyDome (both passes) ->
+Terrain -> meshes -> particles, so the dome reads as a
+backdrop the rest of the scene overdraws.
+
+* `shaders/skydome.frag` + `shaders/skydome_equirect.frag` --
+  new `u_alpha` uniform feeds `FragColor.a` so the second
+  pass can blend at <1.0.
+* `tankExporterPy/skybox.py SkyDome` -- new class attrs
+  `rotate_pass_deg = 0.01` + `rotate_pass_alpha = 0.5`.
+  `render()` runs both passes back-to-back, enabling
+  `GL_BLEND` (SRC_ALPHA / ONE_MINUS_SRC_ALPHA) for the pass
+  duration and disabling it on exit.  Y-axis rotation
+  matrix is pre-multiplied into `view` for the second pass
+  (so the world spins under a stationary camera).
+
+### Skydome: no depth test / no depth write (1.185.2)
+
+Per Coffee 2026-05-15 ("i always turn depth testing off when
+rendering it.. I write no depth info"): switched the SkyDome
+to the classic backdrop recipe -- depth test OFF, depth
+write OFF, rendered BEFORE opaque geometry so terrain / tank /
+etc. naturally overdraw it wherever they sit closer to the
+camera.
+
+* `tankExporterPy/skybox.py SkyDome.render` --
+  `glDisable(GL_DEPTH_TEST)` + `glDepthMask(GL_FALSE)`.
+  Restores `GL_DEPTH_TEST` + `GL_LESS` + write on at the end
+  of the call so downstream passes find the GL state where
+  they expect it.
+* `tankExporterPy/viewer.py Viewer.render` -- moved the
+  `self.skydome.render(...)` call from AFTER terrain (post
+  opaque pass) to BEFORE terrain (right after the infinite
+  Skybox draw).  The terrain pass then writes depth in front
+  of whatever dome pixels it covers; tank / decals / particles
+  follow on top.
+
+### Skydome seam fix -- manual LOD from world derivative (1.185.1)
+
+Per Coffee 2026-05-15 ("our dome texture still has a visible
+line  error in building the dome?"): the dome MESH is fine;
+the seam comes from GL's auto mip selection misbehaving at the
+`atan(-d.x, d.z)` discontinuity.  Where `d.z` swings sign at
+`d.x=0` (the line behind the camera in world space), the U
+coordinate jumps by ~1.0 across a single screen pixel, so
+`dFdx(u)` reports a "the texture spans one pixel" rate and GL
+snaps to a tiny mip level -- a blurry line shows up across the
+back of the dome.
+
+Fix in `shaders/skydome_equirect.frag`: compute LOD manually
+from the WORLD-DIRECTION derivative (smooth across the seam,
+no atan discontinuity), then sample via `textureLod`:
+
+    du_rate  =  |dd/dscreen|  /  (2*pi * |d.xz|)
+    dv_rate  =  |dd/dscreen|  /  pi
+    LOD      =  log2(max(du_rate * tex_w, dv_rate * tex_h))
+
+Clamped to `[0, 10]` so pole pixels (where `|d.xz| -> 0`
+inflates `du_rate`) don't push us off the mip pyramid.  Proper
+mipmap filtering preserved at distance + zero seam at the
+wrap-around.
+
+### Mass revert to pre-PBR decal projector state (1.185.0)
+
+Per Coffee 2026-05-15 ("go back to last fix on the terrain
+projector. find that and pull it.. pre pbr added"): the
+decal-PBR + terrain-debug + camera-far branches between
+1.181.0 and 1.184.0 cumulatively broke the render.  Reverted
+the whole stack back to functional-1.180.5 behaviour:
+
+* `shaders/decal_project.frag` -- removed the PBR uniforms
+  (`u_normal_map`, `u_gmm_map`, `u_has_*`, `u_light_dir`,
+  `u_cam_pos`) and the normal-map + Cook-Torrance branch.
+  Frag is back to simple albedo + alpha-blend with cube-edge
+  fade + age fade.
+* `tankExporterPy/particles.py` -- `ScreenSpaceDecals.__init__`
+  no longer loads NM / GMM sibling PNGs.  `_begin_pass` no
+  longer sets PBR uniforms or binds extra texture units.
+  `_end_pass` only unbinds the depth-tex unit.  `nm_path` /
+  `gmm_path` / `light_dir` / `cam_pos` kwargs kept for API
+  compat but ignored.
+* `tankExporterPy/viewer.py` -- decal `render_impacts` /
+  `render_single` call sites no longer compute the camera
+  eye or pass `light_dir`.
+* `shaders/terrain.frag` -- removed the `u_debug_flat` +
+  `u_debug_flat_color` uniforms and the flat-shade branch
+  (added in 1.181.0 -> 1.183.x).  Frag runs the original
+  procedural path unconditionally.
+* `tankExporterPy/terrain.py` -- removed the `debug_flat` /
+  `debug_fill_color` class attrs and the conditional draw
+  paths.  `render()` is back to a single draw call.
+* `tankExporterPy/scene.py` -- `Camera.__init__` no longer
+  carries `self.near` / `self.far` instance fields;
+  `get_projection_matrix` is back to hardcoded
+  `gluPerspective(fov, aspect, 0.1, 500.0)`.
+* `tankExporterPy/viewer.py` -- removed the post-Terrain
+  `camera.far = max(500, world_size)` bump.
+
+The extracted shellhole NM / GMM PNGs stay on disk
+(`resources/decals_pbs/`) -- harmless, costs nothing, and
+re-enabling PBR in a future iteration will skip the
+re-extract.  The extractor regex stays broadened too (no
+reason to refuse a Wargaming-provided sibling).
+
+### Camera far plane = world_size (the actual render flip) (1.184.0)
+
+Per Coffee 2026-05-15 ("the entire render flips. when we
+added the max view range, we did it wrong.. we should fix the
+max view radius. not view range"): the 1.176.0 max-shot-range
+patch extended the projectile cap to the map diagonal but
+didn't touch the CAMERA's far clip plane, which was still
+hardcoded at 500m in `scene.Camera.get_projection_matrix`.
+On any map with `world_size > 1km` the skydome (radius =
+world_size / 2) + far-side terrain rendered partly OUTSIDE
+the view frustum.  Past the far plane:
+
+  * depth values pile up at 1.0 with garbage precision;
+  * the screen-space decal projector's `invMVP * (uv, depth,
+    1)` reconstruction snaps to the wrong world point for
+    those clipped pixels;
+  * the decoded local-space normal flips orientation
+    (different invMVP region) -- which is the "view z normal
+    flip inside a radius" the user saw.
+
+Fix:
+
+* `scene.Camera.__init__` -- new `self.near = 0.1` /
+  `self.far = 500.0` defaults.  `get_projection_matrix`
+  reads them instead of the old hardcoded literals.
+* `tankExporterPy/viewer.py` -- right after `Terrain(...)`
+  succeeds, bumps `camera.far = max(500, world_size)` and
+  `camera.near = 0.25` so the skydome + far terrain fit
+  inside the frustum AND the depth-buffer dynamic range
+  stays usable for close-up tank shots.
+
+Logs `[viewer] camera frustum -> near 0.25 / far <N>` on
+terrain load so the values are visible.
+
+### Revert terrain to procedural texture + lighting (1.183.2)
+
+Per Coffee 2026-05-15 ("render engine is cooked.. pull from
+pre point i removed the generated terrain texture"): flipped
+`Terrain.debug_flat` class default from `True` back to `False`
+so `Terrain.render()` falls through to the original procedural
+rendering path -- palette / sand texture / slope desat /
+Lambert / fog / height darken / muzzle flash, all working as
+they did before 1.181.0.
+
+The flat-grey debug branch stays in place behind
+`if (u_debug_flat == 1)` in `terrain.frag` -- flip
+`Terrain.debug_flat = True` (class- or instance-level) to
+re-enable it.  No other code paths touched; PBR decals, the
+sky dome, the aim crosshair, etc. all keep working.
+
+### Terrain debug Lambert uses precomputed normals (1.183.1)
+
+Per Coffee 2026-05-15 ("there is no shading of the terrain
+period.  DO the normals ahead of time.. it takes nothing to do
+it and we wont have to be burdened in the shader with slow
+functions"):
+
+The IQ-style `dFdx`/`dFdy` derivative-normal trick added in
+1.183.0 produced no visible shading on the actual mesh -- the
+cross-product direction and screen-space derivative
+orientations didn't line up the way I expected.  Switched the
+`u_debug_flat` shader path to use the per-vertex
+`v_world_normal` attribute instead.
+
+That data is ALREADY computed ahead of time -- `terrain.py`
+calls `_vertex_normals(positions, indices)` in `__init__`
+(line 750) which builds area-weighted cross-product vertex
+normals, uploads them to the `_vbo_normal` buffer at
+location 1, and the vert shader forwards them as
+`v_world_normal`.  Zero per-fragment derivative work; the
+debug path is now one `normalize` + one `dot` + a mad.
+
+Also bumped the direct-light coefficient from 0.78 to 0.95 so
+the lit side reads visibly brighter than the 0.25 ambient
+floor -- terrain contours pop clearly.
+
+### Terrain drop wireframe + IQ derivative-normal Lambert (1.183.0)
+
+Per Coffee 2026-05-15 ("the terrain has no good lighting.
+remove the wireframe overlay.  use the IQ's (render toy) high
+speed normal calculator to create the normals if we are not
+already"):
+
+* `tankExporterPy/terrain.py` -- removed the wireframe overlay
+  draw call + the `debug_wire_color` class attribute + the
+  `glPolygonOffset` / `GL_LINE` polygon-mode toggles.  One
+  draw call per frame again.
+* `shaders/terrain.frag` -- the `u_debug_flat` path now runs
+  the IQ-style screen-space derivative normal:
+  ```glsl
+  vec3 dx = dFdx(v_world_pos);
+  vec3 dy = dFdy(v_world_pos);
+  vec3 N  = normalize(cross(dx, dy));
+  ```
+  followed by a wrap-Lambert `0.25 + 0.78 * max(dot(N, L), 0)`
+  multiplied onto `u_debug_flat_color`.  No per-vertex normals
+  used; cross product of the world-position derivatives gives
+  the true per-triangle face normal.  Result: flat-grey terrain
+  with per-triangle Lambert shading -- the polygonal landscape
+  reads clearly from the lighting alone, no wireframe needed.
+
+The procedural (non-debug) code path in `terrain.frag` is
+unchanged -- it still uses the per-vertex `v_world_normal` for
+its smooth-shaded lighting model.  Flip
+`Terrain.debug_flat = False` to switch back to that path.
+
+### Full-PBR shellhole decals (1.182.0)
+
+Per Coffee 2026-05-15 ("we are using full pbr on our decals we
+shoot on the terrain, right?  the texture sets are there I
+think.. maybe a bit different channel coding"): honest pre-
+state answer was NO -- the decal shader sampled albedo and
+alpha-blended only.  This commit upgrades to the full WoT
+PBR triplet.
+
+**Channel coding (verified by inspecting the actual DDS bytes):**
+
+  NM (normal map): DXT5nm BigWorld packing --
+    R = 0
+    G = Y component
+    B = 0
+    A = X component
+    Z reconstructed via sqrt(1 - X^2 - Y^2).
+
+  GMM (gloss/metallic/mask) -- on `PBS_ShellHole_10_GMM.dds`:
+    R = ~constant (interpreted as roughness)
+    G = sparse non-zero (metallic specks for debris)
+    B = ~0 (unused for this asset)
+    A = mostly opaque (visibility mask)
+
+**Extractor** (`cust_tools/extract_wot_shellhole_decals.py`):
+broadened the regex from `*_AM.dds` to `*_(AM|NM|GMM).dds` so
+the auto-pull at startup now grabs all three.  23 PNGs land in
+`resources/decals_pbs/` on a vanilla install (9 AM + 7 NM + 7
+GMM; some old shellholes like `_114` and `_Iceland` only ship
+AM).
+
+**Loader** (`tankExporterPy/particles.py`):
+
+* New `_load_decal_tex_2d(png_path)` helper -- consolidates
+  the PNG -> GL_TEXTURE_2D upload (RGBA8, mipmaps,
+  CLAMP_TO_EDGE, V-flip).  Shared across all three maps.
+* `ScreenSpaceDecals.__init__` now takes optional `nm_path`
+  and `gmm_path`.  Auto-discovers `<base>_NM.png` /
+  `<base>_GMM.png` siblings when only the albedo path is
+  provided.  Stores `nm_tex_id` / `gmm_tex_id` (0 when
+  absent).
+* `_begin_pass` accepts `light_dir` + `cam_pos` and binds
+  NM at texture unit 2, GMM at unit 3.  `u_has_normal_map`
+  / `u_has_gmm_map` int uniforms gate the shader path so
+  the aim crosshair (no PBR siblings) still renders as
+  flat alpha-blended albedo.
+
+**Shader** (`shaders/decal_project.frag`):
+
+* New `u_normal_map` + `u_gmm_map` samplers, `u_has_*`
+  gates, `u_light_dir`, `u_cam_pos`.
+* Decode tangent-space normal from DXT5nm (G = Y, A = X).
+* Build the surface tangent space from the cube's world-axis
+  orientation: local +X = world tangent, local +Z = world
+  bitangent, local +Y = world surface normal.  Remap the
+  decoded TS normal accordingly.
+* Cook-Torrance-style specular: Schlick Fresnel (F0 = 0.04
+  for dielectrics, mix to albedo for metals), GGX D, Smith
+  G_SchlickGGX (separable).  Lambert diffuse scaled by
+  (1 - F) * (1 - metallic).  Ambient lift of 25 % so
+  shadowed pixels aren't pitch black.
+* GMM defaults when NM is bound but GMM isn't: roughness =
+  0.85, metallic = 0.0 (a sensible dirt-crater fallback).
+* Falls back to flat alpha-blended albedo when both
+  `u_has_*` flags are 0 -- aim crosshair / decals without
+  PBR siblings still work.
+
+**Viewer** (`tankExporterPy/viewer.py`):
+Both call sites now compute the camera eye position from the
+view matrix and pass it alongside `light_dir=(0.5, 1.0, 0.3)`
+-- same sun direction the terrain shader uses, so decals
+catch matching lighting.
+
+Known limitations / future work:
+
+* The view vector in the spec calculation is approximated as
+  straight-down (vec3(0, 1, 0)) for horizontal terrain.  A
+  proper world-space view dir needs the surface point passed
+  through to the shader as a separate uniform (or recovered
+  via a second invMVP).  Specular highlights are slightly
+  off for grazing camera angles.
+* No IBL environment lookup -- the dome cubemap could be
+  sampled for environmental specular.  Substantial follow-up.
+* GMM's B channel is currently ignored; if WoT uses it for
+  AO or a secondary spec mask we should sample it once the
+  convention is confirmed.
+
+### Terrain flat-shade + wireframe debug look (1.181.0)
+
+Per Coffee 2026-05-15 ("remove the generated texture mapping of
+the terrain. shade it .3.3.3 grey with .3.3.7 wireframe"):
+terrain renders as flat grey + blue wireframe instead of the
+procedural palette / sand / lighting / fog stack.
+
+* `shaders/terrain.frag` -- new `u_debug_flat` + `u_debug_
+  flat_color` uniforms.  When `u_debug_flat == 1` the frag
+  short-circuits to `FragColor = vec4(u_debug_flat_color, 1.0)`
+  and skips every procedural step (palette / warp / slope
+  desat / Lambert / fog / height-darken / muzzle-flash).
+* `tankExporterPy/terrain.py` -- new class-level
+  `debug_flat = True` (default), plus `debug_fill_color =
+  (0.30, 0.30, 0.30)` and `debug_wire_color = (0.30, 0.30,
+  0.70)`.  `render()` now does two passes:
+  - Fill pass at .3 grey with `glPolygonOffset(2, 2)` so the
+    wireframe wins the z-test.
+  - Line pass at .3 .3 .7 with `glPolygonMode(GL_LINE)`.
+  Both passes reuse the same `TerrainShader` -- only the
+  `u_debug_flat_color` uniform changes between them.
+
+Flip `Terrain.debug_flat = False` (instance- or class-level)
+to restore the textured + lit rendering.  All the previous
+procedural code paths in `terrain.frag` are untouched, just
+gated behind the `u_debug_flat == 0` branch.
+
+### Decal viewport-origin fix + smaller crosshair (1.180.5)
+
+Per Coffee 2026-05-15 ("my zoom or anything else should affect
+how that decal is placed.  It sits in world space at our look
+at point on the terrain"): the decal cube IS positioned at
+`_aim_hit_world` in world space, but the FRAG-shader depth
+sample was reading from the wrong framebuffer region whenever
+the 3D viewport didn't start at window pixel (0, 0) (which is
+always -- the info / tree panels push it inward).
+
+Root cause:
+
+  `gl_FragCoord.xy` is in WINDOW pixel coords (not viewport-
+  relative).  The depth texture, copied via
+  `glCopyTexImage2D(scene_x, console_h, scene_w, scene_h)`,
+  only covers the viewport region.  Sampling at
+  `gl_FragCoord.xy / u_resolution` reads texture pixels offset
+  by the viewport origin -- wrong depth -> wrong world
+  reconstruction -> the cube's clip discards arbitrary pixels.
+  Result: the decal appeared to drift in world space as the
+  camera moved / zoomed.
+
+Fix:
+
+* New `u_viewport_origin` uniform in
+  `shaders/decal_project.frag`.  Frag now computes
+  `uv = (gl_FragCoord.xy - u_viewport_origin) / u_resolution`
+  so the depth texture is sampled correctly regardless of
+  viewport offset.
+* `ScreenSpaceDecals.render_impacts()` / `.render_single()`
+  + `_begin_pass()` thread `viewport_x` / `viewport_y` through
+  to the shader uniform.
+* `Viewer.render()` passes `viewport_x=scene_x,
+  viewport_y=console_h` at both call sites.
+
+Crosshair size: dropped from 12.0 m to 6.0 m so each visible
+reticle tick lands at 0.5 m on the ground (was 1 m).  Per
+Coffee 2026-05-15 ("drop its size to one tick = .5m").
+
+### Blue debug ball back for crosshair calibration (1.180.4)
+
+Per Coffee 2026-05-15 ("bring the ball back so i can check we
+are hitting the target with the projection"): re-enabled the
+`aim_hit_sphere` render at `_aim_hit_world` alongside the
+screen-space crosshair so the user can eyeball whether the
+projection lands on the same world point the raw aim-ray hit
+gives.  Both draw with depth-test on so terrain occlusion
+agrees between them.
+
+If the ball sits in the centre of the crosshair, the
+projector matrix is correctly calibrated.  Any divergence
+indicates a depth-grab mismatch or matrix offset bug -- the
+ball is the ground truth (`_aim_point_on_terrain` -> raw
+world hit), the crosshair is the projector reconstruction.
+Remove this block when calibration is complete.
+
+### Decal projector axis-aligned with world (1.180.3)
+
+Per Coffee 2026-05-15 ("something wrong with the matrix stack
+for the projector.. it should always be on xy plane and
+projecting in to y-"): the `_build_decal_matrix` used to spin
+the cube around the surface normal via a frisvad basis -- on
+sloped terrain this rotated the texture's compass directions
+to arbitrary azimuths (the aim crosshair's N/E/S/W stopped
+pointing at world cardinals).
+
+Fix: drop the basis rotation, keep cube WORLD-AXIS-ALIGNED at
+all times:
+
+    local +X axis -> world +X  (size_x)
+    local +Y axis -> world +Y  (size_z = thickness; projection
+                                axis, -Y down)
+    local +Z axis -> world +Z  (size_y)
+
+Frag shader (`shaders/decal_project.frag`) samples UV from
+`local.xz + 0.5` (the ground-plane axes) instead of
+`local.xy`.  Edge-fade now operates on `|local.y|` (the
+projection axis) instead of `|local.z|`.  These are the
+Y-up equivalents of nuTerra's Z-up `(local.x, local.y) +
+local.z` mapping -- same algorithm, swapped depth/UV roles
+for our coordinate system.
+
+`_build_decal_matrix(pos, normal, ...)` still accepts a
+`normal` argument for call-site API compat but ignores it.
+When raycast-vs-mesh impacts on non-ground surfaces land
+(future work), the basis-rotation path can come back behind
+a surface-type branch.
+
+Verified: a decal at pos=(10, 5, -3) with size=4, thickness=2
+produces a cube spanning x ∈ [8, 12], y ∈ [4, 6], z ∈ [-5, -1],
+oriented strictly on world axes.
+
+### Public unit-cube helper for projector geometry (1.180.2)
+
+Per Coffee 2026-05-15 ("we need cube for the projection... it is
+required for any Y height changes. cude is just 1 x 1 x 1
+centered on xyz zero. Forward is z, -X - left, y+ up.  create
+it as a list or vbo.. your call"): promoted the screen-space
+decal projector's private `_CUBE_POS` / `_CUBE_INDICES` to a
+public, documented utility in `tankExporterPy/particles.py`:
+
+* `UNIT_CUBE_POS` -- (8, 3) float32 array of corner positions
+  in [-0.5, +0.5]^3.  WoT axis convention: +X right, +Y up,
+  +Z forward.
+* `UNIT_CUBE_INDICES` -- (36,) uint32 array of 12-triangle
+  indexed mesh.  CCW winding from OUTSIDE each face.
+* `build_unit_cube_vbo()` -- allocates a fresh
+  `(vao, vbo, ebo, index_count)` tuple for any caller that
+  wants its own GL geometry.
+
+`ScreenSpaceDecals.__init__` now uses `build_unit_cube_vbo()`
+instead of inlining the buffer-build code.  Behaviour identical;
+the cube data is interned in one place so future projectors
+(impact box, debug volume) share the same recipe.
+
+Underscore aliases `_CUBE_POS` / `_CUBE_INDICES` kept for one
+release for any code path that still imports them privately.
+
+### Mute the auto-paired detail-displacement heightmap (1.180.1)
+
+Per Coffee 2026-05-15 ("remove the generated 2nd height map we
+are using. mute it for now"): added a `_DETAIL_AUTO_PAIR = False`
+guard in `Viewer.__init__` so `resources/sand_painted_height.png`
+is no longer pulled in by default as a secondary terrain
+displacement.  An EXPLICIT
+`cfg['terrain_detail_heightmap']` value still activates the
+secondary heightmap; everything else falls through to a single
+primary heights array.  Flip the constant back to True to
+restore the auto-pair behaviour.
+
+Console now logs `[viewer] Terrain detail: muted (2nd heightmap
+auto-pair disabled)` when the secondary map is skipped.
+
+### Screen-space (volumetric) decal projector (1.180.0)
+
+Per Coffee 2026-05-15 ("look here at my decal projector frag
+and vert  C:\\nuTerra\\nuTerra\\shaders\\Terrain_shaders"):
+upgraded the decal pipeline from flat oriented quads to the
+proper screen-space (volumetric) projector technique used by
+nuTerra's `DecalProject.{vert,frag}`.
+
+Mechanism:
+
+  1. Render terrain + tank into the framebuffer as usual.
+  2. Snapshot the framebuffer's depth attachment into a cached
+     `GL_TEXTURE_2D` via `glCopyTexImage2D`
+     (`Viewer._grab_scene_depth(x, y, w, h)`).
+  3. For each decal, draw a UNIT CUBE in world space oriented
+     to the surface normal + scaled by the desired footprint.
+     Cull-face OFF so the camera can be inside the cube.
+  4. The fragment shader (`shaders/decal_project.frag`) reads
+     scene depth at every cube pixel, reconstructs the world
+     point via a pre-multiplied invMVP, clips anything outside
+     the unit cube volume, and samples the decal texture from
+     `(local.xy + 0.5)`.
+
+Benefits over the flat-quad approach (which the new path
+supersedes):
+
+  * Decals conform to underlying geometry -- terrain
+    undulations, tank hulls, walls -- without z-fighting.
+  * No polygon-offset hacks.
+  * Single cube draw per decal regardless of footprint
+    curvature.
+
+New files / classes:
+
+  * `shaders/decal_project.vert` + `shaders/decal_project.frag`
+    -- ported from nuTerra, re-targeted to GL 3.30 / forward
+    pipeline (no UBO, no #include).  Soft fade on the +/-Z
+    faces of the cube hides the hard discontinuity where a
+    decal cube partially exits geometry.
+  * `tankExporterPy/shaders.py` -- new `ScreenSpaceDecalShader`
+    wrapper.
+  * `tankExporterPy/particles.py` -- new `ScreenSpaceDecals`
+    class with `render_impacts()` + `render_single()` helpers.
+    Shared cube VBO across all decals.  `_build_decal_matrix`
+    builds the orient + scale + translate matrix (frisvad
+    basis on the surface normal).
+  * `tankExporterPy/viewer.py`:
+    - `self._scene_depth_tex` (lazy-allocated, reallocates on
+      viewport resize).
+    - `_grab_scene_depth()` does the
+      `glCopyTexImage2D(GL_DEPTH_COMPONENT24, ...)`.
+    - Shellhole decals + aim crosshair now use
+      `ScreenSpaceDecals.render_impacts()` /
+      `.render_single()`.  Legacy flat-quad `Decals` +
+      `AimCrosshair` instances stay loaded as fallback for
+      the case where the screen-space shader didn't compile.
+
+Render order unchanged: decals draw FIRST in the transparent
+sequence (right after `fire_smoke_particles`) so they sit
+beneath every other alpha layer.
+
+### SkyDome seam-hide via 0.99 U scale (1.179.1)
+
+Per Coffee 2026-05-15 ("our skydome texture has a bad visible
+seam at the wrap. Can we adjust U scale just a tad.. make it
+* 0.99 in the shader?"): contracted the equirect U sweep by
+1 % around its 0.5 center in `shaders/skydome_equirect.frag`:
+
+    u = (u - 0.5) * 0.99 + 0.5;
+
+The dome's 360-degree azimuth now samples texture columns
+0.005 .. 0.995 instead of 0 .. 1.0, skipping the BC1
+compression artefacts at the panorama's left + right edges
+that produced a visible hard line at the wrap.  Centering the
+contraction on 0.5 keeps the forward-direction's view of the
+panorama in the same place; only the seam region shifts.
+
+### Aim crosshair projector replaces the blue ball (1.179.0)
+
+Per Coffee 2026-05-15 ("i need to see the bule ball even if a
+tank isn't loaded.. project a crosshair texture at the ball
+location and drop the ball" + "those ticks are scale 1 m
+spacing"): the old blue debug sphere at `_aim_hit_world` is
+replaced with a flat textured reticle on the terrain.
+
+* `resources/Cursor.png` -- the reticle texture, sourced from
+  nuTerra (`C:/nuTerra/nuTerra/Resources/Cursor.png`).  Not
+  Wargaming-derived, NOT gitignored; ships with the repo.
+  Circular crosshair with N/E/S/W compass labels + tick marks
+  on each axis at 1 m spacing.
+
+* `tankExporterPy/particles.py` -- new `AimCrosshair` class.
+  Single-quad textured projector that reuses the existing
+  `DecalShader` (the crosshair is just one more alpha-blended
+  textured quad lying on a surface).  `size_m=12.0` default;
+  tunable so the texture's tick marks land at 1 m on the
+  ground.  No aging -- `u_fade_start=2.0` pins full opacity.
+  Orients to the surface normal with the same frisvad-style
+  basis recipe `Decals` uses.
+
+* `tankExporterPy/viewer.py`:
+  - Removed the `self.aim_hit_sphere.render(...)` call.
+    `aim_hit_sphere` stays allocated for now (unused but
+    cheap) -- can be deleted in a later cleanup pass.
+  - Loads `AimCrosshair` at startup; gated on the existing
+    `DecalShader` being available.
+  - Renders the crosshair when `_aim_hit_world is not None`
+    using the same surface-normal finite-difference recipe
+    impacts use.  Cleanup wired in.
+
+* `_drive_aim_from_aim_state` refactor -- the function now
+  ALWAYS sets `_aim_hit_world` (when the ray hits terrain).
+  The gun-targeting solve below was gated by `if no pivots:
+  return` at the TOP, which meant `_aim_hit_world` never got
+  set when no tank was loaded.  Moved that gate down past the
+  raycast so the crosshair appears with the cursor regardless
+  of tank-loaded state.
+
+* `Viewer.render` -- added a second tank-independent call to
+  `_drive_aim_from_aim_state(view, None, proj)` AFTER the
+  tank-physics branch so the aim hit refreshes every frame
+  even with no tank present.  Passes `chassis_pose=None`; the
+  refactored function early-returns after the hit-set when
+  pivots / chassis_pose are missing.
+
+Net result: the crosshair appears under the cursor as soon as
+the terrain is loaded, with or without a tank.  When a tank
+IS loaded the gun still tracks the same point as before
+(unchanged behaviour for the targeting solve).
+
+---
+
+## 2026-05-15 (early morning)
+
+### SkyDome cull face fix (1.178.2)
+
+Per Coffee 2026-05-15 ("the sky map renderer flip front face
+setting for skydome render. I can see it unless im out side
+the sphere"): the dome was invisible from INSIDE the sphere
+(= normal play view) and only showed when the camera flew
+outside.  Fix: change `glCullFace(GL_FRONT)` to
+`glCullFace(GL_BACK)` (the GL default) in `SkyDome.render`.
+My original winding analysis was wrong -- the UV-sphere
+triangle pairs are wound such that GL_BACK gives the desired
+"visible from inside, hidden from outside" behaviour.  Also
+removed the redundant cull-face restore at the end of render
+since it now matches the GL default.
+
+### SkyDome azimuth fix (1.178.1)
+
+Per Coffee 2026-05-15 ("sky is wound backwards"): WoT's panorama
+is authored for an azimuth convention opposite to GL's right-
+handed (+Z forward, +X right) world axes -- clouds wrapped the
+wrong way around the dome.  One-line shader fix in
+`shaders/skydome_equirect.frag`: negate `d.x` inside the
+`atan` so u sweeps the other direction:
+
+    float u = atan(-d.x, d.z) / (2.0 * PI) + 0.5;
+
+No code or vertex-buffer changes; the patch is purely in the
+fragment shader's UV computation.
+
+### Karelia panorama as SkyDome source (1.178.0)
+
+Per Coffee 2026-05-15 ("maps\\skyboxes\\01_Karelia_sky\\
+skydome\\sky_karelia_forward.dds  nice blue sky" + "it is
+located in 01_karelia.pkg"): teach the SkyDome to sample a
+WoT equirectangular panorama instead of (or alongside) the
+existing env cubemap.
+
+* `cust_tools/extract_wot_karelia_sky.py` -- mirrors the
+  fire / shellhole extractor pattern.  Pulls
+  `maps/skyboxes/01_Karelia_sky/skydome/sky_karelia_forward.dds`
+  from `01_karelia.pkg`, decodes the BC1 (DXT1) 4096 x 1024
+  panorama to PNG, writes to
+  `resources/skyboxes/01_Karelia_sky/skydome/sky_karelia_
+  forward.png`.  Same "never ship Wargaming pixels" rule --
+  output is gitignored; `ensure_karelia_sky()` runs at startup.
+
+* `shaders/skydome_equirect.frag` -- new fragment variant
+  that samples a `sampler2D` via the standard equirectangular
+  projection:
+  ```
+  u = atan2(d.x, d.z) / (2*pi) + 0.5
+  v = acos(d.y) / pi
+  ```
+  Underside fog-fade kept identical to the cubemap variant
+  so the dome's lower hemisphere stays clean under debug
+  views.
+
+* `tankExporterPy/skybox.py`:
+  - `SkyDomeShader(mode='cubemap'|'equirect')` -- compiles
+    the right fragment shader based on the requested mode.
+  - `SkyDome.__init__(cubemap_id=None, radius=..., panorama_
+    png=None, ...)` -- panorama wins when present, falls back
+    to cubemap when the WoT pkg isn't available.  `cleanup`
+    deletes only the panorama texture; cubemap stays owned
+    by `Skybox`.
+  - `_load_panorama_2d(png_path)` -- standard GL_TEXTURE_2D
+    upload with GL_REPEAT on u (azimuth wrap) and
+    GL_CLAMP_TO_EDGE on v (pole-clamp so the dome doesn't
+    bleed past the texture's vertical edge).
+
+* `tankExporterPy/viewer.py`:
+  - Runs the karelia-sky extractor right after the shellhole
+    extractor at startup so the PNG is on disk before the
+    SkyDome instance is built.
+  - Passes the karelia PNG path to `SkyDome(...)`; gracefully
+    falls back to the cubemap when the PNG is missing (and
+    skips the dome entirely when neither source is available).
+
+Net effect: TEPY's skydome now shows the same blue Karelia
+panorama WoT players see in-game on the Karelia map, sized to
+`max(50m, terrain.world_size / 2)` and centered at the world
+origin.  Future work can pick the panorama by terrain biome
+(Iceland / Winter / etc.) the same way the shellhole variants
+will eventually be picked.
+
+---
+
+## 2026-05-15 (early morning)
+
+### Procedural skydome -- sphere at world origin, r = map_size / 2 (1.177.0)
+
+Per Coffee 2026-05-15 ("we have skydomes in the game.. make a
+sphere. rad = map size / 2"): adds a finite-radius UV-sphere
+skydome at the world origin, sampled from the existing env
+cubemap.  Distinct from the existing `Skybox` -- that one uses
+a z=w trick to sit at infinity and follow the camera, the new
+`SkyDome` is a real mesh in world space whose edge marks the
+heightmap's outer perimeter.
+
+* `shaders/skydome.vert` -- standard `proj * view * pos`, no
+  infinite-distance trick.  The CPU side bakes the radius into
+  the vertex positions so the shader doesn't need a uniform.
+* `shaders/skydome.frag` -- samples the cubemap by the
+  normalised world-space direction, smoothsteps a horizon
+  band (sky above `u_horizon_t0`, fog below `u_horizon_t1`)
+  so the underside of the dome doesn't show a hard ring
+  where it meets the ground for an under-terrain orbit view.
+* `tankExporterPy/skybox.py` -- new `SkyDomeShader` +
+  `SkyDome` classes alongside the existing `Skybox`.
+  `_build_uv_sphere(radius, lat=24, lon=48)` produces a 2,304-
+  triangle mesh by default (cheap).  Renders inside-out
+  (`glCullFace(GL_FRONT)`) with `GL_LEQUAL` depth-test +
+  depth-write OFF so terrain occludes the dome correctly
+  from below and the dome doesn't poison later transparent
+  passes' depth tests.
+* `tankExporterPy/viewer.py` -- new `self.skydome` field +
+  `self.show_skydome = True`.  Built after terrain is loaded
+  (we need `terrain.world_size` for the radius); reuses the
+  existing skybox cubemap so dome + skybox stay in sync
+  visually.  Rendered after terrain in the main draw loop
+  so depth-test naturally masks it; cleanup wired into the
+  Viewer teardown path.
+
+The dome doesn't yet share a UI toggle with the skybox; flip
+`self.show_skydome` directly in code or wire a checkbox in a
+follow-up.
+
+---
+
+## 2026-05-14 (evening)
+
+### Max shot range = map diagonal (1.176.0)
+
+Per Coffee 2026-05-14 ("make max shot range the size of the
+map"): replaced the 1500m hardcoded cap in `_fire_round` with
+`sqrt(2) * terrain.world_size` -- the longest finite ray that
+can traverse the heightmap.  Used as both the
+`_aim_point_on_terrain(max_distance_m=...)` march limit AND
+the sky-shot fallback endpoint, so a round fired across the
+whole map now ray-marches the FULL distance instead of giving
+up at 1500m and stamping a phantom impact mid-air.
+
+Falls back to 1500m when the terrain isn't loaded (rare), and
+clamps the lower bound at 50m so a degenerate 0-size terrain
+doesn't turn into a zero-range gun.
+
+### Shell-impact decal projector (1.175.0)
+
+Per Coffee 2026-05-14 ("time to add a decal projector. to
+where the shells hit" + "look in maps.pkg maps/decals_pbs/
+for shellhole"): every projectile-vs-terrain impact now lays
+a flat textured shellhole decal on the ground at the hit
+point, oriented to the local terrain normal.
+
+* **WoT shellhole extraction**
+  (`cust_tools/extract_wot_shellhole_decals.py`).  Scans the
+  user's pkg dir for `maps/decals_pbs/PBS_ShellHole_*_AM.dds`
+  across `shared_content-part1/2/3.pkg`,
+  `shared_content_sandbox-part1/2.pkg`,
+  `38_mannerheim_line.pkg`, `120_graf_zeppelin_scc.pkg` (and
+  any future pkgs matching the same name pattern), decodes
+  each BC3 DDS via Pillow, writes a 1024 x 1024 RGBA PNG to
+  `resources/decals_pbs/`.  9 unique shellhole variants on a
+  vanilla NA install: PBS_ShellHole_{08,10,10_DDay,10_Iceland,
+  11,12,16,114,Winter_08}_AM.  Same "never ship Wargaming
+  pixels" rule the fire / smoke atlas follows -- output is
+  gitignored, extraction runs at first launch via
+  `ensure_runtime_decals(...)` called from `Viewer.__init__`.
+
+* **DecalShader + decal.vert/frag**
+  (`shaders/decal.vert`, `shaders/decal.frag`,
+  `tankExporterPy/shaders.py`).  Simple textured-quad pipeline:
+  the CPU side hands over 6 verts in WORLD space already
+  oriented on the surface basis, the vertex stage does
+  `proj * view * a_position`, and the frag stage samples the
+  shellhole RGBA + applies an age-driven fade-out.  Per-vertex
+  `a_age_frac` lets every decal carry its own age without a
+  uniform array.
+
+* **Decals projector class**
+  (`tankExporterPy/particles.py`).  Loads one shellhole PNG
+  (`PBS_ShellHole_10_AM.png` is the default) into a GL_TEXTURE_2D,
+  allocates a 64-quad VBO, and per-frame rebuilds 6 verts per
+  active `Impact` by sampling `impact.pos + impact.normal *
+  bias` and stretching corners along an orthonormal basis on
+  the surface normal (frisvad-style robust-up: pick the world
+  axis with smallest |n.dot| as the seed, cross with `n`).
+  Renders alpha-blended with depth test on / depth write off +
+  glPolygonOffset(-2, -2) so the quad sits ABOVE the terrain
+  pixel-by-pixel without z-fighting at slope changes.
+  Tunables on the instance (size=4 m, bias=0.05 m,
+  fade_start=0.85, lifetime_s=6.0) are live-mutable.
+
+* **Render order**
+  (`Viewer.render` -- alpha-pass).  Decals drawn FIRST in the
+  transparent layer sequence so they composite directly onto
+  the terrain underneath every other transparent layer (trail
+  smoke, muzzle smoke, fire billboards, impact dust, muzzle
+  flash, impact fire).  Early-out on
+  `self.impacts.has_alive == False`.
+
+Known gaps -- carried to next session:
+
+* Only terrain impacts have decals (object / hull hits need
+  raycast picking first; same constraint as the explosion
+  billboards).
+* One fixed shellhole texture per session.  Future work: pick
+  per terrain type (sand vs grass vs snow -> different shellhole
+  variants) or rotate through the 9 extracted PNGs for visual
+  variety so 5 impacts in the same area aren't identical.
+* No normal-mapped decals yet -- the WoT shellhole NM + GMM
+  files are NOT extracted (the regex filter only matches AM).
+  Forward-pipeline TEPY doesn't have a PBR decal shader to
+  consume them.
+
+---
+
+### Cursor visibility -- load screen + mesh window follow-up (1.174.0)
+
+Two follow-ups to the cursor-hide work landed in 1.173.0:
+
+* Per Coffee 2026-05-14 ("load screen doesn't show mouse
+  either"): on a fresh OpenGL canvas SDL can leave the cursor
+  in a "not yet decided" state so the arrow doesn't paint
+  during the splash / load-screen window.  `Viewer.__init__`
+  now explicitly calls `pygame.mouse.set_visible(True)` at the
+  top of the splash setup (before the `Splash` instance is
+  built) and seeds `self._cursor_visible_state = True` from
+  the same site.  Removed the later "= None" init that would
+  otherwise overwrite that True back to unset before
+  handle_input even runs once.
+
+* Per Coffee 2026-05-14 ("mesh window will work if its
+  visible?"): the floating mesh-visibility window sits INSIDE
+  the 3D viewport's screen bounds, so the bare
+  `_cursor_in_render_window` check from 1.173.0 hid the cursor
+  when the user moused over it.  `_update_cursor_visibility`
+  now consults `UIManager.is_pointer_over_ui(x, y)` FIRST --
+  if the pointer is over any floating UI (mesh window, info
+  spine, info panel body, console, modal dialogs) the cursor
+  stays visible, regardless of whether (x, y) happens to fall
+  inside the viewport rect.
+
+### Hide OS cursor over the 3D viewport (1.173.0)
+
+Per Coffee 2026-05-14 ("can we remove the mouse cursor if its
+in the render window"): the system pointer used to sit on top
+of the in-scene crosshair / aim ball when the user moved over
+the 3D viewport.  Now hidden over the render area and shown
+everywhere else.
+
+New in `tankExporterPy/viewer.py`:
+
+* `self._cursor_visible_state` flag (init in `__init__`).
+* `_update_cursor_visibility()` method -- reads
+  `pygame.mouse.get_pos()`, queries the existing
+  `_cursor_in_render_window(x, y)` helper, and only calls
+  `pygame.mouse.set_visible` when the desired state CHANGES.
+  Prevents per-frame visibility churn that can flicker the
+  cursor on some Windows configs.
+* Called once at the end of `handle_input()` so the visibility
+  always tracks the latest pointer position.
+* `WINDOWLEAVE` handler also force-shows the cursor on the way
+  out so it can't get stranded hidden if the user warped the
+  pointer off-window while it was inside the viewport.
+
+UI / console / panels keep a normal pointer; only the 3D
+viewport hides it.
+
+### Particle alpha/additive ordering fix (1.172.0)
+
+Per Coffee 2026-05-14 ("gun fire overlapping ground explosions
+looks bad"): with the impact explosions landed in 1.170.0, the
+render order ended up mixing alpha and additive passes such
+that an alpha layer drew over a previously-rendered additive
+layer.  Concretely:
+
+    1. shot_trail (alpha)
+    2. muzzle smoke (alpha)
+    3. muzzle FLASH (additive)     <- bright burst painted on
+    4. fire_billboards (alpha)
+    5. impact dust (alpha)         <- dimmed the burst here
+    6. impact fire (additive)
+
+The dust quad's `(1 - src_alpha)` term darkens the bright
+muzzle-flash pixels wherever the dust covers them on screen,
+even when the flash is supposed to be physically IN FRONT of
+the dust cloud.  Depth-write is off on every transparent pass
+(intentional -- particles shouldn't occlude each other), so
+the depth buffer can't fix this.  The correct rule for mixed
+alpha + additive without depth writes is:
+
+    Draw ALL alpha layers first (back-to-front ideally), then
+    ALL additive layers on top.  Additive is commutative so
+    order WITHIN the additive group doesn't matter.
+
+Fix in `tankExporterPy/viewer.py`:
+
+* `_render_muzzle_flash` now takes a `phase` arg
+  (`'smoke'` / `'flash'` / `'both'`).  `'smoke'` runs just the
+  alpha smoke loop; `'flash'` runs just the additive burst.
+  `'both'` keeps the old behaviour for back-compat.
+* Render loop split: the first call site invokes
+  `phase='smoke'` (alpha) immediately after the shot-trail
+  smoke loop, alongside the other alphas.  A second call
+  invokes `phase='flash'` (additive) after every alpha pass
+  has run, alongside the impact-fire additive.
+* Impact pair similarly split: `impact_dust` (alpha) runs in
+  the alpha group, `impact_fire` (additive) runs in the
+  additive group.
+
+New global render order:
+
+    alpha:   shot_trail -> muzzle smoke -> fire_billboards
+             -> impact dust
+    additive: muzzle flash -> impact fire
+
+No more dimmed muzzle flashes when a still-playing impact
+dust quad happens to fall in front of one on screen.
+
+### Terrain raycast at fire time -- no more shooting through hills (1.171.0)
+
+Per Coffee 2026-05-14 ("we need to cast a ray when we fire and
+see if it ever hits terrain before making it to the target.  I
+am able to shoot though hills"): the per-shot `target_world`
+came from `self._aim_hit_world` -- the CAMERA's cursor-vs-terrain
+hit point.  That broke whenever a hill stood between the gun and
+the camera's aim point: the camera could see over the hill but
+the muzzle couldn't, so the projectile visibly passed through
+the hillside.
+
+Fix in `Viewer._fire_round` (`tankExporterPy/viewer.py`):
+replace `target_world = self._aim_hit_world` with a fresh
+`_aim_point_on_terrain(muzzle, fwd_world, 1500, 1.0)` call.
+That helper already does coarse-then-refine 1m marching along
+the ray and returns the first terrain intersection (or None for
+sky shots), so the projectile now stops at whatever hill the
+gun's actual barrel direction hits first.  Sky shots still
+fall through to the `muzzle + 1500 * fwd_world` fallback so
+tracer trails / smoke have a finite endpoint to emit toward.
+
+The fix is symmetric with the impact-pool wire-up landed in
+1.170.0: the projectile stops on the hill, `s.impact_pos` is
+stamped at that hill point, and the same impact-transition
+block fires `self.impacts.hit(...)` so the dust + fire
+explosion plays at the hill instead of at some point past it.
+
+### Impact explosion billboards (1.170.0)
+
+Per Coffee 2026-05-14 ("now we need explosions where the round
+hits an object.. we only have terrain now.  there are a few
+good image sets in the eff_text file." + "1024,1024. 2 sets in
+that area"): fired-shell terminations now play a fireball +
+dust burst at the impact point.
+
+* **Flipbook extraction**
+  (`cust_tools/extract_wot_fire_atlas.py`).  Added two new grid
+  defs sliced from `eff_tex.dds` at atlas region (1024, 1024)
+  through (2048, 2048):
+  - `explosion_fire`: top half (1024, 1024)-(2048, 1536),
+    8x4 grid of 128 px frames -> 32 frames orange fireball
+    -> black smoke.
+  - `explosion_dust`: bottom half (1024, 1536)-(2048, 2048),
+    8x4 grid of 128 px frames -> 32 frames dustier ground-
+    impact variant.
+  Both included in `RUNTIME_TARGETS` so they're sliced on
+  startup alongside the existing fire / smoke / gun_flash
+  sets.  `smoke_dark` kept as a legacy alias.
+
+* **One-shot billboard pool**
+  (`tankExporterPy/particles.py` -- new `ImpactBillboards`
+  class).  Distinct from `AnimatedBillboard` (continuous
+  loop) and `ParticleSystem` (spawned cloud): each impact
+  becomes ONE camera-facing quad whose frame is driven by
+  `age / lifetime`.  When `age >= lifetime` the quad skips
+  rendering, even if the `ImpactPool` slot is still alive
+  for its scorch-decal phase.  Supports per-instance
+  `blend` ('additive' for fire, 'alpha' for dust),
+  `rise_speed` (m/s upward drift while playing), and per-
+  call `y_offset` (lifts fire above dust so the two layers
+  separate visually instead of merging).
+
+* **Impact-pool wire-up**
+  (`tankExporterPy/viewer.py` -- inside the existing shot-
+  trail impact-transition block).  When a Shot's
+  `projectile_alive` flips False, the viewer now also calls
+  `self.impacts.hit(impact_pos, fwd, normal)`.  The surface
+  normal is computed via a 4-tap finite-difference on
+  `terrain.sample_height` at +/- 0.5 m; falls back to +Y if
+  no terrain or sampling fails.  ImpactPool was already
+  allocated at startup but had no producer before this --
+  every slot stayed inactive forever.
+
+* **Two-layer render**
+  (after `fire_billboards.render` in `render()`):
+  - Dust under fire so the fireball isn't darkened by the
+    dust alpha.  `impact_dust_billboards` rendered first
+    with `y_offset=0.5` + alpha blend, then
+    `impact_fire_billboards` second with `y_offset=1.5` +
+    additive blend.  Tunables (size, rise_speed) live on
+    the class instance; bump them via `self.impact_*` if
+    explosions read too tame / too crazy.
+  - Both early-exit on `self.impacts.has_alive == False`,
+    so idle frames pay one bool load + a compare.
+
+* **Lifetime**
+  -- 32 frames @ 30 fps = 1.067 s per explosion.  ImpactPool
+  keeps the slot alive for 6 s (scorch decal lifetime) but
+  the billboards stop drawing after the flipbook completes,
+  so the GPU only pays for in-flight explosions.
+
+Known gaps -- carried over to next session:
+* Only terrain hits trigger impacts.  Object / tank-hull
+  hits need raycast picking + an `impact_pool.hit()` call
+  from that path.
+* `explosion_fire` flipbook is loaded but currently rendered
+  at EVERY impact (no surface-type branching).  When object
+  hits land, the call site should pass a flag so terrain
+  hits get dust-only and object hits get fire-only (or
+  both, but with smaller fire-scale).
+* No scorch / crater decal renderer yet -- ImpactPool tracks
+  `scorch_phase` already; renderer would lay a flat textured
+  quad on the ground at impact_pos for 6 s.
+
+---
+
 ## 2026-05-14 (afternoon)
 
 ### Per-tank gun-bone classification table + stretch-aware recoil (1.160.0)

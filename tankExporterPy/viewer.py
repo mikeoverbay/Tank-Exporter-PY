@@ -44,10 +44,11 @@ from .mesh     import Mesh
 from .scene    import Camera, Grid, Axes, Sphere, LineBatch
 from .shaders  import (ShaderProgram, SimpleColorShader,
                        ParticleShader, ImportedShader, NormalsShader,
-                       TerrainShader)
+                       TerrainShader, DecalShader)
 from .skybox   import Skybox
 from .terrain  import Terrain
-from .particles import FlipbookTexture, ParticleSystem, AnimatedBillboard
+from .particles import (FlipbookTexture, ParticleSystem,
+                         AnimatedBillboard, ImpactBillboards)
 from .ui       import UIManager, UITreeView, UITreeNode, UITabBar
 from .localization import _
 
@@ -628,6 +629,20 @@ class Viewer:
         # so it doesn't depend on UIManager (which is created later).
         # Set to None on failure -- splash is a UX nicety, not load-bearing.
         self.splash = None
+        # Per Coffee 2026-05-14 ("load screen doesn't show mouse
+        # either"): force the OS cursor visible while the splash
+        # is up.  On Windows with a fresh OpenGL canvas SDL can
+        # leave the cursor in a "not yet decided" state so the
+        # arrow doesn't paint over the splash; an explicit
+        # set_visible(True) here pins it.  The main-loop helper
+        # `_update_cursor_visibility` takes over once handle_input
+        # starts running, hiding the arrow over the 3D viewport
+        # again.
+        try:
+            pygame.mouse.set_visible(True)
+            self._cursor_visible_state = True
+        except Exception:
+            pass
         try:
             from .splash import Splash
             from . import __version__ as _APP_VERSION
@@ -741,6 +756,19 @@ class Viewer:
         # the model has no turret/gun component).
         self._turret_pivot_chassis = None
         self._gun_pivot_chassis    = None
+        # Per Coffee 2026-05-14 ("is there any info in the def xml
+        # about mussel flash?"): WoT publishes per-gun muzzle-flash
+        # specs in `scripts/item_defs/vehicles/common/gun_effects.xml`
+        # keyed by the gun's `<effects>` name (e.g. `shot_main_mb`,
+        # `shot_small`, `shot_KwK_L46`).  Each spec carries
+        # duration, point-light color animation, ground-wave ref,
+        # and the pixie particle file.  We don't parse the binary
+        # .eff files; we just consume the timing + light keyframes
+        # from the XML so the flash sprite's tint + duration match
+        # WoT's authored values.  Loaded once at startup from the
+        # PkgExtractor; per-tank lookup happens at load_vehicle.
+        self._gun_effects_table = None
+        self._active_gun_effect = None
         # HP_gunFire muzzle list + round-robin cursor (re-populated
         # per tank load in load_vehicle; defaulted here so any pre-
         # load access doesn't AttributeError).
@@ -776,6 +804,24 @@ class Viewer:
                                        stacks=12,
                                        color=(0.20, 0.50, 1.00))
         self._aim_hit_world   = None
+        # Per Coffee 2026-05-15 ("if the curser is outside of the
+        # dome, i want it to be projected on to the dome"): the
+        # aim raycast tags each hit as 'terrain', 'dome', or
+        # 'sky' (= no hit, no dome).  For terrain hits the
+        # render path computes the surface normal via finite
+        # differences; for dome hits `_aim_hit_normal` carries
+        # the precomputed inward sphere normal so the cursor
+        # quad orients onto the dome's tangent plane without
+        # the renderer needing to know about the sphere.
+        self._aim_hit_normal  = None
+        self._aim_hit_kind    = 'sky'
+
+        # Note: a 2-D screen-overlay crosshair lived here from
+        # 1.187.0 to 1.193.x.  Made redundant in 1.190.0 when
+        # the world-projected crosshair was moved to render
+        # right after terrain -- that change unblocked the
+        # projected cursor at startup, so the static 2-D
+        # overlay no longer adds anything.  Removed cleanly.
         # Per Coffee 2026-05-13 ("fire red spheres at the terrain"):
         # bright red 0.15m projectile sphere, re-used for every
         # active shot in the pool.  Drawn at each shot's `cur_pos`
@@ -1202,6 +1248,48 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] runtime flipbook extract skipped: {exc}")
 
+        # Per Coffee 2026-05-14 ("time to add a decal projector. to
+        # where the shells hit" + "look in maps.pkg maps/decals_pbs/
+        # for shellhole"): pull the shell-hole albedo decals from
+        # WoT's shared_content pkgs the same way the fire / smoke
+        # atlas is pulled.  Output is resources/decals_pbs/*.png
+        # (9 unique shellhole AM PNGs on a vanilla install).
+        # Gitignored; never enters the repo.  Skipped silently
+        # when no pkg dir is configured / found.
+        self._splash_status('Checking shellhole decals...')
+        try:
+            from cust_tools.extract_wot_shellhole_decals import (
+                ensure_runtime_decals)
+            cfg_pkg_dir = (self._cfg.get('pkg_dir', '') or '').strip()
+            ensure_runtime_decals(
+                resources_dir=os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources'),
+                extra_pkg_paths=(cfg_pkg_dir,) if cfg_pkg_dir else (),
+            )
+        except Exception as exc:
+            print(f"[viewer] runtime decal extract skipped: {exc}")
+
+        # Per Coffee 2026-05-15 ("maps\\skyboxes\\01_Karelia_sky\\
+        # skydome\\sky_karelia_forward.dds  nice blue sky"): pull
+        # the Karelia skydome panorama from 01_karelia.pkg.  4096
+        # x 1024 BC1 -> resources/skyboxes/01_Karelia_sky/skydome/
+        # sky_karelia_forward.png.  Sampled by the SkyDome
+        # projector below in equirectangular mode when present.
+        self._splash_status('Checking Karelia skydome...')
+        try:
+            from cust_tools.extract_wot_karelia_sky import (
+                ensure_karelia_sky)
+            cfg_pkg_dir = (self._cfg.get('pkg_dir', '') or '').strip()
+            ensure_karelia_sky(
+                resources_dir=os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources'),
+                extra_pkg_paths=(cfg_pkg_dir,) if cfg_pkg_dir else (),
+            )
+        except Exception as exc:
+            print(f"[viewer] karelia sky extract skipped: {exc}")
+
         self._splash_status('Loading smoke flipbook (91 frames)...')
         self.particle_shader      = None
         self.smoke_flipbook       = None
@@ -1375,12 +1463,236 @@ class Viewer:
             # kept None so any stale render-path checks fall through
             # to the new per-shot systems below.
             self.shot_trail_smoke = None
+
+            # Per Coffee 2026-05-14 ("the 2nd emitter is needed for
+            # each round's current emitter ... 3 rectangles, rotated
+            # at center of bottom ... that emitter is stationary and
+            # never moves"): muzzle-flash flipbook.  Loaded once at
+            # init, shared across all active shots.  The renderer
+            # draws 3 world-aligned quads per active shot fanning
+            # around the gun-forward axis at the muzzle position.
+            self.gun_flash_flipbook = None
+            self.gun_flash_vao      = None
+            self.gun_flash_vbo      = None
+            try:
+                gf_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources', 'gun_flash')
+                if os.path.isdir(gf_dir):
+                    self.gun_flash_flipbook = FlipbookTexture(gf_dir)
+                    # Unit quad: 4 verts in triangle-strip order
+                    # (BL, BR, TL, TR).  UV.x = 0 -> muzzle edge,
+                    # UV.x = 1 -> plume tip.  UV.y = 0/1 are the
+                    # two perpendicular edges; the shader maps
+                    # (UV.y - 0.5) so 0.5 is the bottom-center
+                    # pivot at the muzzle.
+                    quad = np.array([
+                        [0.0, 0.0],
+                        [1.0, 0.0],
+                        [0.0, 1.0],
+                        [1.0, 1.0],
+                    ], dtype=np.float32)
+                    self.gun_flash_vao = glGenVertexArrays(1)
+                    self.gun_flash_vbo = glGenBuffers(1)
+                    glBindVertexArray(self.gun_flash_vao)
+                    glBindBuffer(GL_ARRAY_BUFFER,
+                                  self.gun_flash_vbo)
+                    glBufferData(GL_ARRAY_BUFFER, quad.nbytes,
+                                  quad, GL_STATIC_DRAW)
+                    glVertexAttribPointer(
+                        0, 2, GL_FLOAT, GL_FALSE, 2 * 4,
+                        ctypes.c_void_p(0))
+                    glEnableVertexAttribArray(0)
+                    glBindVertexArray(0)
+                    # Per-quad rotation angles (radians) around
+                    # the gun-forward axis.  3 quads at 60 deg
+                    # spacing -> back-sides cover the other 180
+                    # deg for ~360 deg visibility.
+                    self.gun_flash_quad_angles = [
+                        0.0,
+                        math.radians(60.0),
+                        math.radians(120.0),
+                    ]
+                    # World-space plume size.  Adjust if too
+                    # tiny / too large; these match the 256x128
+                    # sprite's aspect (2:1 length:thickness).
+                    self.gun_flash_length    = 1.2   # m
+                    self.gun_flash_thickness = 0.6   # m
+                    from .shaders import FlashShader
+                    self.flash_shader = FlashShader()
+                    # Per Coffee 2026-05-14 (WoT shimmer pipeline):
+                    # the distortion flipbook drives the heat-haze
+                    # refraction.  Sampled alongside the color
+                    # flipbook by flash.frag.  6 frames at 128px,
+                    # extracted from `eff_tex_distortion.dds`.
+                    self.gun_flash_distortion_flipbook = None
+                    try:
+                        gfd_dir = os.path.join(
+                            os.path.dirname(
+                                os.path.dirname(__file__)),
+                            'resources', 'gun_flash_distortion')
+                        if os.path.isdir(gfd_dir):
+                            self.gun_flash_distortion_flipbook = (
+                                FlipbookTexture(gfd_dir))
+                    except Exception as _exc_dist:
+                        print(f"[viewer] flash distortion disabled: "
+                              f"{_exc_dist}")
+                        self.gun_flash_distortion_flipbook = None
+                    # Refraction texture: a copy of the color
+                    # back-buffer taken just before the flash pass.
+                    # Sampled by flash.frag through the distortion
+                    # offset so the back-buffer warps behind the
+                    # flash.  Size matches the viewport; rebuilt
+                    # in _resize_refraction_texture() on viewport
+                    # changes.
+                    self.refraction_tex     = None
+                    self.refraction_tex_w   = 0
+                    self.refraction_tex_h   = 0
+                    self.flash_dist_strength = 0.03   # ~3% of screen
+            except Exception as _exc_gf:
+                print(f"[viewer] muzzle-flash disabled: "
+                      f"{_exc_gf}")
+                self.gun_flash_flipbook = None
+                self.flash_shader       = None
+                self.gun_flash_distortion_flipbook = None
         except Exception as exc:
             print(f"[viewer] Smoke particles disabled: {exc}")
             self.particle_shader = None
             self.smoke_flipbook  = None
             self.smoke_particles = None
             self.fire_smoke_particles = None
+
+        # Per-shot muzzle-flash particle systems (Coffee
+        # 2026-05-14 "do it.. coffee_ needs coffee anyway").
+        #
+        # Replaces the old 3-quad fan with a per-shot ParticleSystem
+        # pool, mirroring the `shot_trail_systems` layout:
+        # `muzzle_flash_systems[i]` is the ParticleSystem dedicated
+        # to `shots.shots[i]`.  At fire time the slot's PS is
+        # `reset_pool`'d and gets the burst budget; per-frame the
+        # render path advances + draws it.
+        #
+        # Why a PS instead of the 3-quad fan: WoT's flash is a
+        # camera-facing fireball, not a forward-pointing plume.
+        # A particle burst with additive blending, wide cone spread,
+        # and random screen-plane rotation reads as a billowing
+        # fireball regardless of viewing angle -- matching the
+        # reference screenshot the user shared on 2026-05-14.
+        self.muzzle_flash_systems = []
+        if (self.gun_flash_flipbook is not None
+                and self.particle_shader is not None):
+            try:
+                gf_frames = float(
+                    self.gun_flash_flipbook.frame_count)
+                for _ in range(50):   # matches ShotPool capacity
+                    ps = ParticleSystem(
+                        self.gun_flash_flipbook,
+                        max_particles=8,
+                        one_shot_pool=True)
+                    # Burst emission: spawn_rate huge so the
+                    # one_shot_pool cap of 8 is hit on frame 0.
+                    # After that the cap blocks further spawns and
+                    # the existing particles age out naturally.
+                    ps.spawn_rate       = 10000.0
+                    ps.spawn_per_meter  = 0.0       # time-based
+                    # Per-shot scale (length/thickness from caliber)
+                    # overrides these at fire time.  Defaults
+                    # here are the Tiger 88mm reference values.
+                    ps.start_size       = 1.0
+                    ps.end_size         = 1.8
+                    # Outward drift speed + heavy drag = puffs
+                    # billow then halt, matching the WoT reference's
+                    # "explode out, then frozen smoke" shape.
+                    ps.speed            = 2.0
+                    ps.drag             = 5.0
+                    ps.lifetime         = 0.25
+                    # Color fade fully across the lifetime so the
+                    # puffs disappear into the trail smoke.
+                    ps.fade_start_frame = 0.0
+                    ps.fade_end_frame   = gf_frames
+                    ps.fade_in_frames   = 0.0
+                    # Random screen-plane rotation per particle so
+                    # adjacent puffs don't read as the same sprite.
+                    ps.rotation_jitter  = float(2.0 * math.pi)
+                    # Small spawn-position scatter so the 8
+                    # particles don't all originate at the exact
+                    # muzzle pixel.
+                    ps.pos_jitter       = 0.08
+                    # Wide cone (~30 deg) around the gun forward
+                    # direction so the burst billows outward.
+                    ps.spread_radius    = 0.6
+                    # Additive blend for the saturated "blown
+                    # out" muzzle look.
+                    ps.blend_mode       = 'additive'
+                    self.muzzle_flash_systems.append(ps)
+            except Exception as _exc_mf:
+                print(f"[viewer] muzzle-flash systems disabled: "
+                      f"{_exc_mf}")
+                self.muzzle_flash_systems = []
+
+        # Per Coffee 2026-05-14 ("can we add another emitter for
+        # bellowing smoke for the flash?"): a SECOND per-shot
+        # particle pool that emits gunpowder smoke alongside the
+        # bright flash burst.  Parallel-array layout matching
+        # `muzzle_flash_systems` so a shot's flash AND its smoke
+        # both key off the same slot index.  Smoke uses the white-
+        # smoke flipbook + standard alpha blend (NOT additive --
+        # smoke obscures rather than adds), much longer lifetime
+        # than the flash so the cloud lingers after the muzzle
+        # bloom dies.
+        self.muzzle_smoke_systems = []
+        if (self.smoke_flipbook is not None
+                and self.particle_shader is not None):
+            try:
+                sm_frames = float(
+                    self.smoke_flipbook.frame_count)
+                for _ in range(50):
+                    ps = ParticleSystem(
+                        self.smoke_flipbook,
+                        max_particles=14,
+                        one_shot_pool=True)
+                    ps.spawn_rate       = 10000.0   # burst
+                    ps.spawn_per_meter  = 0.0
+                    # Smoke is BIGGER than the flash and grows as
+                    # it dissipates.  Overridden per shot at fire
+                    # time from the per-caliber flash_length.
+                    ps.start_size       = 1.4
+                    ps.end_size         = 3.2
+                    # Slow outward drift + gentle drag = the
+                    # cloud blooms then hangs.
+                    ps.speed            = 0.9
+                    ps.drag             = 1.2
+                    # Lingering smoke -- ~1.8 s before the last
+                    # puff fades, well past the 0.25 s bright
+                    # flash window so the cloud reads as the
+                    # AFTERMATH of the flash, not part of it.
+                    ps.lifetime         = 1.8
+                    # Smooth alpha ramp across the whole lifetime
+                    # (start at full, fade entirely over the last
+                    # 75 %).  Smoke shouldn't pop on the spawn
+                    # frame either; a brief fade-in softens that.
+                    # Per Coffee 2026-05-14 ("smoke needs to start
+                    # more transparent so the fire can be seen"):
+                    # ramp smoke alpha up SLOWLY across the first
+                    # ~40 % of life (= ~0.72 s) so during the
+                    # bright flash window (0..0.25 s) the smoke is
+                    # only 10..20 % opaque and the additive flash
+                    # punches through visibly.  Peak opacity holds
+                    # briefly, then the standard fade-out tail
+                    # carries it to invisibility.
+                    ps.fade_in_frames   = 0.40 * sm_frames
+                    ps.fade_start_frame = 0.60 * sm_frames
+                    ps.fade_end_frame   = sm_frames
+                    ps.rotation_jitter  = float(2.0 * math.pi)
+                    ps.pos_jitter       = 0.10
+                    ps.spread_radius    = 0.55
+                    # Alpha blend -- smoke is opaque, not bloomy.
+                    ps.blend_mode       = 'alpha'
+                    self.muzzle_smoke_systems.append(ps)
+            except Exception as _exc_ms:
+                print(f"[viewer] muzzle-smoke systems disabled: "
+                      f"{_exc_ms}")
+                self.muzzle_smoke_systems = []
 
         # Fire: animated BILLBOARD (one looping quad per HP_Fire
         # emitter), NOT a particle system.  A burning hulk's flames
@@ -1423,6 +1735,172 @@ class Viewer:
                 self.fire_flipbook   = None
                 self.fire_billboards = None
 
+        # ---- Impact explosion billboards -----------------------------
+        # Per Coffee 2026-05-14 ("now we need explosions where the
+        # round hits an object.. we only have terrain now.  there
+        # are a few good image sets in the eff_text file"): two
+        # one-shot animated billboard pools driven off `ImpactPool`.
+        #
+        #   * `explosion_fire`  -- orange fireball.  Currently UNUSED
+        #     at terrain hits but kept loaded so the future "shot
+        #     hit a hull" path can flip it on without a code change.
+        #   * `explosion_dust`  -- dustier ground-impact variant.
+        #     Drawn at every terrain impact.
+        #
+        # Frames are sliced from `eff_tex.dds` by
+        # `cust_tools.extract_wot_fire_atlas.ensure_runtime_flipbooks`
+        # at startup (regions documented in that module).  Both sets
+        # are 32 frames @ 128 px, 30 fps -> ~1.07 s playthrough.
+        self._splash_status('Loading explosion flipbooks...')
+        self.explosion_fire_flipbook = None
+        self.explosion_dust_flipbook = None
+        self.impact_fire_billboards  = None
+        self.impact_dust_billboards  = None
+        if self.particle_shader is not None:
+            try:
+                _res_root = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources')
+                ef_dir = os.path.join(_res_root, 'explosion_fire')
+                ed_dir = os.path.join(_res_root, 'explosion_dust')
+                if os.path.isdir(ef_dir):
+                    self.explosion_fire_flipbook = FlipbookTexture(ef_dir)
+                    self.impact_fire_billboards  = ImpactBillboards(
+                        self.explosion_fire_flipbook,
+                        size=4.0,    # fireball reads big
+                        fps=30.0,
+                        blend='additive')
+                    # Fireball drifts UP faster + starts a bit higher
+                    # than the dust spray so it doesn't sit dead-on
+                    # the dust quad and visually merge.
+                    self.impact_fire_billboards.rise_speed = 0.9
+                if os.path.isdir(ed_dir):
+                    self.explosion_dust_flipbook = FlipbookTexture(ed_dir)
+                    self.impact_dust_billboards  = ImpactBillboards(
+                        self.explosion_dust_flipbook,
+                        size=5.0,    # dust column wider than fire
+                        fps=30.0,
+                        blend='alpha')
+                    self.impact_dust_billboards.rise_speed = 0.4
+            except Exception as exc:
+                print(f"[viewer] Impact explosions disabled: {exc}")
+                self.explosion_fire_flipbook = None
+                self.explosion_dust_flipbook = None
+                self.impact_fire_billboards  = None
+                self.impact_dust_billboards  = None
+
+        # ---- Shell-impact decal projector -------------------------------
+        # Per Coffee 2026-05-14 ("time to add a decal projector. to
+        # where the shells hit"): one flat textured quad per active
+        # impact, oriented by the impact's terrain normal, sampled
+        # from the WoT shellhole AM PNGs in resources/decals_pbs/
+        # (pulled from shared_content pkgs by
+        # `ensure_runtime_decals` above).  Quad lives for
+        # `Decals.lifetime_s` seconds then fades out.
+        #
+        # Texture pick: PBS_ShellHole_10_AM.png is the workhorse
+        # crater-on-dirt variant the user spotted in maps.pkg.  The
+        # other 8 extracted shellholes are for biome variants (DDay,
+        # Iceland, Winter) and aren't auto-selected yet -- future
+        # work can pick per terrain type or rotate for visual
+        # variety.
+        self._splash_status('Loading shellhole decal projector...')
+        self.decal_shader = None
+        self.shellhole_decals = None
+        try:
+            from .particles import Decals as _Decals
+            _decal_png = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                'resources', 'decals_pbs',
+                'PBS_ShellHole_10_AM.png')
+            if os.path.isfile(_decal_png):
+                self.decal_shader     = DecalShader()
+                self.shellhole_decals = _Decals(_decal_png)
+            else:
+                print(f"[viewer] no shellhole PNG at {_decal_png} -- "
+                      f"decals disabled")
+        except Exception as exc:
+            print(f"[viewer] Shellhole decals disabled: {exc}")
+            self.decal_shader     = None
+            self.shellhole_decals = None
+
+        # ---- Screen-space decal projector --------------------------------
+        # Per Coffee 2026-05-15 ("look here at my decal projector
+        # frag and vert"): proper volumetric decal projector ported
+        # from nuTerra's DecalProject.{vert,frag}.  Conforms to
+        # whatever geometry was rendered into the depth buffer --
+        # terrain bumps, tank hulls, walls -- via per-pixel depth-
+        # buffer sampling instead of a flat oriented quad.
+        #
+        # Uses the SAME shellhole albedo PNG as the legacy flat-
+        # quad Decals.  Both projectors stay loaded for the
+        # transition; the render loop calls the screen-space one
+        # when available, falls back to the flat-quad one otherwise.
+        self.ss_decal_shader        = None
+        self.shellhole_ss_decals    = None
+        self.aim_crosshair_ss       = None
+        try:
+            from .shaders   import ScreenSpaceDecalShader
+            from .particles import ScreenSpaceDecals as _SSDecals
+            _ss_decal_png = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                'resources', 'decals_pbs',
+                'PBS_ShellHole_10_AM.png')
+            _ss_cursor_png = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                'resources', 'Cursor.png')
+            if (os.path.isfile(_ss_decal_png)
+                    or os.path.isfile(_ss_cursor_png)):
+                self.ss_decal_shader = ScreenSpaceDecalShader()
+            if os.path.isfile(_ss_decal_png):
+                self.shellhole_ss_decals = _SSDecals(
+                    _ss_decal_png,
+                    size=4.0, thickness=2.0,
+                    lifetime_s=6.0, fade_start=0.85)
+            if os.path.isfile(_ss_cursor_png):
+                # Per Coffee 2026-05-15 ("drop its size to one tick
+                # = .5m"): the reticle's tick marks land on
+                # half-metre intervals at size=6.0 (half of the
+                # earlier 12.0 m, so each tick that was 1 m is
+                # now 0.5 m on the ground).
+                self.aim_crosshair_ss = _SSDecals(
+                    _ss_cursor_png,
+                    size=6.0, thickness=4.0,
+                    lifetime_s=1.0, fade_start=2.0)
+        except Exception as exc:
+            print(f"[viewer] Screen-space decals disabled: {exc}")
+            self.ss_decal_shader     = None
+            self.shellhole_ss_decals = None
+            self.aim_crosshair_ss    = None
+
+        # ---- Aim crosshair projector ------------------------------------
+        # Per Coffee 2026-05-15 ("project a crosshair texture at the
+        # ball location and drop the ball" + "those ticks are scale
+        # 1 m spacing"): replace the previous blue-sphere aim
+        # marker with a flat textured reticle on the terrain.  Uses
+        # the same DecalShader pipeline -- the crosshair is just
+        # one more alpha-blended textured quad lying on a surface.
+        #
+        # The Cursor.png reticle is the only WoT-unaffiliated asset
+        # we ship under resources/ -- sourced from nuTerra, free to
+        # redistribute.
+        self.aim_crosshair = None
+        if self.decal_shader is not None:
+            try:
+                from .particles import AimCrosshair as _AimCrosshair
+                _cur_png = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources', 'Cursor.png')
+                if os.path.isfile(_cur_png):
+                    self.aim_crosshair = _AimCrosshair(
+                        _cur_png, size_m=12.0)
+                else:
+                    print(f"[viewer] no Cursor.png at {_cur_png} -- "
+                          f"aim crosshair disabled")
+            except Exception as exc:
+                print(f"[viewer] Aim crosshair disabled: {exc}")
+                self.aim_crosshair = None
+
         # Fire spawn points -- populated by load_vehicle when the
         # damaged variant is loaded; empty otherwise.  Same dict shape
         # as `_exhaust_points` ({component, name, pos, fwd}) so the
@@ -1442,6 +1920,19 @@ class Viewer:
             self.skybox = Skybox(_x_file, _env_dir)
         except Exception as exc:
             print(f"[viewer] Skybox not loaded: {exc}")
+
+        # ---- Scene-depth snapshot (for screen-space decals) ------------
+        # Per Coffee 2026-05-15 ("look here at my decal projector frag
+        # and vert"): the nuTerra-style decal projector reads scene
+        # depth to reconstruct the world surface point at every cube
+        # fragment.  We grab the depth buffer into this texture via
+        # glCopyTexImage2D once per frame -- AFTER terrain + tank
+        # passes, BEFORE the decal passes.  Lazy-allocated +
+        # reallocated on viewport size changes inside
+        # `_grab_scene_depth()`.
+        self._scene_depth_tex = 0
+        self._scene_depth_w   = 0
+        self._scene_depth_h   = 0
 
         # Procedural ground.  Generated once at startup; kept hidden
         # by default so a clean tank screenshot still works.  Toggle
@@ -1521,21 +2012,33 @@ class Viewer:
             # Detail-displacement heightmap: companion to the sand
             # colour texture.  When `paint_sand_desert.py` runs it
             # writes both a colour PNG and a `<name>_height.png`
-            # grayscale next to it; we auto-pair them so the
-            # geometry ripples line up with the colour texture
+            # grayscale next to it; we used to auto-pair them so
+            # the geometry ripples line up with the colour texture
             # ripples without the user having to configure anything.
+            #
+            # Per Coffee 2026-05-15 ("remove the generated 2nd
+            # height map we are using. mute it for now"): the
+            # auto-pair pulls `resources/sand_painted_height.png`
+            # in by default, even on installs where the user
+            # didn't ask for the displacement.  Muted for the
+            # moment -- only an EXPLICIT
+            # `cfg['terrain_detail_heightmap']` will now activate
+            # the secondary heightmap.  To re-enable the auto-
+            # pair, set `_DETAIL_AUTO_PAIR = True` below.
+            _DETAIL_AUTO_PAIR = False
             cfg_det = (self._cfg.get('terrain_detail_heightmap') or '').strip()
             painted_det = os.path.join(res_root, 'sand_painted_height.png')
             detail_path = None
             if cfg_det and os.path.isfile(cfg_det):
                 detail_path = cfg_det
-            elif sand_path and sand_path.lower().endswith('_painted.png'):
+            elif _DETAIL_AUTO_PAIR and sand_path \
+                    and sand_path.lower().endswith('_painted.png'):
                 # Pair-by-suffix: explicit user override wins; otherwise
                 # use the painted-height companion when sand_painted.png
                 # is the active colour.
                 if os.path.isfile(painted_det):
                     detail_path = painted_det
-            elif os.path.isfile(painted_det):
+            elif _DETAIL_AUTO_PAIR and os.path.isfile(painted_det):
                 detail_path = painted_det
             if detail_path:
                 kwargs['detail_image_path']   = detail_path
@@ -1546,6 +2049,9 @@ class Viewer:
                     self._cfg.get('terrain_detail_height_scale', 0.05))
                 print(f"[viewer] Terrain detail: {detail_path} "
                       f"(±{kwargs['detail_height_scale']:.2f} m)")
+            else:
+                print("[viewer] Terrain detail: muted "
+                      "(2nd heightmap auto-pair disabled)")
             if terrain_img:
                 self._splash_status(
                     f'Loading terrain from {os.path.basename(terrain_img)}...')
@@ -1562,6 +2068,67 @@ class Viewer:
             print(f"[viewer] Terrain disabled: {exc}")
             self.terrain        = None
             self.terrain_shader = None
+
+        # ---- Procedural skydome ----------------------------------------
+        # Per Coffee 2026-05-14 ("we have skydomes in the game.. make a
+        # sphere. rad = map size / 2") + Coffee 2026-05-15
+        # ("maps\\skyboxes\\01_Karelia_sky\\skydome\\sky_karelia_
+        # forward.dds  nice blue sky"): a finite-radius UV sphere at
+        # the world origin.  Texture source priority:
+        #
+        #   1. resources/skyboxes/01_Karelia_sky/skydome/
+        #      sky_karelia_forward.png  (the WoT panorama, sampled
+        #      equirectangularly).  Pulled at startup by
+        #      `ensure_karelia_sky` above.
+        #   2. The existing env cubemap (self.skybox.cubemap_id) as
+        #      a fallback when the WoT pkg wasn't found.
+        #
+        # The dome is REAL world-space geometry, so its edge marks
+        # the heightmap's outer perimeter.  Rendered inside-out
+        # (front-face cull) with depth-test on / depth-write off so
+        # terrain naturally occludes it from below.
+        #
+        # Radius source: `terrain.world_size / 2`.  When the terrain
+        # didn't build, the dome is skipped -- no sensible radius
+        # without a heightmap to anchor it to.
+        self.skydome = None
+        self.show_skydome = True
+        if self.terrain is not None:
+            try:
+                from .skybox import SkyDome
+                _radius = 0.5 * float(self.terrain.world_size)
+                _karelia_png = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources', 'skyboxes', '01_Karelia_sky',
+                    'skydome', 'sky_karelia_forward.png')
+                _has_panorama = os.path.isfile(_karelia_png)
+                _has_cubemap  = (self.skybox is not None
+                                  and getattr(self.skybox,
+                                              'cubemap_id', 0))
+                if _has_panorama or _has_cubemap:
+                    self.skydome = SkyDome(
+                        cubemap_id=(self.skybox.cubemap_id
+                                    if _has_cubemap else None),
+                        panorama_png=(_karelia_png
+                                      if _has_panorama else None),
+                        radius=max(50.0, _radius))
+                    # Per Coffee 2026-05-15 ("tank and camera can
+                    # NOT go out side the dome"): clamp the orbit
+                    # camera eye to a margin inside the dome
+                    # boundary.  5 m keeps the eye from sitting
+                    # right on the sky surface.
+                    self.camera.max_eye_radius = max(
+                        10.0, self.skydome.radius - 5.0)
+                    # Per Coffee 2026-05-15 ("clip drawing map
+                    # out side dome radius"): tell the terrain
+                    # frag shader to discard pixels past the
+                    # dome's horizontal radius so the heightmap
+                    # never paints past the dome boundary.
+                    self.terrain.world_clip_radius = float(
+                        self.skydome.radius)
+            except Exception as exc:
+                print(f"[viewer] Skydome disabled: {exc}")
+                self.skydome = None
 
         # Triangle picker (Tools -> Pick Tri).  Lazily constructs its
         # FBO + shaders on the first frame the picker is enabled, so
@@ -2056,6 +2623,14 @@ class Viewer:
         self.mouse_last  = [0, 0]
         self.frame_count = 0
         self.running     = True
+        # `self._cursor_visible_state` is initialised much
+        # earlier (alongside the splash setup at the top of
+        # __init__) so the cursor stays visible during the
+        # load screen.  See that block for the Coffee 2026-05-
+        # 14 "load screen doesn't show mouse either" fix --
+        # the per-frame `_update_cursor_visibility` helper
+        # only diverges from that visible state once
+        # handle_input starts running.
         self._scene_bbox         = None   # set in load_mesh; used by 'R' camera reset
         self._min_zoom_distance  = 0.5   # updated after mesh load to 5 % of mesh radius
 
@@ -3239,6 +3814,22 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] PKG extractor init failed: {exc}")
             self._pkg_extractor = None
+        # Build the gun-effects lookup table once the extractor is
+        # live.  Pulls `gun_effects.xml` + every nation's
+        # `guns.xml` so the runtime can answer "what's this gun's
+        # muzzle-flash duration / color animation / ground-wave?"
+        # by gun id.  Cheap (~0.5 s for ~1200 entries).
+        try:
+            from .gun_effects import GunEffectsTable
+            self._gun_effects_table = GunEffectsTable(
+                self._pkg_extractor)
+            n_eff = len(self._gun_effects_table.effect_to_spec)
+            n_gun = len(self._gun_effects_table.gun_to_effect)
+            print(f"[viewer] gun_effects table: {n_eff} effects, "
+                  f"{n_gun} gun id mappings")
+        except Exception as exc:
+            print(f"[viewer] gun_effects table load failed: {exc}")
+            self._gun_effects_table = None
 
     def _paths_are_configured(self):
         """True iff config has a usable 'pkg_dir' (the only required path).
@@ -8563,10 +9154,21 @@ class Viewer:
         # of the tank lives at chassis-local -Z (the user's repeated
         # convention).  +X is right, -X left.
         if self.camera_mode == 1:
-            # Cam-1: chassis-locked chase cam orbiting the
+            # Cam-1: chassis-yaw-locked chase cam orbiting the
             # turret HP per Coffee 2026-05-09 ("free look with
             # look-at as it is, my angle needs to change with
-            # the tank's angle.. kid looking out window").
+            # the tank's angle.. kid looking out window") +
+            # Coffee 2026-05-15 ("chase camera stays planer to
+            # x and y. i does not follow the tanks x y z
+            # rotations"): the chase cam follows the chassis
+            # YAW (rotation about world +Y) but stays HORIZON-
+            # LOCKED -- pitch / roll from the tank tilting on
+            # uneven terrain don't propagate to the camera.
+            # Built below by extracting yaw from the full
+            # chassis rotation + reusing the chassis world
+            # translation; eye / target / up then transform
+            # through the yaw-only matrix.
+            #
             # Look-at stays AT the turret hardpoint
             # (chassis-local); eye orbits around it via
             # chassis-local yaw / pitch + distance, so when
@@ -8574,10 +9176,11 @@ class Viewer:
             # in chassis-local space -- as the tank yaws, the
             # eye yaws with it (the "kid looking out the
             # window" behavior).  Default zoom = 15 m, default
-            # yaw = 90 deg (right side, perpendicular to
-            # chassis Z), pitch = 0 deg.  Mouse drag below
-            # nudges `_chase_yaw_deg` / `_chase_pitch_deg`,
-            # wheel scroll modifies `_chase_distance`.
+            # yaw = 0 deg (directly behind tank, set in
+            # `load_vehicle`), pitch = 20 deg (lifted).  Mouse
+            # drag below nudges `_chase_yaw_deg` /
+            # `_chase_pitch_deg`, wheel scroll modifies
+            # `_chase_distance`.
             turret_hp_local = None
             for m in self.meshes:
                 if getattr(m, 'component', '') == 'turret':
@@ -8626,6 +9229,29 @@ class Viewer:
                  turret_hp_local[1] + d * sp_,
                  turret_hp_local[2] + d * cp_ * cy_,
                  1.0], dtype=np.float64)
+            # Strip pitch + roll from the chassis rotation, keep
+            # only the yaw + translation.  Built from the chassis-
+            # local +Z direction's projection onto world XZ: that
+            # vector defines the tank's horizontal facing.  World
+            # Y stays world +Y so the camera never rolls / pitches
+            # with the tank.
+            _local_z_world = chassis[:3, 2]
+            _xz_len = math.sqrt(
+                float(_local_z_world[0]) ** 2
+                + float(_local_z_world[2]) ** 2)
+            if _xz_len > 1e-9:
+                _cy = float(_local_z_world[2]) / _xz_len
+                _sy = float(_local_z_world[0]) / _xz_len
+            else:
+                # Chassis +Z is vertical (tank standing on end?);
+                # fall back to identity yaw.
+                _cy, _sy = 1.0, 0.0
+            chassis = np.array([
+                [_cy,  0.0, _sy, float(chassis[0, 3])],
+                [0.0,  1.0, 0.0, float(chassis[1, 3])],
+                [-_sy, 0.0, _cy, float(chassis[2, 3])],
+                [0.0,  0.0, 0.0, 1.0],
+            ], dtype=np.float64)
             # Mirror look-at into self.camera so debug overlays
             # reading self.camera.center get a sensible value.
             target_world_pos = (chassis @ target_local)[:3]
@@ -8673,6 +9299,20 @@ class Viewer:
 
         eye    = (chassis @ eye_local)[:3]
         target = (chassis @ target_local)[:3]
+        # Per Coffee 2026-05-15 ("tank and camera can NOT go out
+        # side the dome"): clamp the eye to the dome's inner
+        # radius.  Same recipe as the orbit cam in scene.Camera:
+        # scale the eye back along the eye-origin ray so the
+        # look-at direction stays untouched.
+        _max_r = float(getattr(self.camera, 'max_eye_radius',
+                                 float('inf')))
+        if _max_r != float('inf'):
+            _er = float(np.sqrt(float(eye[0]) ** 2
+                                 + float(eye[1]) ** 2
+                                 + float(eye[2]) ** 2))
+            if _er > _max_r and _er > 1e-6:
+                _k = _max_r / _er
+                eye = (eye * _k).astype(eye.dtype)
         # Up vector: chassis-local +Y rotated by chassis pose (so it
         # rolls with the tank).  Use the rotation block only -- no
         # translation on a direction vector.
@@ -8995,6 +9635,155 @@ class Viewer:
                   f"{type(_ec).__name__}: {_ec}")
         self._target_gun_pitch_deg  = self._gun_pitch_deg
 
+    def _grab_scene_depth(self, x, y, w, h):
+        """Snapshot the framebuffer's depth buffer into a 2-D
+        texture for use by the screen-space decal projector.
+
+        Per Coffee 2026-05-15 (nuTerra DecalProject reference):
+        the screen-space decal frag stage reads scene depth at
+        every cube pixel to reconstruct the underlying world
+        surface point.  We copy the current depth buffer into a
+        cached GL_TEXTURE_2D via glCopyTexImage2D once per frame
+        AFTER terrain + tank passes have written depth but BEFORE
+        the decal pass binds the texture.
+
+        Lazy-allocates the texture on first call + reallocates
+        whenever the viewport size changes.  Returns the GL
+        texture id (or 0 on failure).
+
+        Args:
+            x, y (int)  : viewport origin (GL bottom-left).
+            w, h (int)  : viewport size in pixels.
+
+        Returns:
+            int: GL texture id (0 if allocation / copy failed).
+        """
+        try:
+            if w <= 0 or h <= 0:
+                return 0
+            # First allocation OR viewport size changed.
+            if (self._scene_depth_tex == 0
+                    or self._scene_depth_w != w
+                    or self._scene_depth_h != h):
+                if self._scene_depth_tex:
+                    try:
+                        glDeleteTextures(1, [self._scene_depth_tex])
+                    except Exception:
+                        pass
+                self._scene_depth_tex = int(glGenTextures(1))
+                glBindTexture(GL_TEXTURE_2D, self._scene_depth_tex)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24,
+                             w, h, 0,
+                             GL_DEPTH_COMPONENT, GL_FLOAT, None)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                                GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                                GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                                GL_CLAMP_TO_EDGE)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                                GL_CLAMP_TO_EDGE)
+                glBindTexture(GL_TEXTURE_2D, 0)
+                self._scene_depth_w = int(w)
+                self._scene_depth_h = int(h)
+
+            # Copy current depth attachment of the default
+            # framebuffer into the texture.  glCopyTexImage2D
+            # reads from the bound FB's depth attachment when
+            # internal format is DEPTH_COMPONENT*.
+            glBindTexture(GL_TEXTURE_2D, self._scene_depth_tex)
+            glCopyTexImage2D(GL_TEXTURE_2D, 0,
+                             GL_DEPTH_COMPONENT24,
+                             int(x), int(y), int(w), int(h), 0)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            return self._scene_depth_tex
+        except Exception as exc:
+            if not getattr(self, '_depth_grab_err_logged', False):
+                print(f"[depth-grab] failed: "
+                      f"{type(exc).__name__}: {exc}")
+                self._depth_grab_err_logged = True
+            return 0
+
+    def _update_cursor_visibility(self):
+        """Hide / show the OS mouse cursor based on the current
+        pointer position.
+
+        Per Coffee 2026-05-14 ("can we remove the mouse cursor
+        if its in the render window"): when the cursor is over
+        the 3D viewport, hide the system arrow so it doesn't sit
+        on top of the cross-hair / aim ball / tank silhouette;
+        when it's over the UI (info panel, tree, console, or
+        outside the window entirely) show it again so menus +
+        sliders + buttons have a proper pointer.
+
+        Per Coffee 2026-05-14 follow-up ("mesh window will work
+        if its visible?"): the floating mesh-visibility window
+        sits INSIDE the 3D viewport bounds, so a pure
+        render-area test would hide the cursor over it too.
+        We additionally consult `UIManager.is_pointer_over_ui`
+        which already enumerates every floating panel (info
+        spine, info panel body, mesh window, console body,
+        modal dialogs) and returns True for any hit.  If we're
+        over ANY UI element, the cursor stays visible
+        regardless of viewport bounds.
+
+        State transitions are guarded by `self._cursor_visible_
+        state` so we only call `pygame.mouse.set_visible` when
+        the desired state CHANGES.  Calling it every frame is
+        cheap on most drivers but unnecessary churn -- and at
+        least one Windows config has cursor flicker when the
+        visibility is re-pushed each frame.
+        """
+        try:
+            mx, my = pygame.mouse.get_pos()
+        except Exception:
+            return
+        # Floating UI check first -- the mesh window, console,
+        # info spine, etc. live INSIDE the render area's screen
+        # bounds so the bare `_cursor_in_render_window` test
+        # would falsely hide the cursor when the user hovers
+        # over them.
+        over_ui = False
+        try:
+            if self.ui is not None:
+                over_ui = bool(self.ui.is_pointer_over_ui(mx, my))
+        except Exception:
+            over_ui = False
+        # Per Coffee 2026-05-15 ("can you please fix the 'the
+        # matrix files' dropdown bar and its contents to allow
+        # the mouse to be visible? it needs to deal with that
+        # drop down height changing after tank loads"): the XML
+        # tab bar at the top of the central viewport (rendered
+        # by `_render_xml_bar`) is NOT part of `UIManager.is_
+        # pointer_over_ui` -- it's an in-viewport widget the
+        # Viewer paints directly.  Without this extra check the
+        # cursor went invisible the moment it crossed onto the
+        # bar.  `_xml_bar_hit` returns non-None when (mx, my)
+        # is in the header row OR (when expanded) in any
+        # expanded-tab row.  Both `_xml_bar_header_rect` and
+        # `_xml_bar_tab_rects` are repopulated every frame by
+        # `_render_xml_bar` from the LIVE `_xml_bar_height()`,
+        # so the hit-test automatically tracks the bar's
+        # current size -- works whether a tank is loaded or
+        # the bar is collapsed / expanded.
+        if not over_ui:
+            try:
+                if self._xml_bar_hit(mx, my) is not None:
+                    over_ui = True
+            except Exception:
+                pass
+        if over_ui:
+            want_visible = True
+        else:
+            want_visible = not self._cursor_in_render_window(mx, my)
+        if want_visible == self._cursor_visible_state:
+            return
+        try:
+            pygame.mouse.set_visible(bool(want_visible))
+        except Exception:
+            return
+        self._cursor_visible_state = want_visible
+
     def _cursor_in_render_window(self, x, y):
         """Return True iff (x, y) is inside the 3D render viewport
         (not over the left info panel, the right tree panel, the
@@ -9173,13 +9962,22 @@ class Viewer:
         return None
 
     def _drive_aim_from_aim_state(self, view, chassis_pose, proj=None):
-        """Per Coffee 2026-05-13 ("we need that projected point").
+        """Per Coffee 2026-05-13 ("we need that projected point") +
+        Coffee 2026-05-15 ("i need to see the bule ball even if a
+        tank isn't loaded.. project a crosshair texture at the ball
+        location").
 
         Project the current MOUSE CURSOR position from screen-space
         into world-space via the inverse view-projection matrix,
-        ray-cast against the terrain heightmap, and set the turret
-        yaw + gun pitch TARGETS so the tank seeks that exact world
-        point.
+        ray-cast against the terrain heightmap, and:
+
+          (a) ALWAYS set `self._aim_hit_world` if the ray hit
+              terrain (otherwise None).  Used by the crosshair
+              projector + any consumer that needs a world-space
+              aim point regardless of whether a tank is loaded.
+          (b) When a tank IS loaded (pivots captured), also set
+              turret yaw + gun pitch TARGETS so the gun seeks
+              that exact world point.
 
         Workflow per frame:
           1. Read mouse pos via pygame.mouse.get_pos().
@@ -9189,21 +9987,17 @@ class Viewer:
              NDC ([-1, +1] both axes, Y flipped from window space).
           4. Unproject NDC near + far points via inv(proj @ view).
              Ray origin = near-plane point; direction = far - near.
-          5. Ray-march against terrain -> hit_world (blue ball).
-             If no hit (sky / off-map), leave previous target
-             intact so the turret keeps slewing rather than
-             freezing.
-          6. Transform hit to chassis-local; solve target turret
-             yaw + gun pitch so the gun forward (after Ry/Rx)
-             points at the hit.
+          5. Ray-march against terrain -> hit_world.  ALWAYS sets
+             `_aim_hit_world` (None for sky / off-map misses) so
+             the crosshair appears/disappears with the cursor.
+          6. If pivots are captured, transform hit to chassis-local
+             and solve target turret yaw + gun pitch so the gun
+             forward (after Ry/Rx) points at the hit.
 
         Replaces the earlier mouse-delta-accumulator scheme.  Now
         the ball lands exactly where the cursor is, and the turret
         + gun chase the cursor at the XML-defined rotation rates.
         """
-        if (self._turret_pivot_chassis is None
-                or self._gun_pivot_chassis is None):
-            return
         # Per Coffee 2026-05-14 ("it should stop looking for the
         # aim point when we have right mouse down"): while RMB is
         # held, the user is moving the CAMERA (orbit / pan /
@@ -9279,12 +10073,67 @@ class Viewer:
         # (no real ground contact) but the angles compute.
         hit_world = self._aim_point_on_terrain(origin_world, fwd_world)
         if hit_world is None:
-            self._aim_hit_world = None
+            # Per Coffee 2026-05-15 ("if the curser is outside of
+            # the dome, i want it to be projected on to the dome.
+            # it will need to be front face aligned to the guns
+            # vector dome angles"): terrain raycast missed (sky /
+            # above horizon).  Project the cursor onto the inside
+            # of the skydome instead.  Quadratic ray-vs-sphere:
+            #     |origin + t * fwd|^2 = R^2
+            # with the muzzle inside the sphere (c < 0), so the
+            # forward root is `-b + sqrt(disc)`.
+            #
+            # Hit point P is on the dome.  Surface normal that
+            # the flat-quad cursor uses to orient itself is the
+            # INWARD sphere normal `-P / |P|` -- that's the
+            # direction the cursor's textured face points (back
+            # toward the camera area) so the gun-ray-aligned
+            # decal sits flat on the dome's tangent plane.
+            self._aim_hit_world  = None
+            self._aim_hit_normal = None
+            self._aim_hit_kind   = 'sky'
             hit_world = origin_world + 1500.0 * fwd_world
+            if self.skydome is not None:
+                R = float(self.skydome.radius)
+                om = np.asarray(origin_world, dtype=np.float64)
+                fw = np.asarray(fwd_world,    dtype=np.float64)
+                b = float(np.dot(om, fw))
+                c = float(np.dot(om, om) - R * R)
+                disc = b * b - c
+                if disc >= 0.0:
+                    t_hit = -b + math.sqrt(disc)
+                    if t_hit > 0.0:
+                        dome_hit = (om + t_hit * fw).astype(
+                            np.float32)
+                        self._aim_hit_world = dome_hit
+                        # Inward sphere normal.
+                        n_len = float(np.linalg.norm(dome_hit))
+                        if n_len > 1e-6:
+                            self._aim_hit_normal = (
+                                -dome_hit / n_len).astype(
+                                    np.float32)
+                        else:
+                            self._aim_hit_normal = np.array(
+                                [0.0, 1.0, 0.0],
+                                dtype=np.float32)
+                        self._aim_hit_kind = 'dome'
+                        hit_world = dome_hit
         else:
-            self._aim_hit_world = np.asarray(hit_world, dtype=np.float32)
+            self._aim_hit_world  = np.asarray(hit_world,
+                                                dtype=np.float32)
+            self._aim_hit_normal = None    # render computes it
+            self._aim_hit_kind   = 'terrain'
 
         # ---- 6. solve target yaw + pitch ---------------------------------
+        # Per Coffee 2026-05-15 (crosshair-without-tank): the gun-
+        # targeting math below needs pivots + a real chassis_pose.
+        # Skip cleanly when those are unavailable -- the aim-hit
+        # set above is still useful (the crosshair projector reads
+        # `_aim_hit_world` directly).
+        if (self._turret_pivot_chassis is None
+                or self._gun_pivot_chassis is None
+                or chassis_pose is None):
+            return
         cp_mat = np.asarray(chassis_pose, dtype=np.float64)
         Rc = cp_mat[:3, :3]
         tc = cp_mat[:3, 3]
@@ -9401,6 +10250,282 @@ class Viewer:
     # later for real-time speed.
     _PROJECTILE_VIS_SLOWDOWN = 20.0
 
+    def _ensure_refraction_tex(self):
+        """(Re)allocate `self.refraction_tex` so it matches the
+        current viewport.  Called from `_render_muzzle_flash` right
+        before the back-buffer copy.
+
+        Per Coffee 2026-05-14 (WoT shimmer pipeline): the flash's
+        distortion pass refracts the back-buffer through a normal
+        map.  We sample that refraction via this texture, which
+        we update every frame with the current color contents of
+        the framebuffer.  Re-allocating only when viewport
+        dimensions change keeps steady-state cost to just the
+        per-frame copy.
+        """
+        w = int(self.camera.width)
+        h = int(self.camera.height)
+        if w <= 0 or h <= 0:
+            return False
+        if (self.refraction_tex is not None
+                and self.refraction_tex_w == w
+                and self.refraction_tex_h == h):
+            return True
+        # Drop the stale texture if we had one.
+        if self.refraction_tex is not None:
+            try:
+                glDeleteTextures(1, [self.refraction_tex])
+            except Exception:
+                pass
+            self.refraction_tex = None
+        # Allocate fresh.  Internal format RGBA8 is enough -- the
+        # back-buffer is the same precision.  Linear filtering so
+        # the offset-sampled refraction reads smoothly.  Clamp to
+        # edge so flash quads at screen borders don't wrap.
+        tid = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                      GL_RGBA, GL_UNSIGNED_BYTE, None)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                         GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                         GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                         GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                         GL_CLAMP_TO_EDGE)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        self.refraction_tex   = tid
+        self.refraction_tex_w = w
+        self.refraction_tex_h = h
+        return True
+
+    # Per Coffee 2026-05-14 ("more flash lighing"): multiplier
+    # applied to the intensity returned by _interp_flash_keyframes
+    # before uploading to the shader.  Bumps the per-tank
+    # WoT-authored peak from "subtle wash" to "really lights up
+    # the gun area".  Tune in [0.5 .. 4.0] -- past ~5 the warm
+    # tones blow out into pure white via the ACES tonemap.
+    MFLASH_LIGHT_GAIN = 2.5
+
+    def _muzzle_flash_light_uniforms(self):
+        """Pick the brightest currently-active muzzle flash and
+        return its (pos, color, intensity, inner_r, outer_r) for
+        uniform upload.  When no shot is firing, returns
+        (origin, black, 0, 0, 0) -- the shader bails on
+        intensity <= 0 so this is the cheap "off" path.
+
+        Per Coffee 2026-05-14 ("the light should be omni?  yes"):
+        we only upload ONE omni light at a time.  Multiple
+        simultaneous flashes (rapid fire) all share the same
+        uniform set -- the one closest to its peak intensity wins
+        on this frame.  That's a deliberate simplification --
+        forward shading + uniform arrays would let us blend
+        several, but the visible cost of one missing flash on a
+        rapid burst is minimal.
+        """
+        # Fast path: no flash systems / no shots -> off.
+        if self.shots is None or not self.shots.has_alive:
+            return ((0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    0.0, 0.0, 0.0)
+        light_spec = None
+        if self._active_gun_effect is not None:
+            light_spec = self._active_gun_effect.get('light')
+        # Scan active shots and pick the one whose flash_phase is
+        # closest to the brightest keyframe (= highest current
+        # multiplier).  Cheap: we have at most 50 slots.
+        best = None    # (intensity, pos, color, inner, outer)
+        for s in self.shots.shots:
+            if not s.active:
+                continue
+            phase = float(s.flash_phase)
+            if phase >= 1.0:
+                continue
+            tint, intensity = self._interp_flash_keyframes(
+                phase, light_spec)
+            if intensity <= 0.0:
+                continue
+            inner = 1.5
+            outer = 8.0
+            if light_spec:
+                inner = float(light_spec.get('inner_radius', inner))
+                outer = float(light_spec.get('outer_radius', outer))
+            entry = (intensity, s.pos, tint, inner, outer)
+            if best is None or entry[0] > best[0]:
+                best = entry
+        if best is None:
+            return ((0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    0.0, 0.0, 0.0)
+        intensity, pos, color, inner, outer = best
+        # Apply the "more flash lighting" gain.
+        intensity *= self.MFLASH_LIGHT_GAIN
+        return ((float(pos[0]), float(pos[1]), float(pos[2])),
+                (float(color[0]), float(color[1]), float(color[2])),
+                float(intensity), float(inner), float(outer))
+
+    def _interp_flash_keyframes(self, phase, light_spec):
+        """Interpolate WoT's 4-keyframe light color curve at the
+        given flash_phase [0, 1].  Returns (tint_rgb01, intensity).
+
+        Per Coffee 2026-05-14: the gun_effects.xml `<light>` block
+        carries 4 keyframes -- (color_rgba, multiplier, t) -- that
+        WoT plays as a real point light.  We don't render a real
+        light; we apply this curve to the flash sprite's tint +
+        alpha so it visually cycles through the same warm tones
+        (orange -> white-hot -> cooling red -> off).
+
+        Falls back to a neutral white tint + full intensity when
+        `light_spec` is None or missing keyframes.
+        """
+        if not light_spec:
+            return ((1.0, 1.0, 1.0), 1.0)
+        kfs = light_spec.get('keyframes') or []
+        if not kfs:
+            return ((1.0, 1.0, 1.0), 1.0)
+        # Find bracketing keyframes by t.
+        ts = [kf['t'] for kf in kfs]
+        # Linear search; only 4 entries typically.
+        p = max(0.0, min(1.0, float(phase)))
+        if p <= ts[0]:
+            kf0 = kfs[0]
+            kf1 = kfs[0]
+            a = 0.0
+        elif p >= ts[-1]:
+            kf0 = kfs[-1]
+            kf1 = kfs[-1]
+            a = 0.0
+        else:
+            kf0 = kfs[0]
+            kf1 = kfs[-1]
+            for i in range(len(kfs) - 1):
+                if ts[i] <= p <= ts[i + 1]:
+                    kf0 = kfs[i]
+                    kf1 = kfs[i + 1]
+                    a = ((p - ts[i])
+                         / max(1e-6, ts[i + 1] - ts[i]))
+                    break
+            else:
+                a = 0.0
+        r0, g0, b0, _a0 = kf0['rgba']
+        r1, g1, b1, _a1 = kf1['rgba']
+        rgb = (
+            (r0 * (1.0 - a) + r1 * a) / 255.0,
+            (g0 * (1.0 - a) + g1 * a) / 255.0,
+            (b0 * (1.0 - a) + b1 * a) / 255.0,
+        )
+        m0 = kf0.get('multiplier', 1.0)
+        m1 = kf1.get('multiplier', 1.0)
+        mult = m0 * (1.0 - a) + m1 * a
+        # Normalise: WoT's multipliers run 5..15 typically.  Cap
+        # at 1 so the alpha doesn't blow out; keep enough range so
+        # the white-hot peak still reads brighter than the tails.
+        intensity = max(0.0, min(1.0, mult / 15.0))
+        return (rgb, intensity)
+
+    def _render_muzzle_flash(self, view, proj, phase='both'):
+        """Draw the per-shot muzzle-flash burst.
+
+        Per Coffee 2026-05-14 ("do it.. coffee_ needs coffee
+        anyway"): replaces the old 3-quad fan with a per-shot
+        ParticleSystem burst (`self.muzzle_flash_systems[i]`
+        is the dedicated system for `shots.shots[i]`).  At fire
+        time the slot's PS is reset_pool'd + given a per-caliber
+        size; per-frame this loop sets the emitter list to the
+        shot's captured muzzle pose + advances + renders.
+
+        Why a particle burst instead of the 3-quad fan: WoT's
+        flash (reference screenshot 2026-05-14) is a camera-
+        facing fireball, not a forward-pointing plume.  Multiple
+        soft puffs additively blended over wide cone spread look
+        right from any viewing angle; the world-aligned fan
+        always read as flat at certain angles.
+
+        Per Coffee 2026-05-14 ("gun fire overlapping ground
+        explosions looks bad"): the smoke pass (alpha) and flash
+        pass (additive) can now be triggered INDEPENDENTLY via
+        the `phase` arg so the outer render loop can interleave
+        them with other alpha / additive passes for correct
+        ordering.  `'smoke'` runs just the alpha smoke; `'flash'`
+        runs just the additive burst; `'both'` (default) runs
+        both back-to-back for back-compat with any caller still
+        using the single-call path.
+
+        Skipped when the gun_flash flipbook failed to load or
+        no shots are active.
+        """
+        if (self.particle_shader is None
+                or self.shots is None
+                or (not self.muzzle_flash_systems
+                    and not self.muzzle_smoke_systems)):
+            return
+        dt = float(getattr(self, '_frame_dt', 1.0 / 60.0))
+
+        # Per Coffee 2026-05-14 ("smoke needs to start more
+        # transparent so the fire can be seen"): SMOKE renders
+        # FIRST (alpha-blended into the framebuffer), FLASH
+        # renders SECOND (additive on top).  That way the bright
+        # flash adds its color over whatever's there -- including
+        # the translucent smoke -- so the fire is visible THROUGH
+        # the smoke during the burst window.  Reversed order
+        # also matches WoT's typical particle-stack ordering for
+        # this effect.
+
+        # ---- BILLOWING SMOKE PASS (alpha-blended, long-lived) -------
+        # Smoke fades in over the first ~40 % of its 1.8 s
+        # lifetime so the bright 0.25 s flash window sees the
+        # smoke at only 10..20 % opacity -- the flash punches
+        # through cleanly.  See the muzzle_smoke_systems config
+        # in __init__ for the per-PS tunables.
+        if phase in ('smoke', 'both'):
+            for slot_idx, ps in enumerate(self.muzzle_smoke_systems):
+                s = self.shots.shots[slot_idx]
+                if s.active and s.flash_phase < 1.0:
+                    fwd = np.asarray(s.fwd, dtype=np.float32)
+                    fl  = float(np.linalg.norm(fwd))
+                    if fl > 1e-6:
+                        fwd = fwd / fl
+                        ps.emitters = [{
+                            'pos': s.pos.copy(),
+                            'fwd': fwd,
+                        }]
+                    else:
+                        ps.emitters = []
+                else:
+                    ps.emitters = []
+                if ps.emitters or ps.alive.any():
+                    ps.update(dt)
+                    ps.render(self.particle_shader, view, proj)
+
+        # ---- BRIGHT FLASH PASS (additive, short-lived) -------------
+        # Drawn AFTER the smoke so the additive blend adds bright
+        # warm color over any smoke pixels in front of it.  Same
+        # burst-window gating as the smoke pass.
+        if phase in ('flash', 'both'):
+            for slot_idx, ps in enumerate(self.muzzle_flash_systems):
+                s = self.shots.shots[slot_idx]
+                if s.active and s.flash_phase < 1.0:
+                    fwd = np.asarray(s.fwd, dtype=np.float32)
+                    fl  = float(np.linalg.norm(fwd))
+                    if fl > 1e-6:
+                        fwd = fwd / fl
+                        ps.emitters = [{
+                            'pos': s.pos.copy(),
+                            # Outward direction = barrel forward.  The
+                            # spread_radius=0.6 in init gives a ~30 deg
+                            # cone; combined with the speed/drag tuning,
+                            # particles billow then halt.
+                            'fwd': fwd,
+                        }]
+                    else:
+                        ps.emitters = []
+                else:
+                    ps.emitters = []
+                if ps.emitters or ps.alive.any():
+                    ps.update(dt)
+                    ps.render(self.particle_shader, view, proj)
+
     def _fire_round(self):
         """Fire one debug-projectile round.  Per Coffee 2026-05-13
         ("lets fire red spheres at the terrain first and test we
@@ -9508,10 +10633,75 @@ class Viewer:
             BARREL_LENGTH_M = 3.0   # nominal -- exact length not critical
             muzzle = gp_world + BARREL_LENGTH_M * fwd_world
 
-        # Target = current ball hit, or sky-fallback 1500m forward.
-        target_world = self._aim_hit_world
+        # Target = where the projectile actually ends up.
+        #
+        # Per Coffee 2026-05-14 ("we need to cast a ray when we fire
+        # and see if it ever hits terrain before making it to the
+        # target.  I am able to shoot though hills"): the previous
+        # path used `self._aim_hit_world` (the cursor's hit point
+        # from the CAMERA's POV).  That broke when a hill stood
+        # between the gun and the camera's aim point -- the camera
+        # could see over the hill but the gun couldn't.  Result:
+        # the round visibly passed through hillsides.
+        #
+        # Fix: ray-cast from the muzzle along the gun's actual
+        # forward (`fwd_world`) and snap target_world to the FIRST
+        # terrain intersection along that path.  Reuses
+        # `_aim_point_on_terrain` which already does coarse-then-
+        # refine 1m marching and clamps to the heightmap bounds.
+        # When the ray exits the heightmap or climbs above all
+        # terrain (sky shot), no hit -> fall back to a sky
+        # endpoint along fwd_world so the gun still produces a
+        # finite-range shot for tracer / smoke purposes.
+        #
+        # Per Coffee 2026-05-15 ("remove range limit on gun.. if
+        # it hits the dome, its done and should trigger the
+        # explosion emitter"): no fixed range cap.  Two stages:
+        #
+        #   1. Terrain raycast first.  If the ray hits terrain
+        #      anywhere along its path, that's the impact -- same
+        #      as before.  We still need a max-distance for the
+        #      coarse 1m march to terminate, so feed in a value
+        #      well past the dome (3x dome diameter) so any
+        #      practical terrain hit fits.
+        #   2. If terrain raycast misses (sky shot), intersect
+        #      the ray with the skydome sphere centred at world
+        #      origin (radius = world_size / 2 -- matches the
+        #      SkyDome built in `Viewer.__init__`).  Quadratic
+        #      `|muzzle + t*fwd|^2 = R^2` -> take the FORWARD
+        #      (positive t) root.  Hit point on the dome
+        #      triggers the same `s.impact_pos` -> `impacts.hit`
+        #      flow downstream, so the explosion emitter fires
+        #      at the dome surface.
+        if self.terrain is not None:
+            ws = float(getattr(self.terrain, 'world_size', 0.0) or 0.0)
+            dome_radius = max(50.0, ws * 0.5)
+        else:
+            dome_radius = 1500.0
+        target_world = self._aim_point_on_terrain(
+            muzzle, fwd_world,
+            max_distance_m=dome_radius * 3.0, step_m=1.0)
         if target_world is None:
-            target_world = muzzle + 1500.0 * fwd_world
+            # No terrain in the ray's path -- intersect the dome.
+            _m = np.asarray(muzzle,    dtype=np.float64)
+            _f = np.asarray(fwd_world, dtype=np.float64)
+            # Quadratic: t^2 + 2 b t + c = 0, where
+            #   b = muzzle . fwd, c = |muzzle|^2 - R^2.
+            # Muzzle should be INSIDE the dome (c < 0), so the
+            # quadratic has one positive + one negative root.
+            # We want positive t (forward intersection).
+            b = float(np.dot(_m, _f))
+            c = float(np.dot(_m, _m) - dome_radius * dome_radius)
+            disc = b * b - c
+            if disc >= 0.0:
+                t_hit = -b + math.sqrt(disc)
+                if t_hit < 0.0:
+                    # Muzzle outside dome (unlikely) -- fall back
+                    # to a sane forward endpoint.
+                    t_hit = dome_radius
+            else:
+                t_hit = dome_radius
+            target_world = (_m + t_hit * _f).astype(np.float32)
 
         # Per Coffee 2026-05-14 ("i want to see how many particles
         # should fit in from gun to impact"): the ideal particle
@@ -9562,8 +10752,35 @@ class Viewer:
             pass
         vis_speed = shell_speed_mps / max(0.01,
             float(self._PROJECTILE_VIS_SLOWDOWN))
+        # Per Coffee 2026-05-14 (per-gun flash duration + scale):
+        # pull the flash lifetime AND a per-caliber size scale
+        # from the active gun's effect spec.
+        #   duration   = timeline.end (seconds)
+        #   size scale = light.outer_radius (metres)  -- not the
+        #                visible flame radius, but a real proxy
+        #                for "how big this gun is".  Tiger 88mm
+        #                ships outer_radius=8.0 which we use as
+        #                the reference (= legacy 1.2 m flash
+        #                length).  Bigger guns get bigger flashes,
+        #                small autos get small ones.  Clamped so a
+        #                missing / outlier value doesn't produce a
+        #                postage-stamp or city-block flash.
+        _flash_dur     = None
+        _flash_length  = None
+        _flash_thick   = None
+        if self._active_gun_effect is not None:
+            _flash_dur = self._active_gun_effect.get('duration_s')
+            light = self._active_gun_effect.get('light') or {}
+            outer = float(light.get('outer_radius', 8.0) or 8.0)
+            # Scale relative to Tiger reference (outer=8 -> 1.2 m).
+            raw_len = 1.2 * outer / 8.0
+            _flash_length = max(0.4, min(2.5, raw_len))
+            _flash_thick  = _flash_length * 0.5
         new_shot = self.shots.fire(muzzle, fwd_world, target_world,
-                                    velocity_mps=vis_speed)
+                                    velocity_mps=vis_speed,
+                                    flash_lifetime_s=_flash_dur,
+                                    flash_length=_flash_length,
+                                    flash_thickness=_flash_thick)
         # Per Coffee 2026-05-14 (one-shot trail pool, rule 2): the
         # only way a one-shot system reuses slots is a full
         # `reset_pool` at slot-rent time.  That zeros every
@@ -9631,6 +10848,48 @@ class Viewer:
                                 f"pre_active={_pre_active}\n")
                     except Exception:
                         pass
+            except (ValueError, IndexError):
+                pass
+
+        # Per Coffee 2026-05-14 ("do it.. coffee_ needs coffee
+        # anyway"): burst-emit the muzzle-flash particles for the
+        # new shot's slot.  Same per-slot reset_pool dance as the
+        # trail systems above, plus a per-shot size override scaled
+        # from the active gun's flash_length.
+        if (new_shot is not None
+                and self.muzzle_flash_systems):
+            try:
+                slot_idx = self.shots.shots.index(new_shot)
+                mps = self.muzzle_flash_systems[slot_idx]
+                mps.reset_pool()
+                # Per-shot scale: keep the puff diameter
+                # proportional to flash_length (which itself
+                # scales with the gun's WoT `outer_radius`).
+                # start_size = full flash_length; end_size 1.7x
+                # so puffs grow as they billow + dissipate.
+                size0 = float(new_shot.flash_length)
+                mps.start_size = size0
+                mps.end_size   = size0 * 1.7
+                mps.max        = 8   # burst budget
+            except (ValueError, IndexError):
+                pass
+
+        # Per Coffee 2026-05-14 (billowing smoke for the flash):
+        # ALSO arm the per-shot smoke system at the same slot --
+        # parallel array so the two pools key off the same index.
+        # Sized ~1.6x the flash so the cloud reads bigger than the
+        # bright core, with a longer lifetime so it lingers after
+        # the flash dies.
+        if (new_shot is not None
+                and self.muzzle_smoke_systems):
+            try:
+                slot_idx = self.shots.shots.index(new_shot)
+                sps = self.muzzle_smoke_systems[slot_idx]
+                sps.reset_pool()
+                base = float(new_shot.flash_length)
+                sps.start_size = base * 1.4
+                sps.end_size   = base * 3.0
+                sps.max        = 14   # burst budget
             except (ValueError, IndexError):
                 pass
         return new_shot
@@ -13414,12 +14673,19 @@ class Viewer:
                      status_callback=None,
                      prefer_res_mods=True):
         """Load a complete tank from a WoT vehicle XML definition file."""
-        # Reset camera mode to 0 (orbit / free cam) on every tank
-        # load -- so a session that ended in commander view doesn't
-        # reopen with the turret hidden.  Press C to cycle to chase
-        # / commander again.  (Was 1 / chase pre-1.113.1; bumped to
-        # 0 per Coffee 2026-05-09 -- matches the ctor default.)
-        self.camera_mode = 0
+        # Per Coffee 2026-05-15 ("when a tank loads the camera
+        # should be set to the back the tank looking ahead and
+        # down. I want the chase cam to be active after the tank
+        # is loaded"): activate chase cam (mode 1) on tank load
+        # with the eye DIRECTLY BEHIND the chassis (yaw=0), lifted
+        # slightly so the view looks ahead + down at the tank
+        # (pitch=+20 deg), at the default zoom distance.
+        # The C key still cycles through orbit / chase / commander
+        # as before.
+        self.camera_mode      = 1
+        self._chase_yaw_deg   = 0.0
+        self._chase_pitch_deg = 20.0
+        self._chase_distance  = 15.0
         return self._load_vehicle_impl(
             xml_path, damaged=damaged, skin=skin,
             chassis_tag=chassis_tag, turret_tag=turret_tag,
@@ -13999,6 +15265,28 @@ class Viewer:
             except Exception as exc:
                 print(f"[viewer] early info parse failed: {exc}")
                 _info_early = None
+            # Per Coffee 2026-05-14 (gun-effects wire-up): look up
+            # the active gun's muzzle-flash spec by id.  Result is
+            # stashed on `self._active_gun_effect`; the shot pool's
+            # fire path reads it for the per-shot flash duration +
+            # color animation.  Falls back to None (= use default
+            # 0.2 s flash) when the table or the gun id is missing.
+            self._active_gun_effect = None
+            try:
+                gid = ((_info_early or {}).get('gun') or {}).get('_tag')
+                if (gid and self._gun_effects_table is not None):
+                    self._active_gun_effect = (
+                        self._gun_effects_table.lookup_for_gun(gid))
+                    if self._active_gun_effect is not None:
+                        dur = self._active_gun_effect.get(
+                            'duration_s')
+                        eff_name = self._active_gun_effect.get(
+                            'name')
+                        print(f"[gun-effects] {gid}: "
+                              f"effect={eff_name}  "
+                              f"duration={dur}s")
+            except Exception as _ex_eff:
+                print(f"[gun-effects] lookup failed: {_ex_eff}")
 
             # Auto-extract the wheel rig from the freshly-loaded
             # chassis sub-meshes so tank physics works on ANY tank
@@ -15245,6 +16533,17 @@ class Viewer:
                 # silently rob another app of its input the moment
                 # the user mouses away.
                 self._maybe_restore_focus_on_leave()
+                # Force the OS cursor visible on the way out so
+                # it isn't stranded hidden if the user warped the
+                # pointer off-window while it was over the 3D
+                # viewport.  Per-frame `_update_cursor_visibility`
+                # checks (mx, my) inside the window and can't
+                # observe the off-window state directly.
+                try:
+                    pygame.mouse.set_visible(True)
+                    self._cursor_visible_state = True
+                except Exception:
+                    pass
 
             elif event.type == VIDEORESIZE:
                 # Carry vsync=1 through every set_mode call -- SDL
@@ -16324,6 +17623,13 @@ class Viewer:
 
         self.mouse_last = list(mouse_pos)
 
+        # Sync cursor visibility with the current pointer location:
+        # hide when over the 3D viewport, show when over UI panels
+        # / console / off-window.  No-op on frames where the
+        # state didn't change.  See `_update_cursor_visibility`
+        # for the policy + state-tracking rationale.
+        self._update_cursor_visibility()
+
         # If the console's collapsed state OR drag-resize height
         # changed during this tick, re-run the layout pass so the 3D
         # camera viewport reflects the new console size.  Cheap (just
@@ -16606,6 +17912,32 @@ class Viewer:
             chassis_pose = self.tank_physics.update(self.terrain, dt)
             _phys_ms_raw = (_time.perf_counter() - _t_phys0) * 1000.0
             self._frame_timers['physics_update'] = _phys_ms_raw
+
+            # Per Coffee 2026-05-15 ("tank and camera can NOT go
+            # out side the dome"): clamp the tank's XZ position
+            # so its horizontal distance from world origin never
+            # exceeds the dome's radius minus a small margin.
+            # Y (height) is driven by terrain; doesn't need
+            # clamping.  Mutates `tank_physics.pos` in place +
+            # rebuilds `chassis_pose` if a clamp actually fires.
+            if self.skydome is not None:
+                _R = float(self.skydome.radius) - 3.0
+                if _R > 0.0:
+                    px = float(self.tank_physics.pos[0])
+                    pz = float(self.tank_physics.pos[2])
+                    _r_xz = math.sqrt(px * px + pz * pz)
+                    if _r_xz > _R and _r_xz > 1e-6:
+                        _k = _R / _r_xz
+                        self.tank_physics.pos[0] = px * _k
+                        self.tank_physics.pos[2] = pz * _k
+                        # Rebuild chassis_pose so the rest of the
+                        # frame sees the clamped position.  The
+                        # tank_physics module exposes the
+                        # composed matrix via chassis_matrix();
+                        # re-read it cheaply.
+                        chassis_pose = np.asarray(
+                            self.tank_physics.chassis_matrix(),
+                            dtype=np.float32)
             # Per Coffee 2026-05-13 ("project the view vector on to
             # the terrain.. force the gun to seek that look at
             # point"): ray-cast camera forward against the terrain,
@@ -16738,6 +18070,26 @@ class Viewer:
             # locations.
             self._update_emitters_for_chassis_pose(np.eye(4, dtype=np.float32))
 
+        # ---- Aim-hit projection (tank-independent) ---------------------
+        # Per Coffee 2026-05-15 ("i need to see the bule ball even
+        # if a tank isn't loaded.. project a crosshair texture at
+        # the ball location and drop the ball"): the gun-targeting
+        # branch above only runs when a tank is loaded + physics
+        # is enabled, but the crosshair projector needs
+        # `_aim_hit_world` set EVERY frame regardless.  Call the
+        # refactored `_drive_aim_from_aim_state` again here with
+        # a dummy chassis_pose -- the function now sets
+        # `_aim_hit_world` BEFORE the chassis-dependent solve and
+        # returns cleanly when no pivots are captured.  When a
+        # tank IS loaded, this is a redundant second call per
+        # frame (cheap, ~50us), but it keeps the flow simple.
+        if self.terrain is not None:
+            try:
+                self._drive_aim_from_aim_state(
+                    view, None, proj)
+            except Exception:
+                pass
+
         # ---- Triangle picker (off-screen colour-pick) ----------------
         # When the Pick Tri tool is on, render the tank into a hidden
         # FBO with the picking shader and read back the pixel under
@@ -16777,11 +18129,31 @@ class Viewer:
             self._frame_timers['skybox'] = (
                 (_time.perf_counter() - _t_sky0) * 1000.0)
 
-        # Procedural terrain.  Drawn AFTER the skybox (so the
-        # ground occludes the horizon line) and BEFORE the tank
-        # meshes (so the tank renders on top).  Depth-tested
-        # against the main scene so the tank tracks meet the
-        # ground instead of clipping through.  Toggle is the
+        # Procedural skydome.  Per Coffee 2026-05-15 ("i always
+        # turn depth testing off when rendering it.. I write no
+        # depth info"): the dome is now drawn with depth-test
+        # OFF + depth-write OFF, so it MUST render BEFORE
+        # terrain / tank / etc.  Opaque geometry later overdraws
+        # the dome wherever it sits closer to the camera.  This
+        # is the standard skydome-as-backdrop recipe.
+        if self.show_skydome and self.skydome is not None:
+            _t_dome0 = _time.perf_counter()
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            try:
+                self.skydome.render(view, proj)
+            except Exception as _ex_dome:
+                if not getattr(self, '_dome_err_logged', False):
+                    print(f"[skydome] render failed: "
+                          f"{type(_ex_dome).__name__}: {_ex_dome}")
+                    self._dome_err_logged = True
+            self._frame_timers['skydome'] = (
+                (_time.perf_counter() - _t_dome0) * 1000.0)
+
+        # Procedural terrain.  Drawn AFTER the skybox + skydome
+        # (so the ground occludes the horizon line) and BEFORE
+        # the tank meshes (so the tank renders on top).  Depth-
+        # tested against the main scene so the tank tracks meet
+        # the ground instead of clipping through.  Toggle is the
         # `Terrain` button in the UI section -- off by default.
         if self.show_terrain and self.terrain and self.terrain_shader:
             _t_ter0 = _time.perf_counter()
@@ -16789,10 +18161,139 @@ class Viewer:
             glDepthMask(GL_TRUE)
             light_dir_world = np.array(
                 [0.5, 1.0, 0.3], dtype=np.float32)
+            # Per Coffee 2026-05-14 (muzzle-flash omni on terrain):
+            # ground-glow from the flash.  Same uniforms as the mesh
+            # shader; viewer-side helper picks the brightest active
+            # flash on this frame.
+            try:
+                _mfp, _mfc, _mfi, _mfin, _mfout = (
+                    self._muzzle_flash_light_uniforms())
+                self.terrain_shader.use()
+                self.terrain_shader.set_vec3('u_mflash_pos',   _mfp)
+                self.terrain_shader.set_vec3('u_mflash_color', _mfc)
+                self.terrain_shader.set_float(
+                    'u_mflash_intensity', float(_mfi))
+                self.terrain_shader.set_float(
+                    'u_mflash_inner', float(_mfin))
+                self.terrain_shader.set_float(
+                    'u_mflash_outer', float(_mfout))
+            except Exception:
+                pass
             self.terrain.render(self.terrain_shader, view, proj,
                                   light_dir_world)
             self._frame_timers['terrain'] = (
                 (_time.perf_counter() - _t_ter0) * 1000.0)
+
+        # ---- Aim-point marker (right after terrain) -------------------
+        # Per Coffee 2026-05-15 ("draw projected cursor right
+        # after terrain and before anything else"): the projected
+        # crosshair + blue ball used to render at the very END
+        # of the 3D pass, after every mesh / particle / decal
+        # layer.  Moved up here so:
+        #
+        #   1. The screen-space decal cube reads scene depth that
+        #      contains ONLY terrain -- no tank or particles in
+        #      the way, so the projection lands on the ground
+        #      where the cursor's terrain raycast computed.
+        #   2. Tank meshes + particles + impact decals all draw
+        #      ON TOP of the cursor.  The cursor reads as a
+        #      ground marker the rest of the scene paints over.
+        #
+        # `_aim_hit_world` is None when the cursor ray missed the
+        # terrain (sky / off-map / no tank loaded) so the block
+        # skips drawing on those frames.
+        if self._aim_hit_world is not None:
+            try:
+                # Per Coffee 2026-05-15 ("if the curser is outside
+                # of the dome, i want it to be projected on to
+                # the dome.  it will need to be front face aligned
+                # to the guns vector dome angles"): two render
+                # paths gated by `_aim_hit_kind`.
+                #
+                #  * TERRAIN: compute the surface normal via 4-tap
+                #    finite difference on the heightmap, then
+                #    prefer the screen-space (volumetric) decal
+                #    projector (which conforms to terrain bumps).
+                #
+                #  * DOME: the screen-space projector can't
+                #    reach -- the dome renders with depth-write
+                #    off so the scene depth at dome pixels is
+                #    the cleared far value, the SS reconstruction
+                #    falls outside the cube and discards.  Use
+                #    the flat-quad projector with the precomputed
+                #    INWARD sphere normal (stored on
+                #    `_aim_hit_normal` by `_drive_aim_from_aim_state`)
+                #    so the cursor decal sits tangent to the
+                #    dome at the gun-ray hit point.
+                if (self._aim_hit_kind == 'dome'
+                        and self._aim_hit_normal is not None):
+                    if (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world,
+                            self._aim_hit_normal,
+                            self.decal_shader, view, proj)
+                else:
+                    n_up = np.array([0.0, 1.0, 0.0],
+                                     dtype=np.float32)
+                    if self.terrain is not None:
+                        eps = 0.5
+                        ip  = self._aim_hit_world
+                        try:
+                            hL = float(self.terrain.sample_height(
+                                ip[0] - eps, ip[2]))
+                            hR = float(self.terrain.sample_height(
+                                ip[0] + eps, ip[2]))
+                            hD = float(self.terrain.sample_height(
+                                ip[0], ip[2] - eps))
+                            hU = float(self.terrain.sample_height(
+                                ip[0], ip[2] + eps))
+                            dyx = (hR - hL) / (2.0 * eps)
+                            dyz = (hU - hD) / (2.0 * eps)
+                            n_up = np.array(
+                                [-dyx, 1.0, -dyz],
+                                dtype=np.float32)
+                            ln = float(np.linalg.norm(n_up))
+                            if ln > 1e-6:
+                                n_up /= ln
+                        except Exception:
+                            pass
+                    if (self.aim_crosshair_ss is not None
+                            and self.ss_decal_shader is not None):
+                        _depth_tex = self._grab_scene_depth(
+                            scene_x, console_h, scene_w, scene_h)
+                        if _depth_tex:
+                            self.aim_crosshair_ss.render_single(
+                                self._aim_hit_world, n_up,
+                                self.ss_decal_shader, view, proj,
+                                _depth_tex, scene_w, scene_h,
+                                viewport_x=scene_x,
+                                viewport_y=console_h)
+                    elif (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world, n_up,
+                            self.decal_shader, view, proj)
+                # Blue debug sphere at the same world point.
+                if self.aim_hit_sphere is not None:
+                    hx, hy, hz = (float(self._aim_hit_world[0]),
+                                  float(self._aim_hit_world[1]),
+                                  float(self._aim_hit_world[2]))
+                    _hit_model = np.array([
+                        [1.0, 0.0, 0.0, hx],
+                        [0.0, 1.0, 0.0, hy],
+                        [0.0, 0.0, 1.0, hz],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ], dtype=np.float32)
+                    glEnable(GL_DEPTH_TEST)
+                    self.aim_hit_sphere.render(
+                        self.color_shader, _hit_model, view, proj)
+            except Exception as _ex_aim_ball:
+                if not getattr(self, '_aim_ball_err_logged', False):
+                    print(f"[aim-crosshair] render failed: "
+                          f"{type(_ex_aim_ball).__name__}: "
+                          f"{_ex_aim_ball}")
+                    self._aim_ball_err_logged = True
 
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
@@ -17043,6 +18544,21 @@ class Viewer:
         t  = view[:3,  3]
         eye = -R.T @ t
         active.set_vec3('view_pos', float(eye[0]), float(eye[1]), float(eye[2]))
+
+        # Per Coffee 2026-05-14 (muzzle-flash omni point light):
+        # upload the brightest active flash's pose + color + radii
+        # to the mesh shader so meshes near the muzzle pick up the
+        # orange wash during the flash window.  Off (intensity = 0)
+        # when no shot is firing.
+        _mfp, _mfc, _mfi, _mfin, _mfout = (
+            self._muzzle_flash_light_uniforms())
+        active.set_vec3('u_mflash_pos',
+                         float(_mfp[0]), float(_mfp[1]), float(_mfp[2]))
+        active.set_vec3('u_mflash_color',
+                         float(_mfc[0]), float(_mfc[1]), float(_mfc[2]))
+        active.set_float('u_mflash_intensity', float(_mfi))
+        active.set_float('u_mflash_inner',     float(_mfin))
+        active.set_float('u_mflash_outer',     float(_mfout))
 
         active.set_int('use_normal_map', 1 if self.use_normal_map else 0)
         # WoT data uses GA-encoded normals; imported FBX has standard RGB
@@ -17422,6 +18938,57 @@ class Viewer:
             self.fire_smoke_particles.render(
                 self.particle_shader, view, proj)
 
+        # ---- Shell-hole decal projector ----------------------------------
+        # Per Coffee 2026-05-14 ("time to add a decal projector. to
+        # where the shells hit") + Coffee 2026-05-15 ("look here at
+        # my decal projector frag and vert" -- nuTerra reference):
+        # the screen-space volumetric projector replaces the
+        # earlier flat-quad approach.  Grabs the current scene
+        # depth into a cached texture first, then draws one cube
+        # decal per active impact; the frag stage reconstructs
+        # the surface world position from the depth snapshot and
+        # clips anything outside the cube volume.  Falls back to
+        # the legacy flat-quad path when the screen-space shader
+        # didn't compile.
+        #
+        # Drawn FIRST in the transparent-layers sequence so the
+        # decals sit on the surface underneath every other alpha
+        # layer (trail smoke, muzzle smoke, fire_billboards,
+        # impact dust, muzzle flash, impact fire).
+        if self.impacts.has_alive:
+            if (self.shellhole_ss_decals is not None
+                    and self.ss_decal_shader is not None):
+                try:
+                    _depth_tex = self._grab_scene_depth(
+                        scene_x, console_h, scene_w, scene_h)
+                    if _depth_tex:
+                        self.shellhole_ss_decals.render_impacts(
+                            self.impacts.active_impacts,
+                            self.ss_decal_shader, view, proj,
+                            _depth_tex, scene_w, scene_h,
+                            viewport_x=scene_x,
+                            viewport_y=console_h)
+                except Exception as _ex_decal:
+                    if not getattr(self, '_decal_err_logged', False):
+                        print(f"[ss-decal] render failed: "
+                              f"{type(_ex_decal).__name__}: "
+                              f"{_ex_decal}")
+                        self._decal_err_logged = True
+            elif (self.shellhole_decals is not None
+                    and self.decal_shader is not None):
+                # Legacy fallback when the screen-space pipeline
+                # isn't available (shader compile failed, etc.).
+                try:
+                    self.shellhole_decals.render(
+                        self.impacts.active_impacts,
+                        self.decal_shader, view, proj)
+                except Exception as _ex_decal:
+                    if not getattr(self, '_decal_err_logged', False):
+                        print(f"[decal] render failed: "
+                              f"{type(_ex_decal).__name__}: "
+                              f"{_ex_decal}")
+                        self._decal_err_logged = True
+
         # ---- Per-projectile trail smoke ---------------------------------
         # Coffee 2026-05-13 ("short smoke trail.. nearly faint" + "use
         # the sliders for the other smoke emitters" + "tracer smoke
@@ -17524,6 +19091,49 @@ class Viewer:
                             f"cap_was={ps.max}  "
                             f"other_active={other_active or 'none'}")
                         s.impact_logged = True
+
+                        # Per Coffee 2026-05-14 ("now we need
+                        # explosions where the round hits an
+                        # object.. we only have terrain now"):
+                        # arm an ImpactPool slot at the hit point
+                        # so the explosion-billboard renderer can
+                        # spawn a fireball + dust burst.  Surface
+                        # normal is sampled from the terrain via
+                        # 4-tap finite differences when the impact
+                        # is on the ground; falls back to +Y if no
+                        # terrain or out of range.  dir_in is the
+                        # round's velocity vector (= s.fwd at the
+                        # firing time, projectile flies straight).
+                        try:
+                            ip = s.impact_pos
+                            n_up = np.array([0.0, 1.0, 0.0],
+                                            dtype=np.float32)
+                            if self.terrain is not None:
+                                eps = 0.5    # m -- wide enough that
+                                             # the heightmap bilinear
+                                             # actually changes
+                                hL = float(self.terrain.sample_height(
+                                    ip[0] - eps, ip[2]))
+                                hR = float(self.terrain.sample_height(
+                                    ip[0] + eps, ip[2]))
+                                hD = float(self.terrain.sample_height(
+                                    ip[0], ip[2] - eps))
+                                hU = float(self.terrain.sample_height(
+                                    ip[0], ip[2] + eps))
+                                # gradient: dy/dx, dy/dz
+                                dyx = (hR - hL) / (2.0 * eps)
+                                dyz = (hU - hD) / (2.0 * eps)
+                                # surface normal = (-dyx, 1, -dyz)
+                                # normalised
+                                n_up = np.array(
+                                    [-dyx, 1.0, -dyz],
+                                    dtype=np.float32)
+                                ln = float(np.linalg.norm(n_up))
+                                if ln > 1e-6:
+                                    n_up /= ln
+                            self.impacts.hit(ip, s.fwd, n_up)
+                        except Exception:
+                            pass
                         # Per Coffee 2026-05-14 ("take a screen shot
                         # at partial impact ... we can use it later
                         # for other debug screen caps using different
@@ -17554,6 +19164,34 @@ class Viewer:
                           f"{type(_ex_trail).__name__}: {_ex_trail}")
                     self._trail_err_logged = True
 
+        # Per Coffee 2026-05-14 ("gun fire overlapping ground
+        # explosions looks bad"): the muzzle flash is split into
+        # SMOKE (alpha) and FLASH (additive) phases so the alpha
+        # half can be batched with the other alpha layers
+        # (shot_trail, fire_billboards, impact_dust) and the
+        # additive half runs LAST alongside the other additive
+        # layers (impact_fire).
+        #
+        # Correct global blend order is:
+        #   alpha layers BACK-TO-FRONT, then additive layers.
+        # An alpha layer drawn AFTER an additive layer (which is
+        # what we had before this split) applies its
+        # (1 - src_alpha) term to whatever's underneath -- in
+        # particular it DARKENS the bright additive pixels of
+        # the layer below, even when the alpha layer is supposed
+        # to be physically BEHIND the additive layer.  Result:
+        # impact dust drew over the muzzle flash and dimmed it.
+        #
+        # Here we run just the smoke pass; the flash pass runs
+        # later in the frame after all other alpha layers.
+        try:
+            self._render_muzzle_flash(view, proj, phase='smoke')
+        except Exception as _ex_flash:
+            if not getattr(self, '_flash_err_logged', False):
+                print(f"[muzzle-flash] smoke pass failed: "
+                      f"{type(_ex_flash).__name__}: {_ex_flash}")
+                self._flash_err_logged = True
+
         # Now advance the shot pool -- AFTER the trail builder has
         # already emitted at the pre-tick cur_pos.  This way the
         # first trail particle on the fire frame spawns at the
@@ -17582,6 +19220,68 @@ class Viewer:
 
             self.fire_billboards.update(self._frame_dt)
             self.fire_billboards.render(self.particle_shader, view, proj)
+
+        # ---- Impact explosions: ALPHA dust pass --------------------------
+        # Per Coffee 2026-05-14 ("now we need explosions where the
+        # round hits an object" + "gun fire overlapping ground
+        # explosions looks bad"): the explosion is split into a
+        # dust pass (alpha) drawn HERE, before the muzzle flash
+        # additive pass, and a fire pass (additive) drawn AFTER
+        # the muzzle flash so all additives end up on top of all
+        # alphas globally.
+        #
+        # Within the impact pair, dust is still drawn under fire
+        # for the same reason: alpha-then-additive ordering keeps
+        # the fireball from being dimmed by its own dust cloud.
+        if (self.impacts.has_alive
+                and self.impact_dust_billboards is not None):
+            active = self.impacts.active_impacts
+            if active:
+                try:
+                    self.impact_dust_billboards.render(
+                        active, self.particle_shader, view, proj,
+                        y_offset=0.5)
+                except Exception as _ex_dust:
+                    if not getattr(self, '_dust_err_logged', False):
+                        print(f"[impact-dust] render failed: "
+                              f"{type(_ex_dust).__name__}: "
+                              f"{_ex_dust}")
+                        self._dust_err_logged = True
+
+        # ---- Muzzle flash: ADDITIVE burst pass ---------------------------
+        # All ALPHA passes have now run (shot_trail smoke, muzzle
+        # smoke, fire_billboards, impact dust).  Anything that's
+        # additive goes from here down so the bright bursts pile
+        # ON TOP of the alpha layers instead of being darkened by
+        # later-drawn alpha that happens to cover them on screen.
+        try:
+            self._render_muzzle_flash(view, proj, phase='flash')
+        except Exception as _ex_flash2:
+            if not getattr(self, '_flash2_err_logged', False):
+                print(f"[muzzle-flash] flash pass failed: "
+                      f"{type(_ex_flash2).__name__}: {_ex_flash2}")
+                self._flash2_err_logged = True
+
+        # ---- Impact explosions: ADDITIVE fire pass -----------------------
+        # Fire sits +1 m above the dust quad's centroid so the
+        # fireball + ground spray read as two separated layers,
+        # not one composite blob.  Additive blending here means
+        # order vs. the muzzle-flash additive pass above doesn't
+        # matter -- additive is commutative.
+        if (self.impacts.has_alive
+                and self.impact_fire_billboards is not None):
+            active = self.impacts.active_impacts
+            if active:
+                try:
+                    self.impact_fire_billboards.render(
+                        active, self.particle_shader, view, proj,
+                        y_offset=1.5)
+                except Exception as _ex_fire:
+                    if not getattr(self, '_efire_err_logged', False):
+                        print(f"[impact-fire] render failed: "
+                              f"{type(_ex_fire).__name__}: "
+                              f"{_ex_fire}")
+                        self._efire_err_logged = True
 
         # ---- Fire-card outlines (debug) ----------------------------------
         # Gated on the master Debug flag (set above).  Same convention
@@ -18075,70 +19775,24 @@ class Viewer:
                           f"{type(_ex_aim).__name__}: {_ex_aim}")
                     self._aim_ray_err_logged = True
 
-        # Aim-point marker.  Per Coffee 2026-05-13 ("draw a blue
-        # ball at intersections to test"): place a small blue
-        # sphere at the camera-ray / terrain hit world position
-        # so we can verify the projection visually before
-        # touching gun-pitch math.  `_aim_hit_world` is None when
-        # the ray missed (= sky-fallback) so the sphere skips.
-        if self._aim_hit_world is not None:
-            try:
-                hx, hy, hz = (float(self._aim_hit_world[0]),
-                              float(self._aim_hit_world[1]),
-                              float(self._aim_hit_world[2]))
-                hit_model = np.array([
-                    [1.0, 0.0, 0.0, hx],
-                    [0.0, 1.0, 0.0, hy],
-                    [0.0, 0.0, 1.0, hz],
-                    [0.0, 0.0, 0.0, 1.0],
-                ], dtype=np.float32)
-                glEnable(GL_DEPTH_TEST)
-                self.aim_hit_sphere.render(
-                    self.color_shader, hit_model, view, proj)
-            except Exception as _ex_aim_ball:
-                if not getattr(self, '_aim_ball_err_logged', False):
-                    print(f"[aim-ball] render failed: "
-                          f"{type(_ex_aim_ball).__name__}: "
-                          f"{_ex_aim_ball}")
-                    self._aim_ball_err_logged = True
+        # Aim-point marker MOVED out of this late site per Coffee
+        # 2026-05-15 ("draw projected cursor right after terrain
+        # and before anything else") -- now lives right after
+        # `self.terrain.render(...)` so the screen-space decal
+        # projector reads a clean depth buffer (terrain only,
+        # before tank + particles overdraw) and the cursor sits
+        # under every other transparent layer.
 
-        # Debug red projectile spheres -- one per active shot in the
-        # pool.  Per Coffee 2026-05-13 ("fire red spheres at the
-        # terrain first and test we can shoot and stop a round").
-        # Early-rejects on `shots.has_alive` so idle frames pay just
-        # one attribute load.
-        if self.shots.has_alive:
-            try:
-                glEnable(GL_DEPTH_TEST)
-                for s in self.shots.active_shots:
-                    # While projectile is in flight, draw at the
-                    # moving cur_pos.  After impact, draw at the
-                    # impact point so the round visibly STOPS there
-                    # (renders for the rest of the slot's lifetime,
-                    # i.e. until smoke would have expired -- ~1.5s).
-                    if s.projectile_alive:
-                        px, py, pz = (float(s.cur_pos[0]),
-                                      float(s.cur_pos[1]),
-                                      float(s.cur_pos[2]))
-                    elif s.impact_pos is not None:
-                        px, py, pz = (float(s.impact_pos[0]),
-                                      float(s.impact_pos[1]),
-                                      float(s.impact_pos[2]))
-                    else:
-                        continue
-                    shot_model = np.array([
-                        [1.0, 0.0, 0.0, px],
-                        [0.0, 1.0, 0.0, py],
-                        [0.0, 0.0, 1.0, pz],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ], dtype=np.float32)
-                    self.shot_sphere.render(
-                        self.color_shader, shot_model, view, proj)
-            except Exception as _ex_shot:
-                if not getattr(self, '_shot_render_err_logged', False):
-                    print(f"[shots] render failed: "
-                          f"{type(_ex_shot).__name__}: {_ex_shot}")
-                    self._shot_render_err_logged = True
+        # Note: the red debug projectile sphere render block lived
+        # here from 1.x onward (`for s in self.shots.active_shots:
+        # self.shot_sphere.render(...)`).  Per Coffee 2026-05-15
+        # ("remove the red ball that tracks with the bullets
+        # location") it's gone -- the smoke trail + muzzle flash
+        # + impact billboards already communicate the projectile's
+        # flight clearly, the bare red sphere was just debug
+        # overlay we no longer need.  The `self.shot_sphere`
+        # Sphere instance stays allocated (cheap, idle) in case a
+        # future toggle wants to bring it back.
 
         # 2-D overlay (reset viewport to full window so the tree + dialog
         # can draw outside the 3D scene area)
@@ -18712,6 +20366,20 @@ class Viewer:
             self.fire_flipbook.cleanup()
         if self.skybox:
             self.skybox.cleanup()
+        if self.skydome:
+            self.skydome.cleanup()
+        if getattr(self, 'aim_crosshair', None):
+            self.aim_crosshair.cleanup()
+        if getattr(self, 'shellhole_ss_decals', None):
+            self.shellhole_ss_decals.cleanup()
+        if getattr(self, 'aim_crosshair_ss', None):
+            self.aim_crosshair_ss.cleanup()
+        if getattr(self, '_scene_depth_tex', 0):
+            try:
+                glDeleteTextures(1, [self._scene_depth_tex])
+            except Exception:
+                pass
+            self._scene_depth_tex = 0
         if self.terrain:
             self.terrain.cleanup()
         # Free every cached tier tree (UIManager.cleanup will also try to

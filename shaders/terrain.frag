@@ -36,6 +36,18 @@ uniform float u_height_min;
 uniform float u_height_max;
 uniform vec3  u_eye;          // camera world-space position (for fog)
 
+// ---- Muzzle-flash omni point light ------------------------------------------
+// Mirrors mesh.frag.  Per Coffee 2026-05-14: WoT publishes a per-
+// shot omni point light at HP_gunFire with inner/outer falloff +
+// 4-keyframe color animation.  The viewer picks the brightest
+// active flash each frame and uploads these uniforms; off when
+// no shot is firing.
+uniform vec3  u_mflash_pos;
+uniform vec3  u_mflash_color;
+uniform float u_mflash_intensity;
+uniform float u_mflash_inner;
+uniform float u_mflash_outer;
+
 // Optional sand-diffuse texture.  When `u_has_sand_tex == 1` we
 // sample the bound 2-D texture (with mip-chain + anisotropic
 // filtering set up at load time) and use it as the surface
@@ -46,6 +58,15 @@ uniform vec3  u_eye;          // camera world-space position (for fog)
 uniform sampler2D u_sand_tex;
 uniform int       u_has_sand_tex;
 uniform float     u_sand_tile_size;
+
+// Per Coffee 2026-05-15 ("clip drawing map out side dome
+// radius"): horizontal clip distance.  Fragments whose
+// world-XZ distance from origin exceeds this radius are
+// `discard`-ed -- terrain outside the skydome's footprint
+// is hidden so the heightmap never paints past the dome
+// boundary.  Default 1e9 = effectively no clip when the
+// uniform isn't set.
+uniform float     u_world_clip_radius;
 
 out vec4 FragColor;
 
@@ -96,6 +117,20 @@ vec3 palette(float t)
 
 void main()
 {
+    // Per Coffee 2026-05-15 ("clip drawing map out side dome
+    // radius"): discard fragments whose world-XZ distance from
+    // origin exceeds the dome radius.  Cheap -- one length2
+    // compare per pixel; uses squared distance to skip the
+    // sqrt.  Pure clip; no fade-out (alpha falloff would
+    // require turning the terrain pass into a blend pass which
+    // we deliberately keep opaque).
+    float _xz_d2 = v_world_pos.x * v_world_pos.x
+                  + v_world_pos.z * v_world_pos.z;
+    float _R2    = u_world_clip_radius * u_world_clip_radius;
+    if (_xz_d2 > _R2) {
+        discard;
+    }
+
     vec3 N = normalize(v_world_normal);
     vec3 L = normalize(u_light_dir);
 
@@ -195,6 +230,28 @@ void main()
     float h_smooth = smoothstep(0.0, 1.0, h_norm);
     float darken   = mix(0.55, 0.92, h_smooth);
     result        *= darken;
+
+    // ---- Muzzle-flash omni contribution ------------------------------------
+    // Per Coffee 2026-05-14: add the muzzle-flash light's warm
+    // wash onto terrain so the ground in front of the firing
+    // tank picks up the orange glow.  Same inner/outer smoothstep
+    // falloff + lambertian NdotL the mesh shader uses.
+    if (u_mflash_intensity > 0.0) {
+        vec3 dL = u_mflash_pos - v_world_pos;
+        float d = length(dL);
+        if (d > 1e-4 && d < u_mflash_outer) {
+            vec3 Lpt = dL / d;
+            float falloff = 1.0 - smoothstep(u_mflash_inner,
+                                              u_mflash_outer, d);
+            float ndl = max(dot(normalize(v_world_normal), Lpt),
+                             0.0);
+            result += (u_mflash_color
+                      * u_mflash_intensity
+                      * falloff
+                      * ndl
+                      * result);   // modulate by current colour
+        }
+    }
 
     FragColor = vec4(result, 1.0);
 }

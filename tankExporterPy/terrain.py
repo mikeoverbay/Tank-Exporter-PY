@@ -824,6 +824,14 @@ class Terrain:
             self._heightmap, self.world_size, xs, zs,
             base_y=self.base_y)
 
+    # Per Coffee 2026-05-15 ("clip drawing map out side dome
+    # radius"): horizontal clip radius.  Fragments whose XZ
+    # distance from origin exceeds this value are discarded
+    # in `terrain.frag`.  Default 1e9 = no clip; the Viewer
+    # writes `skydome.radius` here once the dome is built so
+    # the heightmap never paints past the dome boundary.
+    world_clip_radius = 1.0e9
+
     # ------------------------------------------------------------------
     def render(self, shader, view, proj, light_dir):
         """One draw call.  Caller supplies the shader + view/proj
@@ -843,6 +851,8 @@ class Terrain:
         shader.set_vec3('u_light_dir', light_dir)
         shader.set_float('u_height_min', self._min_y)
         shader.set_float('u_height_max', self._max_y)
+        shader.set_float('u_world_clip_radius',
+                         float(self.world_clip_radius))
 
         # World-space eye position derived from the view matrix --
         # needed by terrain.frag's distance-fog blend.  Same

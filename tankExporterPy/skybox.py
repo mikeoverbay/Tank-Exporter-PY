@@ -30,6 +30,7 @@ Face → texture mapping (WoT Tank-Exporter convention):
 """
 
 import ctypes
+import math
 import os
 
 import numpy as np
@@ -433,3 +434,371 @@ class Skybox:
         glDeleteTextures(1, [self.irradiance_id])
         glDeleteTextures(1, [self.prefiltered_id])
         glDeleteTextures(1, [self.brdf_lut_id])
+
+
+# ---------------------------------------------------------------------------
+# Finite-radius procedural skydome
+# ---------------------------------------------------------------------------
+
+class SkyDomeShader:
+    """Shader pair for the procedural skydome -- a real-world-space
+    sphere at the origin, NOT the camera-locked infinite skybox.
+
+    Per Coffee 2026-05-15 (`maps\\skyboxes\\01_Karelia_sky\\
+    skydome\\sky_karelia_forward.dds`): WoT skydomes ship as
+    equirectangular panoramas not cubemaps.  The `mode` arg
+    selects which fragment shader to compile:
+
+        'cubemap'   -- sample a samplerCube via `u_cubemap`.
+                       Original variant, paired with the
+                       existing env cubemap when no panorama
+                       is available.
+        'equirect'  -- sample a sampler2D via `u_panorama`,
+                       computing (u, v) from the direction
+                       vector via atan2 / acos.  Used when
+                       the runtime loaded a WoT skydome panorama
+                       (e.g. sky_karelia_forward.png).
+
+    Source: shaders/skydome.vert + shaders/skydome[ _equirect].frag.
+    """
+
+    def __init__(self, mode='cubemap'):
+        vs = load_shader_file('shaders/skydome.vert')
+        if mode == 'equirect':
+            fs_file = 'shaders/skydome_equirect.frag'
+            label   = 'SkyDome shader (equirect)'
+        else:
+            fs_file = 'shaders/skydome.frag'
+            label   = 'SkyDome shader (cubemap)'
+        fs = load_shader_file(fs_file)
+        self.program = _compile_program(vs, fs, label)
+        self.mode    = mode
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, m):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, m)
+
+    def set_int(self, name, v):
+        glUniform1i(glGetUniformLocation(self.program, name), v)
+
+    def set_float(self, name, v):
+        glUniform1f(glGetUniformLocation(self.program, name), v)
+
+    def set_vec3(self, name, x, y, z):
+        glUniform3f(glGetUniformLocation(self.program, name), x, y, z)
+
+
+def _build_uv_sphere(radius, lat_segments=24, lon_segments=48):
+    """Generate a UV-sphere mesh -- the canonical lat/long
+    subdivision.  Returns `(vertices_flat, indices)` ready to
+    push into a GL buffer.
+
+    Standard recipe:
+      * `lat_segments` rings between the +Y pole and -Y pole.
+      * `lon_segments` slices around the Y axis.
+      * Two triangles per quad face; pole rings reuse the pole
+        vertex (degenerate quad collapses to a triangle).
+
+    Output verts are float32 in CCW winding when viewed from
+    OUTSIDE the sphere.  The skydome draw flips culling so we
+    see the INSIDE; this winding makes the swap a one-flag
+    change instead of a remesh.
+
+    Args:
+        radius        (float): world-units sphere radius.
+        lat_segments  (int)  : number of latitude rings (>=4).
+        lon_segments  (int)  : number of longitude slices (>=6).
+
+    Returns:
+        (np.ndarray float32 verts shape (V, 3),
+         np.ndarray uint32 indices shape (F * 3,))
+    """
+    lat_segments = max(4, int(lat_segments))
+    lon_segments = max(6, int(lon_segments))
+    verts = []
+    for i in range(lat_segments + 1):
+        lat = np.pi * (i / lat_segments)        # 0 .. pi
+        sin_lat = np.sin(lat)
+        cos_lat = np.cos(lat)                   # +1 at top, -1 at bot
+        for j in range(lon_segments + 1):
+            lon = 2.0 * np.pi * (j / lon_segments)
+            sin_lon = np.sin(lon)
+            cos_lon = np.cos(lon)
+            x = radius * sin_lat * cos_lon
+            y = radius * cos_lat
+            z = radius * sin_lat * sin_lon
+            verts.append((x, y, z))
+    indices = []
+    for i in range(lat_segments):
+        for j in range(lon_segments):
+            a = i * (lon_segments + 1) + j
+            b = a + 1
+            c = a + (lon_segments + 1)
+            d = c + 1
+            # CCW from outside: (a, c, b) + (b, c, d).  When we
+            # flip culling at draw time the inside view sees CCW
+            # triangles too -- no winding-direction issues.
+            indices.extend((a, c, b, b, c, d))
+    return (np.asarray(verts, dtype=np.float32),
+            np.asarray(indices, dtype=np.uint32))
+
+
+class SkyDome:
+    """Procedural skydome -- a UV sphere at the world origin
+    sampled with the existing env cubemap.
+
+    Per Coffee 2026-05-14 ("we have skydomes in the game.. make
+    a sphere. rad = map size / 2"): sized so the radius matches
+    half the heightmap's world_size, the sphere fully encloses
+    the play area.  Drawn INSIDE-OUT (front-face cull) so the
+    camera sees the inside surface.  Sampled with the same
+    cubemap the Skybox uses, so the dome and skybox carry
+    matching imagery.
+
+    Unlike `Skybox` -- which uses a z=w trick to sit at infinity
+    + follows the camera -- the SkyDome is a real mesh in world
+    space.  Move the camera near the dome's edge and you'll see
+    the back curve (intentional: the dome marks the play area).
+
+    Args:
+        cubemap_id (int): GL cubemap texture to sample.  Pass
+                          the Skybox's `cubemap_id` so the dome
+                          and skybox stay visually in sync.
+        radius     (float): sphere radius in world units.
+        lat / lon  (int): subdivision counts.  24 x 48 = 2304
+                          triangles by default -- cheap.
+
+    The render() call assumes the caller has already drawn opaque
+    geometry; the dome's depth test is GL_LEQUAL on the existing
+    depth buffer + depth-write OFF so it doesn't poison later
+    transparent layers.  Front-face cull keeps the OUTSIDE of
+    the sphere invisible (no need for a back-face dome separately
+    for outside views).
+    """
+
+    def __init__(self, cubemap_id=None, radius=512.0,
+                 panorama_png=None,
+                 lat_segments=24, lon_segments=48):
+        """Build the dome geometry + load the chosen sky source.
+
+        Per Coffee 2026-05-15 (`sky_karelia_forward.dds`): when
+        `panorama_png` is given, we load it as a 2-D
+        equirectangular texture and bind the
+        skydome_equirect.frag variant.  Otherwise we fall back
+        to the cubemap path (sampling the env cubemap that
+        powers Skybox + IBL).  At least ONE of cubemap_id /
+        panorama_png must resolve; otherwise __init__ raises.
+
+        Args:
+            cubemap_id  (int|None) : GL cubemap texture id (e.g.
+                                     Skybox.cubemap_id).  Used
+                                     when no panorama is supplied.
+            radius      (float)    : sphere radius (world units).
+            panorama_png (str|None): path to an equirectangular
+                                     PNG.  Selected first if
+                                     present.
+            lat / lon   (int)      : UV-sphere subdivision counts.
+        """
+        self.radius = float(radius)
+        # Source-selection: panorama wins, cubemap is fallback.
+        self.cubemap_id    = 0
+        self.panorama_id   = 0
+        self.mode          = 'cubemap'
+        if panorama_png and os.path.isfile(panorama_png):
+            self.panorama_id = _load_panorama_2d(panorama_png)
+            self.mode        = 'equirect'
+        elif cubemap_id:
+            self.cubemap_id  = int(cubemap_id)
+            self.mode        = 'cubemap'
+        else:
+            raise RuntimeError(
+                "SkyDome: need either cubemap_id or panorama_png")
+
+        self.shader = SkyDomeShader(mode=self.mode)
+        # Default fog tint = a warm-grey haze.  Override via
+        # `set_fog_color` from the caller (Viewer keeps a sky
+        # palette and can colour-match terrain fog).
+        self.fog_color    = (0.66, 0.71, 0.78)
+        # Horizon band: fade between y=t0 (above) -> y=t1 (below)
+        # in normalised sphere-direction space.  Hits a clean
+        # mid-ground transition.
+        self.horizon_t0   = 0.10   # full sky at +y above this
+        self.horizon_t1   = -0.15  # full fog at +y below this
+
+        verts, indices = _build_uv_sphere(
+            self.radius, lat_segments=lat_segments,
+            lon_segments=lon_segments)
+        self.index_count = int(indices.size)
+
+        self.vao = glGenVertexArrays(1)
+        self.vbo = glGenBuffers(1)
+        self.ebo = glGenBuffers(1)
+        glBindVertexArray(self.vao)
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, verts.nbytes, verts,
+                     GL_STATIC_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                              3 * 4, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes,
+                     indices, GL_STATIC_DRAW)
+        glBindVertexArray(0)
+
+        print(f"[SkyDome] radius={self.radius:.0f}m  "
+              f"lat={lat_segments} lon={lon_segments}  "
+              f"tris={self.index_count // 3}")
+
+    # ------------------------------------------------------------------
+    def set_fog_color(self, rgb):
+        """Update the ground-band tint.  Live; reads on next render."""
+        r, g, b = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+        self.fog_color = (r, g, b)
+
+    # ------------------------------------------------------------------
+    # Class-level tunables for the two-pass rotated-blend trick.
+    # `rotate_pass_deg`  -- Y-axis rotation applied between the
+    #                       opaque first pass + the alpha second
+    #                       pass.  Tiny number on purpose: 0.01
+    #                       deg shifts the second pass by ~1.5 cm
+    #                       at a 1 km radius, just enough to
+    #                       soften the wrap seam.
+    # `rotate_pass_alpha` -- alpha of the second pass.  0.5 = a
+    #                       50/50 average of the two seam
+    #                       positions.
+    rotate_pass_deg   = 0.01
+    rotate_pass_alpha = 0.5
+
+    def render(self, view, projection):
+        """Draw the dome twice with a tiny azimuth rotation between
+        passes, smearing the equirect-wrap seam into a soft blend.
+
+        Per Coffee 2026-05-15 ("i always turn depth testing off
+        when rendering it.. I write no depth info" + "double
+        render map with depth write off. draw, rotate _ .01 degree
+        and draw skydome again"):
+
+          * Depth test OFF, depth write OFF on both passes -- the
+            dome is a pure backdrop.  Caller must render BEFORE
+            any opaque geometry so terrain / tank / etc. overdraw
+            it where they sit closer.
+          * Pass 1: u_alpha = 1.0, view = caller-supplied.
+          * Pass 2: u_alpha = 0.5, view = view * Ry(0.01 deg).
+            The rotation is applied to world coordinates (pre-
+            multiplied INTO the view matrix), so the dome
+            geometry shifts by 0.01 deg of azimuth between the
+            two draws.  Combined with the alpha blend, the wrap
+            seam from the first pass averages with a slightly
+            offset seam from the second pass -- visible line
+            softens into a faint band.
+          * Cull face stays at GL_BACK so the dome is visible
+            from INSIDE the sphere and hidden from outside.
+        """
+        glEnable(GL_CULL_FACE)
+        glCullFace(GL_BACK)
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        # Alpha blend so pass 2 layers over pass 1.
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        self.shader.use()
+        self.shader.set_mat4 ('projection',   projection)
+        self.shader.set_vec3 ('u_fog_color',
+                              *self.fog_color)
+        self.shader.set_float('u_horizon_t0', self.horizon_t0)
+        self.shader.set_float('u_horizon_t1', self.horizon_t1)
+
+        glActiveTexture(GL_TEXTURE0)
+        if self.mode == 'equirect':
+            glBindTexture(GL_TEXTURE_2D, self.panorama_id)
+            self.shader.set_int('u_panorama', 0)
+        else:
+            glBindTexture(GL_TEXTURE_CUBE_MAP, self.cubemap_id)
+            self.shader.set_int('u_cubemap', 0)
+
+        # ---- Pass 1: opaque, original view ---------------------
+        self.shader.set_mat4 ('view',    view)
+        self.shader.set_float('u_alpha', 1.0)
+        glBindVertexArray(self.vao)
+        glDrawElements(GL_TRIANGLES, self.index_count,
+                       GL_UNSIGNED_INT, None)
+
+        # ---- Pass 2: alpha-blended, world rotated 0.01 deg Y ----
+        # Pre-multiply `view` by a Y-axis rotation so the dome
+        # geometry effectively spins under a stationary camera.
+        # Tiny enough (0.01 deg) that the visual content is the
+        # same image -- the only useful effect is the seam shift.
+        try:
+            angle = math.radians(float(self.rotate_pass_deg))
+            c = math.cos(angle)
+            s = math.sin(angle)
+            Ry = np.array([
+                [ c, 0.0,  s, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [-s, 0.0,  c, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+            view_rot = (np.asarray(view, dtype=np.float32) @ Ry
+                        ).astype(np.float32)
+            self.shader.set_mat4 ('view',    view_rot)
+            self.shader.set_float('u_alpha',
+                                   float(self.rotate_pass_alpha))
+            glDrawElements(GL_TRIANGLES, self.index_count,
+                           GL_UNSIGNED_INT, None)
+        except Exception as exc:
+            print(f"[SkyDome] second pass skipped: {exc}")
+        glBindVertexArray(0)
+
+        # Restore depth + blend state for downstream passes.
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+        glDepthMask(GL_TRUE)
+
+    # ------------------------------------------------------------------
+    def cleanup(self):
+        glDeleteBuffers(1, [self.vbo])
+        glDeleteBuffers(1, [self.ebo])
+        glDeleteVertexArrays(1, [self.vao])
+        # Only delete the panorama -- the cubemap belongs to the
+        # Skybox and is freed by its cleanup.  Owning the same
+        # GL handle in two places would lead to double-free.
+        if self.panorama_id:
+            glDeleteTextures(1, [self.panorama_id])
+            self.panorama_id = 0
+
+
+def _load_panorama_2d(png_path):
+    """Upload an equirectangular RGBA PNG as a GL_TEXTURE_2D.
+
+    Per Coffee 2026-05-15 (`sky_karelia_forward.dds`): the WoT
+    skydome panorama is 4096 x 1024 + needs to wrap around the
+    azimuth (so u-wrap = GL_REPEAT) and clamp at the poles
+    (v-clamp = GL_CLAMP_TO_EDGE so a sphere vertex at d.y = +/-1
+    samples the texture's top/bottom row instead of bleeding
+    past the edge).  Returns the GL texture id.
+    """
+    img = Image.open(png_path).convert('RGBA')
+    w, h = img.size
+    data = img.tobytes()
+    tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, tex)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                 w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+    glGenerateMipmap(GL_TEXTURE_2D)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                    GL_CLAMP_TO_EDGE)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    print(f"[SkyDome] panorama {os.path.basename(png_path)}: "
+          f"{w}x{h}  tex_id={tex}")
+    return int(tex)

@@ -55,16 +55,44 @@ class Camera:
         self.fov      = 45.0
         self.width    = 1280
         self.height   = 720
+        # Per Coffee 2026-05-15 ("tank and camera can NOT go out
+        # side the dome"): hard cap on |eye| in world space.
+        # Default infinity (no clamp) so the camera retains its
+        # current behaviour when no skydome is configured.
+        # Viewer sets this to `dome_radius - margin` once the
+        # skydome is built.
+        self.max_eye_radius = float('inf')
 
     # ------------------------------------------------------------------
     def get_view_matrix(self):
-        """Return view matrix via gluLookAt (numpy float32, row-major)."""
+        """Return view matrix via gluLookAt (numpy float32, row-major).
+
+        Per Coffee 2026-05-15 ("tank and camera can NOT go out side
+        the dome"): clamps the computed eye to lie within
+        `self.max_eye_radius` from world origin.  When the orbit
+        distance would push the eye past the dome boundary, the
+        eye is scaled back along the eye-origin ray so it sits
+        on the dome rim; the look-at direction stays identical
+        (so the user sees the same scene from a closer-in
+        viewpoint, but never punches through the sky).
+        """
         rad_yaw   = np.radians(self.yaw)
         rad_pitch = np.radians(self.pitch)
 
         x = self.center[0] + self.distance * np.cos(rad_pitch) * np.sin(rad_yaw)
         y = self.center[1] + self.distance * np.sin(rad_pitch)
         z = self.center[2] + self.distance * np.cos(rad_pitch) * np.cos(rad_yaw)
+
+        # Eye-radius clamp (world space).  Scaled-back eye keeps
+        # the look-at + up vector untouched so the orbit angle
+        # reads identically -- only the distance is reduced.
+        if self.max_eye_radius != float('inf'):
+            r = float(np.sqrt(x * x + y * y + z * z))
+            if r > self.max_eye_radius and r > 1e-6:
+                k = self.max_eye_radius / r
+                x *= k
+                y *= k
+                z *= k
 
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()

@@ -61,6 +61,13 @@ _PKG_CANDIDATES = (
     r'C:\Games\World_of_Tanks\res\packages\particles.pkg',
 )
 _INTERNAL = 'particles/content_deferred/PFX_textures/eff_tex.dds'
+# Per Coffee 2026-05-14: WoT's muzzle-flash uses a SECOND atlas
+# alongside the color one -- a 512x512 RGBA texture encoding the
+# heat-haze / refraction NORMAL MAP that drives `ps_shimmer.fx`.
+# Cached alongside the color atlas on first launch so the runtime
+# can sample both as part of the flash shimmer pass.
+_INTERNAL_DIST = (
+    'particles/content_deferred/PFX_textures/eff_tex_distortion.dds')
 
 # ---------------------------------------------------------------------------
 # Grid catalogue.  Each entry: name -> dict with the atlas rect,
@@ -132,6 +139,41 @@ GRID_DEFS = {
         note='gun-fire trail smoke (8 frames @ 128px, 4x2 grid)',
     ),
 
+    # ---- MUZZLE FLASH -----------------------------------------------------
+
+    # Coffee 2026-05-14: orange/yellow muzzle-flash plume animation.
+    # Rect (1024, 2560, 1536, 3072) is a 512x512 region containing
+    # 2 cols x 4 rows = 8 frames at 256x128 each (NON-SQUARE).
+    # Left column = animation frames pointing right; right column =
+    # the SAME frames horizontally mirrored.  Both columns share the
+    # same per-row time index, so the natural decoding is column-
+    # major: frames 0-3 = left col top->bottom, frames 4-7 = right
+    # col top->bottom.  Use frame_w / frame_h instead of the square
+    # frame_size used by the rest of the catalogue.
+    'gun_flash': dict(
+        rect=(1024, 2560, 1536, 3072),
+        cols=2, rows=4, frame_w=256, frame_h=128,
+        column_major=True,
+        note='muzzle flash plume (8 frames @ 256x128, 2x4 grid; '
+             'right column is left mirrored)',
+    ),
+
+    # Per Coffee 2026-05-14 (WoT shimmer pipeline dig): the
+    # muzzle-flash distortion frames live in the SEPARATE
+    # `eff_tex_distortion.dds` atlas (not eff_tex.dds).  They are
+    # 6 normal-map puffs in a 3x2 grid at (128,0)-(512,256), each
+    # 128x128 px.  Sampled by `ps_shimmer.fx` to displace the
+    # back-buffer behind the flash for heat-haze refraction.
+    # This is keyed under a separate `_atlas` marker so the
+    # extractor knows to slice from the distortion source.
+    'gun_flash_distortion': dict(
+        rect=(128, 0, 512, 256),
+        cols=3, rows=2, frame_size=128,
+        _atlas='distortion',
+        note='muzzle flash distortion normal-map (6 frames @ 128px '
+             'in 3x2 grid, from eff_tex_distortion.dds)',
+    ),
+
     # ---- SMOKE GRIDS -------------------------------------------------------
 
     # White / pale smoke cloud grid -- generic smoke, reads well
@@ -142,11 +184,38 @@ GRID_DEFS = {
         note='white / pale smoke clouds (64 frames @ 128px)',
     ),
 
-    # Dark grey smoke -- "burning oil" / "gun powder" style.
+    # Per Coffee 2026-05-14 ("1024,1024.  2 sets in that area"):
+    # the (1024, 1024)-(2048, 2048) quadrant is NOT generic dark
+    # smoke -- it's TWO distinct explosion sequences stacked
+    # vertically.  Each is 8 cols x 4 rows = 32 frames at 128 px
+    # square showing a fireball -> smoke transition.  Top set is
+    # the cleaner orange-bloom + black-smoke variant; bottom is
+    # the dustier ground-impact variant (more brown tones,
+    # rougher smoke).  Both ship at startup so the runtime can
+    # pick per-impact-surface (object hit -> A, terrain hit -> B).
+    'explosion_fire': dict(
+        rect=(1024, 1024, 2048, 1536),
+        cols=8, rows=4, frame_size=128,
+        note='explosion fireball + black smoke (32 frames @ 128px)',
+    ),
+    'explosion_dust': dict(
+        rect=(1024, 1536, 2048, 2048),
+        cols=8, rows=4, frame_size=128,
+        note='ground-impact dust explosion '
+             '(32 frames @ 128px, brown tones)',
+    ),
+    # Legacy alias kept so older code referencing `smoke_dark`
+    # (one big 8x8 grid) still resolves.  Same byte range, just
+    # different slicing -- callers wanting the "dark smoke"
+    # interpretation will still see 64 frames in row-major order
+    # spanning both explosion bands.  Drop this when no callers
+    # remain.
     'smoke_dark': dict(
         rect=(1024, 1024, 2048, 2048),
         cols=8, rows=8, frame_size=128,
-        note='dark grey smoke (64 frames @ 128px)',
+        note='LEGACY alias -- prefer explosion_fire / '
+             'explosion_dust (the same region is two 8x4 explosion '
+             'sequences, not a single 8x8 smoke grid).',
     ),
 
     # Cream / warm smoke -- middle-tone, slightly tan; matches the
@@ -183,9 +252,16 @@ DEFAULT_RUNTIME_PICK = 'fire_BIG'
 # even on a fresh clone where the WoT artwork was never shipped to
 # git.  The grid names map back into `GRID_DEFS` above.
 RUNTIME_TARGETS = {
-    'fire':       'fire_BIG',
-    'smoke':      'smoke_white',
-    'gun_trail':  'gun_trail',
+    'fire':                 'fire_BIG',
+    'smoke':                'smoke_white',
+    'gun_trail':            'gun_trail',
+    'gun_flash':            'gun_flash',
+    'gun_flash_distortion': 'gun_flash_distortion',
+    # Per Coffee 2026-05-14 (impact explosions): both variants
+    # extracted at startup so the impact renderer can pick per
+    # surface kind (hard hit -> fire, terrain hit -> dust).
+    'explosion_fire':       'explosion_fire',
+    'explosion_dust':       'explosion_dust',
 }
 
 
@@ -250,6 +326,37 @@ def ensure_atlas_local(resources_dir, pkg_path=None, extra_pkg_paths=()):
         return atlas_local
     except Exception as exc:
         print(f"[extract_wot_fire_atlas] could not extract atlas: {exc}")
+        return None
+
+
+def ensure_distortion_atlas_local(resources_dir, pkg_path=None,
+                                    extra_pkg_paths=()):
+    """Same recipe as `ensure_atlas_local` but for the distortion
+    (heat-haze) atlas at `eff_tex_distortion.dds`.  Cached at
+    `resources/_wot_eff_tex_distortion.dds`.  Used by the muzzle-
+    flash shimmer pipeline (Coffee 2026-05-14): the color sprite
+    gives the visible flame, the distortion sprite warps the
+    back-buffer through a normal-map offset producing the
+    3D-looking heat haze WoT's `ps_shimmer.fx` shader provides.
+    """
+    atlas_local = os.path.join(
+        resources_dir, '_wot_eff_tex_distortion.dds')
+    if os.path.isfile(atlas_local):
+        return atlas_local
+    src_pkg = pkg_path if (pkg_path and os.path.isfile(pkg_path)) \
+        else _locate_pkg(extra_pkg_paths)
+    if not src_pkg:
+        return None
+    os.makedirs(resources_dir, exist_ok=True)
+    try:
+        with zipfile.ZipFile(src_pkg) as zf:
+            with zf.open(_INTERNAL_DIST) as src, \
+                 open(atlas_local, 'wb') as dst:
+                dst.write(src.read())
+        return atlas_local
+    except Exception as exc:
+        print(f"[extract_wot_fire_atlas] could not extract distortion atlas: "
+              f"{exc}")
         return None
 
 
@@ -337,13 +444,33 @@ def ensure_runtime_flipbooks(resources_dir, pkg_path=None,
         print(f"[ensure_runtime_flipbooks] no particles.pkg found -- "
               f"fire/smoke flipbooks unavailable until WoT path is set")
         return out
+    # Per Coffee 2026-05-14 (shimmer pipeline): grids whose def
+    # has `_atlas='distortion'` slice from the second WoT atlas
+    # (`eff_tex_distortion.dds`) instead of the color one.  Cached
+    # lazily so non-distortion-using setups don't pay the extra
+    # pkg I/O.
+    distortion_atlas = None
 
     for target_name, set_name, target_dir in needed:
+        gdef = GRID_DEFS.get(set_name, {})
+        atlas_kind = gdef.get('_atlas', 'color')
+        if atlas_kind == 'distortion':
+            if distortion_atlas is None:
+                distortion_atlas = ensure_distortion_atlas_local(
+                    resources_dir, pkg_path=pkg_path,
+                    extra_pkg_paths=extra_pkg_paths)
+            src = distortion_atlas
+        else:
+            src = atlas
+        if not src:
+            print(f"[ensure_runtime_flipbooks] skip {target_name}: "
+                  f"{atlas_kind} atlas not available")
+            continue
         try:
-            n = slice_set(set_name, target_dir, atlas)
+            n = slice_set(set_name, target_dir, src)
             out[target_name] = n
             print(f"[ensure_runtime_flipbooks] {target_name}/  <- "
-                  f"{set_name}  ({n} frames)")
+                  f"{set_name}  ({n} frames, atlas={atlas_kind})")
         except Exception as exc:
             print(f"[ensure_runtime_flipbooks] slice {set_name} -> "
                   f"{target_name}/ failed: {exc}")
@@ -358,15 +485,36 @@ def _slice_one(grid_image, grid_def, out_dir, prefix):
     the next row.  Top-left first, bottom-right last -- that's
     what WoT's atlas uses too, despite an early misread that had
     us reversing both axes.
+
+    Per Coffee 2026-05-14 (muzzle-flash grid):
+    * `frame_w` / `frame_h` override `frame_size` for non-square
+      tiles.  When only `frame_size` is set we treat it as both
+      width AND height (the legacy square case).
+    * `column_major=True` walks the grid down-first instead of
+      right-first, so frames 0..rows-1 come from column 0,
+      frames rows..2*rows-1 from column 1, etc.  Used by the
+      muzzle-flash grid where the two columns are independent
+      sequences (left = forward-pointing, right = mirrored).
     """
     cols, rows = grid_def['cols'], grid_def['rows']
-    fs = grid_def['frame_size']
+    fw = grid_def.get('frame_w', grid_def.get('frame_size'))
+    fh = grid_def.get('frame_h', grid_def.get('frame_size'))
+    col_major = bool(grid_def.get('column_major', False))
     n = 0
-    for r in range(rows):
-        for c in range(cols):
-            x0 = c * fs
-            y0 = r * fs
-            tile = grid_image.crop((x0, y0, x0 + fs, y0 + fs))
+    if col_major:
+        outer, inner = cols, rows
+        def coord(o, i):
+            return (o, i)        # (c, r)
+    else:
+        outer, inner = rows, cols
+        def coord(o, i):
+            return (i, o)        # (c, r) -- inner is column
+    for o in range(outer):
+        for i in range(inner):
+            c, r = coord(o, i)
+            x0 = c * fw
+            y0 = r * fh
+            tile = grid_image.crop((x0, y0, x0 + fw, y0 + fh))
             out = os.path.join(out_dir, f'{prefix}_{n:04d}.png')
             tile.save(out, format='PNG', optimize=False)
             n += 1
@@ -427,13 +575,17 @@ def main():
         grid = src.crop((rx0, ry0, rx1, ry1))
         n = _slice_one(grid, gdef, out_dir, prefix=name)
 
+        fw_dbg = gdef.get('frame_w', gdef.get('frame_size'))
+        fh_dbg = gdef.get('frame_h', gdef.get('frame_size'))
+        size_str = (f'{fw_dbg}px' if fw_dbg == fh_dbg
+                    else f'{fw_dbg}x{fh_dbg}px')
         line = (f"  {name:<22} {gdef['cols']:>2}x{gdef['rows']:<2} "
-                f"@ {gdef['frame_size']:>3}px  "
+                f"@ {size_str:>9}  "
                 f"= {n:>3} frames   "
                 f"-- {gdef['note']}")
         print(line)
         manifest_lines.append(
-            f"{name}/  ({n} frames @ {gdef['frame_size']}px,  "
+            f"{name}/  ({n} frames @ {size_str},  "
             f"rect=({rx0},{ry0},{rx1},{ry1}))\n"
             f"    {gdef['note']}\n")
 

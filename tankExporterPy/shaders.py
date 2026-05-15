@@ -378,6 +378,169 @@ class ParticleShader:
         glUniform1f(glGetUniformLocation(self.program, name), value)
 
 
+class ScreenSpaceDecalShader:
+    """Volumetric screen-space decal projector shader.
+
+    Per Coffee 2026-05-15 ("look here at my decal projector frag
+    and vert  C:\\nuTerra\\nuTerra\\shaders\\Terrain_shaders"):
+    ported from nuTerra's `DecalProject.{vert,frag}` and re-
+    targeted to GL 3.30 / TEPY's forward pipeline.
+
+    The decal is rendered as a UNIT CUBE in local [-0.5, +0.5]^3
+    space.  The frag stage reads the scene depth at every cube
+    fragment, reconstructs the underlying world surface point,
+    transforms it into decal-local space via a pre-multiplied
+    invMVP, and clips anything outside the unit cube.  Survivors
+    sample the albedo texture at `(local.xy + 0.5)`.
+
+    Source: shaders/decal_project.vert + shaders/decal_project.frag.
+
+    Uniforms:
+        u_view, u_proj            - 4x4 row-major camera matrices
+        u_decal_matrix            - 4x4, decal-cube -> world
+        u_inv_view_proj_decal     - 4x4, inverse(proj*view*decal)
+                                     pre-multiplied CPU-side so the
+                                     frag stage's reconstruction is
+                                     a single mat-vec product.
+        u_albedo                  - sampler2D, decal RGBA
+        u_depth_tex               - sampler2D, scene depth snapshot
+        u_resolution              - vec2, viewport pixels (w, h)
+        u_global_alpha            - float, master alpha multiplier
+        u_fade_start              - float, age-fade onset (0..1).
+                                     Pin past 1.0 to disable fade.
+        u_age_frac                - float, decal age in [0, 1].
+                                     Pin to 0.0 for single-frame
+                                     decals (e.g. aim crosshair).
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/decal_project.vert')
+        fs = load_shader_file('shaders/decal_project.frag')
+        self.program = _compile_program(vs, fs,
+                                         'ScreenSpaceDecal shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, matrix):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, matrix)
+
+    def set_int(self, name, value):
+        glUniform1i(glGetUniformLocation(self.program, name), value)
+
+    def set_float(self, name, value):
+        glUniform1f(glGetUniformLocation(self.program, name), value)
+
+    def set_vec2(self, name, x, y):
+        glUniform2f(glGetUniformLocation(self.program, name),
+                    float(x), float(y))
+
+
+class DecalShader:
+    """Shader for impact decal projection -- shell-hole albedos on
+    terrain.
+
+    Source: shaders/decal.vert + shaders/decal.frag.  Each active
+    `Impact` is uploaded as 6 verts (2 triangles) in world space
+    by the `Decals` projector.  The quad already sits at
+    `impact.pos + impact.normal * bias` with corners pushed out
+    along an orthonormal basis on the surface normal, so this
+    stage is just `proj * view * a_position` -- the projection
+    math lives on the CPU side.
+
+    Per Coffee 2026-05-14 ("time to add a decal projector. to
+    where the shells hit"): rendered AFTER opaque terrain in the
+    alpha pass, before any other particle / billboard layers,
+    so the decals tint the terrain underneath everything else.
+
+    Uniforms:
+        u_view, u_proj    - 4x4 row-major view + projection
+        u_albedo          - sampler2D, shellhole PNG (RGBA)
+        u_fade_start      - float, age fraction where fade-out
+                            begins (0..1).  0.85 -> hold full
+                            for 85 % of lifetime, fade out the
+                            last 15 %.
+        u_global_alpha    - float, master alpha multiplier
+                            (renderer can dim/disable without
+                            touching per-decal data)
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/decal.vert')
+        fs = load_shader_file('shaders/decal.frag')
+        self.program = _compile_program(vs, fs, 'Decal shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, matrix):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, matrix)
+
+    def set_int(self, name, value):
+        glUniform1i(glGetUniformLocation(self.program, name), value)
+
+    def set_float(self, name, value):
+        glUniform1f(glGetUniformLocation(self.program, name), value)
+
+
+class FlashShader:
+    """Shader for the muzzle-flash 3-quad fan.
+
+    Source: shaders/flash.vert + shaders/flash.frag.  Each shot's
+    flash is rendered as 3 world-aligned quads (not camera-facing)
+    fanning around the gun-forward axis at the muzzle position.
+
+    Uniforms (Coffee 2026-05-14 WoT shimmer pipeline):
+
+        u_view, u_proj          - 4x4 row-major
+        u_muzzle_pos            - vec3, world pivot (= bottom-center)
+        u_fwd                   - vec3, gun forward direction (unit)
+        u_up                    - vec3, perpendicular-to-fwd up axis
+        u_length                - float, plume length in world m
+        u_thickness             - float, plume thickness in world m
+
+        u_flipbook              - sampler2DArray, gun_flash color
+        u_frame                 - int, current color frame index
+        u_alpha                 - float, fade-out modulator [0, 1]
+        u_tint                  - vec3, WoT keyframe color
+        u_intensity             - float, WoT keyframe alpha scalar
+
+        u_distortion            - sampler2DArray, distortion flipbook
+        u_dist_frame            - int, distortion frame index
+        u_dist_strength         - float, refraction magnitude in
+                                  screen-uv units (~0.05 = subtle)
+        u_refraction_tex        - sampler2D, back-buffer copy
+        u_viewport_size         - vec2, (width, height) in pixels
+    """
+
+    def __init__(self):
+        vs = load_shader_file('shaders/flash.vert')
+        fs = load_shader_file('shaders/flash.frag')
+        self.program = _compile_program(vs, fs, 'Flash shader')
+
+    def use(self):
+        glUseProgram(self.program)
+
+    def set_mat4(self, name, matrix):
+        glUniformMatrix4fv(glGetUniformLocation(self.program, name),
+                           1, GL_TRUE, matrix)
+
+    def set_vec3(self, name, x, y, z):
+        glUniform3f(glGetUniformLocation(self.program, name),
+                    x, y, z)
+
+    def set_vec2(self, name, x, y):
+        glUniform2f(glGetUniformLocation(self.program, name), x, y)
+
+    def set_int(self, name, value):
+        glUniform1i(glGetUniformLocation(self.program, name), value)
+
+    def set_float(self, name, value):
+        glUniform1f(glGetUniformLocation(self.program, name), value)
+
+
 class PadShader:
     """Instanced track-pad shader (Phase C step 3 of the
     track-physics roadmap).
