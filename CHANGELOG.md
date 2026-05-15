@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Redraw both reticle AND blue ball after shellhole decals (1.200.0)
+
+Per Coffee 2026-05-15 ("it should draw the ball again too"
++ "redraw both"): the second aim-marker pass now renders
+BOTH the cursor reticle (SS volumetric or flat quad, same
+branching as the first draw) AND the blue debug sphere.
+Earlier (1.198.0 - 1.199.0) the second pass only drew the
+reticle and explicitly skipped the ball; that left the
+ball under any shellhole decals it overlapped.
+
+The ball is the real win for "on top" -- it's an opaque
+mesh with depth-test enabled, so its colour write replaces
+whatever alpha-blended decal landed at those pixels.  The
+reticle redraw helps the line / tick pixels (full alpha)
+but the bulk of the cursor circle is transparent so
+decals still show through there; the ball draws the eye
+to the exact aim point regardless.
+
+Same gates and error-log flag pattern as the first draw,
+just with its own `_aim_redraw_err_logged` so log-once
+doesn't collide.
+
 ### Move shellhole + cursor-redraw blocks ahead of tank render (1.199.0)
 
 Per Coffee 2026-05-15 ("no change.  Cursor needs to draw

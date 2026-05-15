@@ -18355,29 +18355,27 @@ class Viewer:
 
         # ---- Aim-point marker REDRAW (on top of shellhole decals) -------
         # Per Coffee 2026-05-15 ("redraw the cursor after the
-        # shot decals are drawn.  don't move other draw of it.
-        # I need it on top and changing order will probably
-        # move loading of it and i dont want that" + "Cursor
-        # needs to draw before tanks and other decals are
-        # drawn"): the cursor renders a SECOND time right after
-        # the shellhole-decal block, BEFORE tanks render.  Both
-        # the decal block above and this redraw operate on
-        # terrain-only scene depth, so the SS projector
-        # reconstructs against the correct surface.  Skips the
-        # blue debug sphere (already painted during the first
-        # pass) and uses an isolated error-log flag so the two
-        # draws don't share state.
+        # shot decals are drawn" + "it should draw the ball
+        # again too" + "redraw both"): the cursor reticle AND
+        # the blue debug sphere both get a second pass right
+        # after the shellhole-decal block, BEFORE tanks render.
+        # The first pair lives right after terrain.render and
+        # is the load-time anchor -- DO NOT MOVE that one.
         #
-        # Earlier (1.198.0) the redraw lived way down in the
-        # transparent-layer sequence, AFTER tanks had already
-        # written depth.  The SS shader's world reconstruction
-        # then lost the terrain target -- new cursor fragments
-        # reconstructed onto tank surfaces or fell outside the
-        # cube and discarded, so visually nothing changed.
-        # Moving both blocks ahead of the tank pass restored
-        # clean depth for the reconstruction.
+        # Reticle: the SS volumetric projector (terrain hits)
+        # or the flat quad (dome hits).  Note that the reticle
+        # texture is mostly transparent -- only the line / tick
+        # pixels at full alpha visibly replace decals.  Most of
+        # the cursor circle is transparent so decals still show
+        # through there; the ball is the opaque "you are here"
+        # marker that always wins.
+        #
+        # Both passes operate on terrain-only scene depth (the
+        # decal block above didn't write depth), so the SS
+        # reconstruction lands on the correct surface.
         if self._aim_hit_world is not None:
             try:
+                # ---- Reticle redraw ---------------------------
                 if (self._aim_hit_kind == 'dome'
                         and self._aim_hit_normal is not None):
                     if (self.aim_crosshair is not None
@@ -18427,11 +18425,28 @@ class Viewer:
                         self.aim_crosshair.render(
                             self._aim_hit_world, n_up,
                             self.decal_shader, view, proj)
+                # ---- Blue debug sphere redraw -----------------
+                # Opaque mesh, depth test on -- writes its
+                # colour directly to the framebuffer at the
+                # cursor terrain point, replacing any decal
+                # alpha that landed there.
+                if self.aim_hit_sphere is not None:
+                    hx, hy, hz = (float(self._aim_hit_world[0]),
+                                  float(self._aim_hit_world[1]),
+                                  float(self._aim_hit_world[2]))
+                    _hit_model = np.array([
+                        [1.0, 0.0, 0.0, hx],
+                        [0.0, 1.0, 0.0, hy],
+                        [0.0, 0.0, 1.0, hz],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ], dtype=np.float32)
+                    glEnable(GL_DEPTH_TEST)
+                    self.aim_hit_sphere.render(
+                        self.color_shader, _hit_model, view, proj)
             except Exception as _ex_aim_redraw:
                 if not getattr(self,
                                '_aim_redraw_err_logged', False):
-                    print(f"[aim-crosshair-redraw] render "
-                          f"failed: "
+                    print(f"[aim-redraw] render failed: "
                           f"{type(_ex_aim_redraw).__name__}: "
                           f"{_ex_aim_redraw}")
                     self._aim_redraw_err_logged = True
