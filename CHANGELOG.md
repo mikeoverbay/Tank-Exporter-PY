@@ -9,6 +9,56 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Dome cursor fixes: depth-test on Pass 2 + bitangent flip (1.202.0)
+
+Two bugs in 1.201.0 caught + fixed:
+
+**(1) Dome Pass 2 depth write was a no-op.**  OpenGL spec
+gotcha: when `GL_DEPTH_TEST` is DISABLED, depth-buffer
+writes are bypassed entirely, REGARDLESS of `glDepthMask`.
+1.201.0's `glDepthMask(GL_TRUE)` on Pass 2 didn't actually
+land any depth into the framebuffer.  Confirmed empirically
+with `glReadPixels(... GL_DEPTH_COMPONENT ...)` at the
+projected cursor pixel: the depth buffer at dome pixels
+stayed at the cleared far value (1.0) even though the
+mask was on.
+
+Fix in `SkyDome.render`: enable depth test with
+`glDepthFunc(GL_ALWAYS)` (every fragment passes) alongside
+the mask, so the writes actually go through.  Cleanup
+block already restores `GL_LESS` for downstream passes.
+
+After the fix, the cursor pixel's framebuffer depth
+matches the CPU-projected expected depth to within
+float precision -- the SS reconstruction in
+`decal_project.frag` now correctly lands on the dome
+surface.
+
+**(2) Dome cursor reticle was Y-flipped vs terrain.**
+With the surface-aligned cube building its basis as
+`b = cross(n, t)`, the bitangent at a horizon dome hit
+ended up pointing in world +Y.  Combined with the SS
+shader's `tex_uv = local.xz + 0.5` mapping and the
+two-flip texture upload chain (`make_cursor.py` flip +
+`_load_decal_tex_2d` flip + GL's bottom-left-origin
+upload), the result was that upper-screen cube fragments
+sampled the upper half of the GL texture -- which holds
+the S area of the reticle (N is near V=0.1, S near
+V=0.9).  Cursor appeared with S at the top of the
+reticle on the dome.
+
+Fix in `_build_decal_matrix_surface`: `b = cross(t, n)`
+instead of `cross(n, t)`.  Negates the bitangent so
+upper-screen cube fragments now sample the lower half
+of the texture (N area).  Handedness of the local basis
+no longer matches a strict right-handed (T, B, N) frame
+but the only shader consumer is `local.xz` for UV --
+handedness is irrelevant there.
+
+Terrain unaffected: terrain uses the world-axis-aligned
+matrix (no frisvad basis), which doesn't go through
+`_build_decal_matrix_surface`.
+
 ### Dome cursor via SS projector + dome depth write (1.201.0)
 
 Per Coffee 2026-05-15 ("turn depth write on for 2nd dome

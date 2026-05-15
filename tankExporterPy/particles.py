@@ -2036,14 +2036,27 @@ def _build_decal_matrix_surface(pos, normal, size_x, size_y, size_z):
         seed = np.array([0.0, 0.0, 1.0], dtype=np.float32)
     t = np.cross(seed, n)
     t /= max(float(np.linalg.norm(t)), 1e-6)
-    b = np.cross(n, t)
+    # Per Coffee 2026-05-15 ("Y is flipped on the dome decal.
+    # ok on terrain"): negate the bitangent so the texture's
+    # V axis aligns with screen-up at typical dome-horizon
+    # hit points.  Without this, upper-screen cube fragments
+    # sample the upper half of the cursor PNG, which contains
+    # the S area (the make_cursor.py flip + _load_decal_tex_2d
+    # flip + GL bottom-left-origin upload land N near V=0.1
+    # and S near V=0.9).  Flipping the bitangent reverses the
+    # V-axis mapping so upper screen -> lower V -> samples the
+    # N area where the user expects it.  Handedness of the
+    # local basis no longer matches a right-handed (T, B, N)
+    # frame but that doesn't matter for the shader -- the
+    # only consumer is `local.xz + 0.5` for the UV.
+    b = np.cross(t, n)
     t = t.astype(np.float32)
     b = b.astype(np.float32)
     # Compose: columns are scaled basis vectors; translation is `pos`.
     M = np.eye(4, dtype=np.float32)
     M[0:3, 0] = t * float(size_x)        # local +X = tangent
     M[0:3, 1] = n * float(size_z)        # local +Y = normal (projection)
-    M[0:3, 2] = b * float(size_y)        # local +Z = bitangent
+    M[0:3, 2] = b * float(size_y)        # local +Z = bitangent (negated)
     M[0:3, 3] = np.asarray(pos, dtype=np.float32)
     return M
 

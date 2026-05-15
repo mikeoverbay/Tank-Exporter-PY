@@ -744,9 +744,22 @@ class SkyDome:
         # path as terrain hits) and the projector's frag stage
         # reconstructs the surface from a scene-depth snapshot
         # -- without dome depth in the buffer the reconstruction
-        # falls into the cleared far value and discards.  Depth
-        # TEST stays off (no occlusion of the dome itself); only
-        # the write is enabled so the depth value lands.
+        # falls into the cleared far value and discards.
+        #
+        # IMPORTANT (OpenGL spec gotcha caught 2026-05-15):
+        # `glDepthMask(GL_TRUE)` alone is NOT enough -- the
+        # depth buffer is bypassed entirely when depth-test is
+        # disabled, REGARDLESS of the mask.  We have to enable
+        # the depth test with `GL_ALWAYS` (every fragment
+        # passes) for the writes to actually land.  Confirmed
+        # with glReadPixels: with depth-test off + mask on,
+        # the framebuffer's depth at dome pixels stays at the
+        # cleared far value (1.0); with depth-test on +
+        # `GL_ALWAYS` + mask on it correctly holds the dome's
+        # clip-space depth.  GL_LESS is restored in the
+        # cleanup block below.
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_ALWAYS)
         glDepthMask(GL_TRUE)
         try:
             angle = math.radians(float(self.rotate_pass_deg))
