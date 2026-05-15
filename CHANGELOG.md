@@ -9,6 +9,75 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Drop dome cursor decal, revert rotation-fix code, fix dome explosions (1.204.0)
+
+Per Coffee 2026-05-15 ("just remove the decal from the
+dome, keep the ball" + "explosions are not rendered right
+now on the dome" + "find when we tried to fix the rotation
+of the cursor on the dome [and revert]"):
+
+**(1) Cursor on the dome: ball only, no decal.**  Earlier
+(1.201.0 - 1.203.0) we tried three iterations of getting
+the SS volumetric decal projector to produce a correctly-
+oriented reticle on the dome: surface-aligned cube via
+frisvad basis (1.201.0), bitangent flip for Y orientation
+(1.202.0), stable +Y seed for X-flip-on-pan (1.203.0).
+The user's verdict ("just remove the decal from the dome"):
+the reticle on a sky backdrop adds nothing useful, and
+the rotation iteration was never going to converge.
+
+`viewer.py` cursor block: the dome branch now does
+`pass` (no decal render).  The blue ball at
+`_aim_hit_world` still draws (it's outside the dome /
+terrain branching), so the user still has an exact
+"aiming here" cue on the dome.
+
+**(2) Revert the rotation-fix infrastructure.**  With the
+dome decal gone, the supporting code is dead weight:
+
+* `tankExporterPy/skybox.py SkyDome.render`: removed the
+  `glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS);
+  glDepthMask(GL_TRUE);` block before Pass 2 (1.201.0 +
+  1.202.0 depth-write enable).  Pass 2 goes back to
+  depth-test OFF, depth-write OFF -- the dome's depth
+  values no longer need to land in the buffer because
+  nothing downstream uses them.
+* `tankExporterPy/particles.py`: removed the
+  `_build_decal_matrix_surface` function (frisvad-rotated
+  variant of the decal-cube matrix, added 1.201.0,
+  iterated 1.202.0 + 1.203.0).  Removed the
+  `surface_aligned=False` flag from
+  `ScreenSpaceDecals._draw_one` and `render_single` --
+  callers don't need to know about a non-existent code
+  path anymore.
+
+The world-axis-aligned `_build_decal_matrix` (terrain
+decals, shellhole decals, terrain cursor) is unchanged.
+
+**(3) Impact billboards now render on dome.**  The
+explosion fire + dust billboards were depth-test rejected
+at dome impacts because `y_offset` shifts the billboard
+in world +Y, which puts the quad in FRONT of camera for
+terrain impacts (camera typically above the tank looking
+down) but TANGENTIAL to the dome surface for horizon dome
+hits -- the billboard's depth ends up equal to or
+slightly farther than the dome surface, and `GL_LESS`
+rejected every fragment.
+
+`tankExporterPy/particles.py ImpactBillboards.render`:
+added `glDisable(GL_DEPTH_TEST)` before the draw + a
+matching `glEnable(GL_DEPTH_TEST)` in the cleanup.
+Billboards now render unconditionally on top of whatever
+was drawn before, regardless of depth state.  Trade-off:
+a tank between camera and a terrain impact no longer
+occludes the explosion, but for a debug viewer that's
+acceptable.
+
+**Net code impact**: viewer.py +40 / -64, particles.py
++much less / -184, skybox.py -26.  Reverted code lives in
+the git history at 1.201.0 - 1.203.0 if a future session
+wants to revisit a different dome-cursor approach.
+
 ### Stable dome cursor basis + skip shellhole on dome (1.203.0)
 
 Two follow-ups to 1.202.0:

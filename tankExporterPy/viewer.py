@@ -18270,54 +18270,28 @@ class Viewer:
         # has a target (terrain / dome).
         if self._aim_hit_world is not None:
             try:
-                # TERRAIN hit -> SS volumetric projector with the
-                # cube WORLD-AXIS-ALIGNED (compass directions stay
-                # fixed regardless of ground slope).  DOME hit ->
-                # SS volumetric projector with the cube
-                # SURFACE-ALIGNED to the inward sphere normal (so
-                # the reticle lies tangent to the dome at the
-                # gun-ray hit point).
+                # TERRAIN hit -> SS volumetric projector,
+                # world-axis-aligned cube (compass directions
+                # stay fixed regardless of ground slope).
+                # DOME hit -> reticle decal SKIPPED; only the
+                # blue ball renders (see below).
                 #
-                # Per Coffee 2026-05-15 ("turn depth write on for
-                # 2nd dome edge hiding draw and convert cursor to
-                # draw on it using the decal projection shader"):
-                # the dome branch used to render via the flat-quad
-                # `AimCrosshair.render` path because the SS
-                # projector couldn't reach -- the dome rendered
-                # with depth-write OFF on both passes, so scene
-                # depth at dome pixels was the cleared far value
-                # and the SS reconstruction fell outside the cube
-                # and discarded.  Now that the dome's second
-                # (edge-hiding) pass has depth-write ON, scene
-                # depth at dome pixels = dome Z and the SS
-                # reconstruction lands on the dome surface, so
-                # the cursor draws via the same shader as the
-                # terrain branch -- just with the cube oriented
-                # to the dome's inward normal instead of world
-                # axes.
+                # Per Coffee 2026-05-15 ("just remove the
+                # decal from the dome, keep the ball"): the
+                # dome is a backdrop and a projected reticle
+                # on it added nothing useful -- compass-
+                # direction marks on a sky panorama read as
+                # noise.  Earlier (1.201.0 - 1.203.0) we
+                # tried various surface-aligned matrix
+                # rotations to make the reticle look right on
+                # the dome (frisvad basis, bitangent flip,
+                # stable seed) but the result still wasn't
+                # what the user wanted.  Reverted in 1.204.0;
+                # the ball alone is enough of a "you are
+                # aiming here" cue.
                 if (self._aim_hit_kind == 'dome'
                         and self._aim_hit_normal is not None):
-                    if (self.aim_crosshair_ss is not None
-                            and self.ss_decal_shader is not None):
-                        _depth_tex = self._grab_scene_depth(
-                            scene_x, console_h, scene_w, scene_h)
-                        if _depth_tex:
-                            self.aim_crosshair_ss.render_single(
-                                self._aim_hit_world,
-                                self._aim_hit_normal,
-                                self.ss_decal_shader, view, proj,
-                                _depth_tex, scene_w, scene_h,
-                                viewport_x=scene_x,
-                                viewport_y=console_h,
-                                surface_aligned=True)
-                    elif (self.aim_crosshair is not None
-                            and self.decal_shader is not None):
-                        # Flat-quad fallback when the SS shader
-                        # is unavailable.
-                        self.aim_crosshair.render(
-                            self._aim_hit_world,
-                            self._aim_hit_normal,
-                            self.decal_shader, view, proj)
+                    pass
                 else:
                     n_up = np.array([0.0, 1.0, 0.0],
                                      dtype=np.float32)
