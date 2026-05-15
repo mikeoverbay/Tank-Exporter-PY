@@ -28,11 +28,13 @@ recurring source of bugs (rubber-band track-skip is one such case
        depth via _grab_scene_depth which at this point holds
        terrain-only Z so reconstruction lands on the ground;
        see "Aim cursor + shellhole decal subsystem" below)
- 5.  Aim-point marker (per 1.200.0 -- crosshair reticle + blue ball
-       at _aim_hit_world; gated on _aim_hit_world is not None;
-       SS-projector for terrain hits / flat-quad for dome hits;
-       blue ball is opaque mesh with depth_test on, naturally
-       sits on top of the just-drawn decal alpha)
+ 5.  Aim-point marker (per 1.204.0 -- TERRAIN hit: SS volumetric
+       cube projector renders the reticle on the ground.  DOME
+       hit: reticle SKIPPED (sky is a backdrop, decal added
+       noise).  Both branches: blue debug ball renders at
+       _aim_hit_world as an opaque depth-tested mesh -- this
+       is the "you are aiming here" cue regardless of surface.
+       Gated on _aim_hit_world is not None.)
  6.  Background helpers (grid, axes; depth test off)
  7.  Look-at crosshair (iff middle-mouse held -- PINK lines)
  8.  Aim ray (iff Debug + tank loaded -- single cyan line down-range)
@@ -45,8 +47,11 @@ recurring source of bugs (rubber-band track-skip is one such case
 12.  Surface-normal debug   -- iff Normals slider > 0 (geometry-shader pass)
 13.  Hardpoint markers      -- iff Debug (HP_* sphere + arrow gizmos)
 14.  Particles (ALPHA group): shot_trail smoke -> muzzle smoke ->
-       fire_billboards -> impact dust
+       fire_billboards -> impact dust (depth_test OFF per 1.204.0
+       so impacts on the dome aren't depth-rejected -- see
+       "Aim cursor + shellhole decal subsystem" below)
 15.  Particles (ADDITIVE group): muzzle flash -> impact fire
+       (depth_test OFF as well, same reason)
 16.  Contact-stars overlay  -- iff Susp + Debug (per-wheel terrain markers)
 17.  Hull bbox              -- iff Debug (chassis AABB wireframe)
 18.  Picker FBO (off-screen)-- iff Pick Tri toggle
@@ -237,22 +242,24 @@ after the shellhole-decal block.
 gates this; in particular **not gated on tank load**.  The cursor
 draws whenever the aim ray has a target.
 
-**Dispatch logic:**
+**Dispatch logic (post 1.204.0):**
 
 ```
 if _aim_hit_kind == 'dome' and _aim_hit_normal is not None:
-    # Flat-quad path -- the SS projector can't reach because the
-    # dome renders with depth_write off, so the depth buffer at
-    # dome pixels is the cleared far value and the cube
-    # reconstruction falls outside its volume.
-    aim_crosshair.render(pos, _aim_hit_normal, decal_shader,
-                          view, proj)
+    # No decal on the dome (per Coffee 1.204.0 -- the sky is
+    # a backdrop and a projected reticle on it added noise).
+    # Earlier (1.201.0 - 1.203.0) we tried various surface-
+    # aligned matrix rotations to land a reticle on the dome
+    # via the SS projector; none of the iterations converged
+    # to what the user wanted.  Reverted, kept just the ball
+    # below as the dome "aiming here" cue.
+    pass
 else:
     # Terrain path -- compute the surface normal via 4-tap
-    # finite difference on the heightmap (used by the flat-quad
-    # fallback; the SS projector ignores it).  Prefer the SS
-    # volumetric projector (conforms to terrain bumps), fall
-    # back to flat quad if the SS shader didn't compile.
+    # finite difference on the heightmap (used by the flat-
+    # quad fallback; the SS projector ignores it).  Prefer
+    # the SS volumetric projector (conforms to terrain bumps),
+    # fall back to flat quad if the SS shader didn't compile.
     if aim_crosshair_ss and ss_decal_shader:
         depth_tex = _grab_scene_depth(...)
         aim_crosshair_ss.render_single(pos, n_up, ss_decal_shader,
@@ -260,7 +267,9 @@ else:
     elif aim_crosshair and decal_shader:
         aim_crosshair.render(pos, n_up, decal_shader, view, proj)
 
-# Always: opaque blue sphere at the same world point.
+# Always: opaque blue sphere at the same world point.  This
+# is the dome's only "aiming here" cue since the reticle is
+# suppressed there.
 glEnable(GL_DEPTH_TEST)
 aim_hit_sphere.render(color_shader, _hit_model, view, proj)
 ```
@@ -409,13 +418,17 @@ the Viewer shuts down.
 
 ### `tankExporterPy/particles.py::AimCrosshair`
 
-The flat-quad fallback used:
-* When the cursor hits the dome (the SS projector can't reach
-  because dome depth is cleared-far -- the cube reconstruction
-  would fall outside its volume).
-* When the SS decal shader failed to compile (graceful
-  degradation -- still see the cursor, just without terrain-
-  conformance).
+The flat-quad fallback for the cursor on terrain when the SS
+decal shader failed to compile (graceful degradation -- the
+cursor still draws, just as a textured quad without terrain-
+conformance via depth reconstruction).
+
+Per 1.204.0 this is the ONLY use of `AimCrosshair`: the dome
+cursor branch was removed entirely (sky backdrop, ball-only
+"aiming here" cue), so the dome-via-flat-quad path no longer
+exists.  Earlier revs (pre 1.201.0 + post 1.203.0) used the
+class on dome hits with the inward sphere normal -- kept for
+the SS-compile-failed terrain fallback.
 
 **Constructor:** `AimCrosshair(png_path, size_m=12.0)`.
 * Loads the PNG via Pillow, transposes top-bottom (same flip
@@ -510,39 +523,113 @@ volumetric path.  Per fragment:
    produce around the cube edges).
 8. Output `vec4(c.rgb, a)`.
 
-**`shaders/decal.vert` + `decal.frag`:** flat-quad fallback.
-Plain UV-mapped quad with alpha + age fade.  No scene-depth
-sampling.  Used for dome cursor hits and as the SS-shader-
-unavailable degradation path.
+**`shaders/decal.vert` + `decal.frag`:** flat-quad fallback
+for the cursor on terrain when `decal_project.{vert,frag}`
+fails to compile.  Plain UV-mapped quad with alpha + age
+fade.  No scene-depth sampling.
+
+### Impact billboards (fire + dust explosions on impacts)
+
+> Source: `tankExporterPy/particles.py ImpactBillboards`,
+> instantiated as `self.impact_fire_billboards` (additive)
+> and `self.impact_dust_billboards` (alpha) in the Viewer.
+
+Animated 2D billboards driven off the same `ImpactPool` the
+shellhole decals consume.  Renders one camera-facing quad
+per active impact at `impact.pos + (0, y_offset + rise*age,
+0)`, where `rise_speed` and `y_offset` shift the billboard
+"up" so the explosion reads as a 3D fireball lifting off the
+ground rather than a flat decal at terrain level.
+
+**GL state during render** (per 1.204.0):
+* `GL_BLEND` on; blend func is `(SRC_ALPHA, ONE)` for the
+  additive fire pass and `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`
+  for the alpha dust pass.
+* **`GL_DEPTH_TEST` OFF** (per Coffee 1.204.0 -- the
+  `y_offset` shift in world +Y pushes the billboard in front
+  of the camera at terrain impacts but TANGENT to the dome
+  surface for horizon dome hits.  With depth test on, the
+  dome-impact billboard's depth ends up roughly equal to or
+  slightly farther than the dome surface and `GL_LESS`
+  rejects every fragment.  Off-test forces the explosion to
+  always render).
+* `glDepthMask(GL_FALSE)` (no depth writes -- multiple
+  impacts in the same area don't z-fight against each
+  other).
+
+**Trade-off of depth-test off**: a tank between camera and a
+terrain impact no longer occludes the explosion.  Acceptable
+for a debug viewer; revisit if the trade-off becomes
+visually objectionable.
+
+### Skipping the shellhole decal on dome impacts
+
+`tankExporterPy/impact_pool.py Impact + ImpactPool.hit` take
+a `skip_decal=False` kwarg.  When True, the
+`ScreenSpaceDecals.render_impacts` and `Decals.render`
+filters skip the impact entirely -- the impact is still
+"alive" so the fire + dust billboards fire normally, but no
+persistent ground decal lands.
+
+`Viewer._fire_round` impact handler tags dome impacts as
+`skip_decal=True`: it compares `|impact_pos|` to
+`self.skydome.radius` with 1 m of slop (the impact snaps to
+`target_pos` which came from the quadratic dome
+intersection, so the radius should match within float
+precision).
 
 ### Common failure modes
 
 * **Cursor doesn't appear at startup before a tank loads** --
-  check that `_drive_aim_from_aim_state` runs in the pre-render
-  pump (and not late in the render loop).  This was the
-  1.185.x spiral and the 1.190.0 fix.
-* **Cursor invisible under shellholes** -- check that the
-  cursor draw site is AFTER the shellhole pass in the
-  per-frame order.  If you reorder these, the alpha-blend
-  order flips and the cursor goes back under the decals.
-* **Decal "pancakes" onto the ball / a tank surface** -- the
-  SS reconstruction is snapping to a non-terrain depth.
-  Verify nothing opaque has written depth between
-  `terrain.render` and the decal's `_grab_scene_depth`.  In
-  1.200.0 the order is `terrain -> shellholes -> cursor +
-  ball -> tanks` so by construction the decals see terrain-
-  only Z.
-* **Reticle compass directions wrong** -- the cursor PNG ships
-  with its Y axis flipped via `cust_tools/make_cursor.py
-  (Image.FLIP_TOP_BOTTOM)`.  The frag shader's `local.xz +
-  0.5` mapping reads it as: PNG bottom = world +Z (forward),
-  PNG top = world -Z (back), PNG right = +X, PNG left = -X.
-  Regenerate via `python cust_tools/make_cursor.py`.
-* **Seam visible across the dome wrap** -- the equirect frag
-  shader does manual LOD from world-direction derivatives
-  (not UV derivatives) and the dome renders twice with a
-  0.01-deg Y rotation between draws.  Both fixes need to be
-  intact; the seam reappears if either is removed.
+  check that `_drive_aim_from_aim_state` runs in the pre-
+  render pump (and not late in the render loop).  This was
+  the 1.185.x spiral and the 1.190.0 fix.
+* **Cursor invisible under shellholes (terrain)** -- check
+  that the cursor draw site is AFTER the shellhole pass in
+  the per-frame order.  If you reorder these, the alpha-
+  blend order flips and the cursor goes back under the
+  decals.
+* **Decal "pancakes" onto the ball / a tank surface
+  (terrain)** -- the SS reconstruction is snapping to a non-
+  terrain depth.  Verify nothing opaque has written depth
+  between `terrain.render` and the decal's
+  `_grab_scene_depth`.  Order is `terrain -> shellholes ->
+  cursor + ball -> tanks` so by construction the decals see
+  terrain-only Z.
+* **Reticle compass directions wrong (terrain)** -- the
+  cursor PNG ships with its Y axis flipped via
+  `cust_tools/make_cursor.py (Image.FLIP_TOP_BOTTOM)`.  The
+  frag shader's `local.xz + 0.5` mapping reads it as: PNG
+  bottom = world +Z (forward), PNG top = world -Z (back),
+  PNG right = +X, PNG left = -X.  Regenerate via
+  `python cust_tools/make_cursor.py`.
+* **No cursor reticle on the dome** -- expected as of
+  1.204.0.  The dome cursor decal was removed; the blue
+  debug sphere at `_aim_hit_world` is the only "aiming here"
+  cue when aiming at the sky.  If a future session wants to
+  revisit a dome reticle, see the git history at
+  1.201.0 - 1.203.0 for the surface-aligned matrix
+  experiments (frisvad basis, bitangent flip, +Y seed for
+  stability) -- none converged to what the user wanted.
+* **Explosions invisible on dome impacts** -- check that
+  `ImpactBillboards.render` has `glDisable(GL_DEPTH_TEST)`
+  before the draw and `glEnable(GL_DEPTH_TEST)` in the
+  cleanup.  Without this the billboard's depth-test against
+  the dome surface depth fails (the `y_offset` shift in
+  world +Y doesn't put the quad in front of the dome at
+  horizon hits).
+* **Shellhole decal on the dome (don't want this)** --
+  verify `Viewer._fire_round` is tagging dome hits with
+  `skip_decal=True` based on `|impact_pos| ~ skydome.radius`
+  (1 m slop).  The decal filters in
+  `ScreenSpaceDecals.render_impacts` + `Decals.render`
+  check `getattr(im, 'skip_decal', False)`.
+* **Seam visible across the dome wrap** -- the equirect
+  frag shader does manual LOD from world-direction
+  derivatives (not UV derivatives) and the dome renders
+  twice with a 0.01-deg Y rotation between draws.  Both
+  fixes need to be intact; the seam reappears if either is
+  removed.
 
 ---
 

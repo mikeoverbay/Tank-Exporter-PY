@@ -9,6 +9,47 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Docs update for the 1.201.0 - 1.204.0 dome-cursor arc (1.205.0)
+
+Per Coffee 2026-05-15 ("update docs bump and push"): docs
+updated to reflect the post-1.204.0 state (dome cursor
+decal removed, rotation-fix infrastructure reverted,
+impact billboards depth-test off).
+
+* `docs/RENDERING.md`:
+  - Per-frame pass order updated: aim-marker pass now
+    notes TERRAIN-only reticle render with DOME-skip;
+    impact billboard particles call out the new
+    depth-test-off behaviour.
+  - "Aim cursor + shellhole decal subsystem" section
+    dispatch logic updated to show `pass` for the dome
+    branch + clarifying comment about the abandoned
+    1.201.0 - 1.203.0 rotation work.
+  - AimCrosshair section: clarified the class is now only
+    used as the SS-compile-failed fallback on terrain
+    (dome-via-flat-quad path removed).
+  - New "Impact billboards" section describing
+    depth-test off + the `y_offset` rationale.
+  - New "Skipping the shellhole decal on dome impacts"
+    section describing the `skip_decal` plumbing.
+  - "Common failure modes" expanded with the new
+    dome-specific entries (no reticle, explosions
+    invisible without depth-test off, shellhole on dome,
+    etc.).
+
+* `hand_off/STATE_SNAPSHOT.md`: bumped to 1.205.0, recent
+  series timeline now includes 1.201 - 1.204.
+
+* `hand_off/HANDOFF_2026-05-15_dome_and_cursor.md`:
+  appended a new "Update: 1.201.0 -> 1.204.0 dome cursor
+  rotation arc" section walking through the three
+  iterations + the final abandonment.  Two new "Lessons
+  (continued)" entries: don't chase aesthetic fixes
+  through render-state archaeology, and OpenGL depth
+  writes are bypassed when depth-test is disabled.
+
+No code changes in this commit.
+
 ### Drop dome cursor decal, revert rotation-fix code, fix dome explosions (1.204.0)
 
 Per Coffee 2026-05-15 ("just remove the decal from the
