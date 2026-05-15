@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Cap zoom-out at dome radius (1.206.0)
+
+Per Coffee 2026-05-15 ("stop allowing the zoom radius to
+keep moving past dome radius"): `camera.distance` (orbit /
+free cameras) and `_chase_distance` (chase cam) are now
+hard-capped at `camera.max_eye_radius` at zoom-input time,
+not just at view-matrix-output time.
+
+The view-matrix clamp in `Camera.get_view_matrix` already
+prevented the EYE from punching through the dome -- but the
+underlying distance state kept growing each wheel-out tick.
+Result: after extended zooming-out, the first several
+wheel-IN ticks felt dead because they were just unwinding
+accumulated overage; the visible zoom didn't start moving
+until the distance dropped back below the cap.
+
+Fix in `viewer.py` MOUSEWHEEL handler:
+
+```
+_max_r = camera.max_eye_radius
+if chase:  _chase_distance = clamp(_chase * zoom, 0.5, _max_r)
+elif orbit: camera.distance = clamp(camera.distance * zoom, 0.5, _max_r)
+```
+
+Ortho mode unchanged -- it doesn't use camera.distance.
+Commander mode (camera_mode == 2) still ignores wheel zoom.
+
 ### Docs update for the 1.201.0 - 1.204.0 dome-cursor arc (1.205.0)
 
 Per Coffee 2026-05-15 ("update docs bump and push"): docs

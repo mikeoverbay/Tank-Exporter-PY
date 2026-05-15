@@ -17049,11 +17049,35 @@ class Viewer:
                         self._ortho_left_half_h = max(
                             0.05,
                             float(self._ortho_left_half_h) * zoom)
-                    elif self.camera_mode == 1:
-                        self._chase_distance = max(
-                            0.5, self._chase_distance * zoom)
-                    elif self.camera_mode != 2:
-                        self.camera.distance *= zoom
+                    else:
+                        # Per Coffee 2026-05-15 ("stop allowing
+                        # the zoom radius to keep moving past
+                        # dome radius"): cap the new distance
+                        # at the camera's `max_eye_radius`
+                        # (= dome_radius - 5).  The view-matrix
+                        # clamp in `Camera.get_view_matrix`
+                        # already kept the EYE inside the dome
+                        # visually, but the underlying
+                        # `camera.distance` / `_chase_distance`
+                        # kept growing each wheel-out tick.
+                        # That made the first few wheel-IN
+                        # ticks feel dead until the cap unwound
+                        # back below the dome edge.  Clamping
+                        # at zoom time keeps the internal state
+                        # in sync with the visible zoom.
+                        _max_r = float(getattr(
+                            self.camera, 'max_eye_radius',
+                            float('inf')))
+                        if self.camera_mode == 1:
+                            self._chase_distance = max(
+                                0.5,
+                                min(_max_r,
+                                    self._chase_distance * zoom))
+                        elif self.camera_mode != 2:
+                            self.camera.distance = max(
+                                0.5,
+                                min(_max_r,
+                                    self.camera.distance * zoom))
 
             elif event.type == MOUSEBUTTONDOWN:
                 mx, my = event.pos
