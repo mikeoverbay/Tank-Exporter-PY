@@ -18184,117 +18184,6 @@ class Viewer:
             self._frame_timers['terrain'] = (
                 (_time.perf_counter() - _t_ter0) * 1000.0)
 
-        # ---- Aim-point marker (right after terrain) -------------------
-        # Per Coffee 2026-05-15 ("draw projected cursor right
-        # after terrain and before anything else"): the projected
-        # crosshair + blue ball used to render at the very END
-        # of the 3D pass, after every mesh / particle / decal
-        # layer.  Moved up here so:
-        #
-        #   1. The screen-space decal cube reads scene depth that
-        #      contains ONLY terrain -- no tank or particles in
-        #      the way, so the projection lands on the ground
-        #      where the cursor's terrain raycast computed.
-        #   2. Tank meshes + particles + impact decals all draw
-        #      ON TOP of the cursor.  The cursor reads as a
-        #      ground marker the rest of the scene paints over.
-        #
-        # `_aim_hit_world` is None when the cursor ray missed the
-        # terrain (sky / off-map / no tank loaded) so the block
-        # skips drawing on those frames.
-        if self._aim_hit_world is not None:
-            try:
-                # Per Coffee 2026-05-15 ("if the curser is outside
-                # of the dome, i want it to be projected on to
-                # the dome.  it will need to be front face aligned
-                # to the guns vector dome angles"): two render
-                # paths gated by `_aim_hit_kind`.
-                #
-                #  * TERRAIN: compute the surface normal via 4-tap
-                #    finite difference on the heightmap, then
-                #    prefer the screen-space (volumetric) decal
-                #    projector (which conforms to terrain bumps).
-                #
-                #  * DOME: the screen-space projector can't
-                #    reach -- the dome renders with depth-write
-                #    off so the scene depth at dome pixels is
-                #    the cleared far value, the SS reconstruction
-                #    falls outside the cube and discards.  Use
-                #    the flat-quad projector with the precomputed
-                #    INWARD sphere normal (stored on
-                #    `_aim_hit_normal` by `_drive_aim_from_aim_state`)
-                #    so the cursor decal sits tangent to the
-                #    dome at the gun-ray hit point.
-                if (self._aim_hit_kind == 'dome'
-                        and self._aim_hit_normal is not None):
-                    if (self.aim_crosshair is not None
-                            and self.decal_shader is not None):
-                        self.aim_crosshair.render(
-                            self._aim_hit_world,
-                            self._aim_hit_normal,
-                            self.decal_shader, view, proj)
-                else:
-                    n_up = np.array([0.0, 1.0, 0.0],
-                                     dtype=np.float32)
-                    if self.terrain is not None:
-                        eps = 0.5
-                        ip  = self._aim_hit_world
-                        try:
-                            hL = float(self.terrain.sample_height(
-                                ip[0] - eps, ip[2]))
-                            hR = float(self.terrain.sample_height(
-                                ip[0] + eps, ip[2]))
-                            hD = float(self.terrain.sample_height(
-                                ip[0], ip[2] - eps))
-                            hU = float(self.terrain.sample_height(
-                                ip[0], ip[2] + eps))
-                            dyx = (hR - hL) / (2.0 * eps)
-                            dyz = (hU - hD) / (2.0 * eps)
-                            n_up = np.array(
-                                [-dyx, 1.0, -dyz],
-                                dtype=np.float32)
-                            ln = float(np.linalg.norm(n_up))
-                            if ln > 1e-6:
-                                n_up /= ln
-                        except Exception:
-                            pass
-                    if (self.aim_crosshair_ss is not None
-                            and self.ss_decal_shader is not None):
-                        _depth_tex = self._grab_scene_depth(
-                            scene_x, console_h, scene_w, scene_h)
-                        if _depth_tex:
-                            self.aim_crosshair_ss.render_single(
-                                self._aim_hit_world, n_up,
-                                self.ss_decal_shader, view, proj,
-                                _depth_tex, scene_w, scene_h,
-                                viewport_x=scene_x,
-                                viewport_y=console_h)
-                    elif (self.aim_crosshair is not None
-                            and self.decal_shader is not None):
-                        self.aim_crosshair.render(
-                            self._aim_hit_world, n_up,
-                            self.decal_shader, view, proj)
-                # Blue debug sphere at the same world point.
-                if self.aim_hit_sphere is not None:
-                    hx, hy, hz = (float(self._aim_hit_world[0]),
-                                  float(self._aim_hit_world[1]),
-                                  float(self._aim_hit_world[2]))
-                    _hit_model = np.array([
-                        [1.0, 0.0, 0.0, hx],
-                        [0.0, 1.0, 0.0, hy],
-                        [0.0, 0.0, 1.0, hz],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ], dtype=np.float32)
-                    glEnable(GL_DEPTH_TEST)
-                    self.aim_hit_sphere.render(
-                        self.color_shader, _hit_model, view, proj)
-            except Exception as _ex_aim_ball:
-                if not getattr(self, '_aim_ball_err_logged', False):
-                    print(f"[aim-crosshair] render failed: "
-                          f"{type(_ex_aim_ball).__name__}: "
-                          f"{_ex_aim_ball}")
-                    self._aim_ball_err_logged = True
-
         # ---- Shell-hole decal projector ----------------------------------
         # Per Coffee 2026-05-14 ("time to add a decal projector to
         # where the shells hit") + 2026-05-15 ("look here at my
@@ -18353,29 +18242,38 @@ class Viewer:
                               f"{_ex_decal}")
                         self._decal_err_logged = True
 
-        # ---- Aim-point marker REDRAW (on top of shellhole decals) -------
-        # Per Coffee 2026-05-15 ("redraw the cursor after the
-        # shot decals are drawn" + "it should draw the ball
-        # again too" + "redraw both"): the cursor reticle AND
-        # the blue debug sphere both get a second pass right
-        # after the shellhole-decal block, BEFORE tanks render.
-        # The first pair lives right after terrain.render and
-        # is the load-time anchor -- DO NOT MOVE that one.
+        # ---- Aim-point marker (after shellhole decals) -----------------
+        # Per Coffee 2026-05-15 ("if we dont redraw the cursor,
+        # the decals will draw over it.  can we just drop the
+        # first cursor pair draw now.  It's setup now before
+        # its drawn now"): single cursor draw, positioned right
+        # AFTER the shellhole-decal block so the reticle + ball
+        # naturally sit on top of any decal alpha that landed
+        # at the same world point.  No redraw needed.
         #
-        # Reticle: the SS volumetric projector (terrain hits)
-        # or the flat quad (dome hits).  Note that the reticle
-        # texture is mostly transparent -- only the line / tick
-        # pixels at full alpha visibly replace decals.  Most of
-        # the cursor circle is transparent so decals still show
-        # through there; the ball is the opaque "you are here"
-        # marker that always wins.
+        # Earlier (1.190.0 - 1.200.0) the cursor was drawn right
+        # after terrain.render to fix a 1.185.x spiral where the
+        # cursor wouldn't appear at startup.  Root cause back
+        # then was the per-frame aim-hit projection running too
+        # late in the render loop -- by the time the renderer
+        # got to the cursor block, `_aim_hit_world` was still
+        # stale.  That projection has since been moved up to
+        # `_drive_aim_from_aim_state` at line ~18073 (BEFORE
+        # any render call), so the cursor's data is valid by
+        # the time we reach this point in the frame.  No more
+        # need for the right-after-terrain anchor.
         #
-        # Both passes operate on terrain-only scene depth (the
-        # decal block above didn't write depth), so the SS
-        # reconstruction lands on the correct surface.
+        # NOT gated on tank load: `_aim_hit_world` is set by
+        # the cursor's own terrain raycast + dome intersection,
+        # which runs every frame regardless of whether a tank
+        # has loaded.  The block fires whenever the cursor ray
+        # has a target (terrain / dome).
         if self._aim_hit_world is not None:
             try:
-                # ---- Reticle redraw ---------------------------
+                # TERRAIN hit -> screen-space volumetric projector
+                # (conforms to terrain bumps).  DOME hit -> flat
+                # quad with the inward sphere normal computed by
+                # `_drive_aim_from_aim_state`.
                 if (self._aim_hit_kind == 'dome'
                         and self._aim_hit_normal is not None):
                     if (self.aim_crosshair is not None
@@ -18425,11 +18323,12 @@ class Viewer:
                         self.aim_crosshair.render(
                             self._aim_hit_world, n_up,
                             self.decal_shader, view, proj)
-                # ---- Blue debug sphere redraw -----------------
-                # Opaque mesh, depth test on -- writes its
-                # colour directly to the framebuffer at the
-                # cursor terrain point, replacing any decal
-                # alpha that landed there.
+                # Blue debug sphere at the same world point.
+                # Depth test on (ball is occluded by tanks /
+                # scenery in front of the cursor's terrain hit);
+                # depth WRITE left at the default ON since the
+                # ball is now drawn AFTER the decal pass that
+                # used to be contaminated by ball depth.
                 if self.aim_hit_sphere is not None:
                     hx, hy, hz = (float(self._aim_hit_world[0]),
                                   float(self._aim_hit_world[1]),
@@ -18443,13 +18342,12 @@ class Viewer:
                     glEnable(GL_DEPTH_TEST)
                     self.aim_hit_sphere.render(
                         self.color_shader, _hit_model, view, proj)
-            except Exception as _ex_aim_redraw:
-                if not getattr(self,
-                               '_aim_redraw_err_logged', False):
-                    print(f"[aim-redraw] render failed: "
-                          f"{type(_ex_aim_redraw).__name__}: "
-                          f"{_ex_aim_redraw}")
-                    self._aim_redraw_err_logged = True
+            except Exception as _ex_aim_ball:
+                if not getattr(self, '_aim_ball_err_logged', False):
+                    print(f"[aim-crosshair] render failed: "
+                          f"{type(_ex_aim_ball).__name__}: "
+                          f"{_ex_aim_ball}")
+                    self._aim_ball_err_logged = True
 
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
