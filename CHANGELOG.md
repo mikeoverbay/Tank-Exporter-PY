@@ -9,6 +9,45 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Redraw aim cursor on top of shellhole decals (1.198.0)
+
+Per Coffee 2026-05-15 ("redraw the cursor after the shot
+decals are drawn.  don't move other draw of it.  I need it
+on top and changing order will probably move loading of it
+and i dont want that"): the projected aim crosshair now
+renders TWICE per frame in the 3D pass.
+
+* **First draw** (unchanged, ~`viewer.py:18205`).  Right
+  after `terrain.render`.  This is the load-time anchor
+  that fixed the cursor-at-startup spiral in 1.190.0 --
+  hoisting it past whatever silent exception was firing
+  downstream let the cursor appear before any tank loaded.
+  **Do not move this draw** -- the order change is what
+  unblocked the boot-time render, and moving it back
+  would re-introduce that bug.
+* **Second draw (new, ~`viewer.py:18992`).**  Right after
+  the shellhole-decal block ends, before the per-projectile
+  trail smoke starts.  Mirrors the dome-vs-terrain
+  branching of the first draw but skips the blue debug
+  sphere (already painted in the first pass) and uses its
+  own `_aim_redraw_err_logged` field so log-once doesn't
+  collide with the first draw's flag.
+
+Why a redraw instead of a reorder: shellhole-decal alpha
+sat ON TOP of the reticle, partially occluding the
+crosshair right where the user actually cares about
+seeing it (the round just landed there).  Drawing the
+cursor a second time after the decal layer puts the
+reticle on top of any decals that landed since the first
+draw, without disturbing the load-time render-order fix.
+
+Why the SS reconstruction still lands on the same world
+point: the shellhole-decal pass alpha-blends without
+writing depth, so the depth buffer at this second
+`_grab_scene_depth` call still contains only terrain Z
+values -- same surface, same `local.xz + 0.5` UV
+mapping, just painted again over the decal alpha.
+
 ### Bake cursor flip into the PNG, drop dead CPU UV transform (1.197.0)
 
 Per Coffee 2026-05-15 ("UVs are created in the projection

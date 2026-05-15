@@ -18989,6 +18989,90 @@ class Viewer:
                               f"{_ex_decal}")
                         self._decal_err_logged = True
 
+        # ---- Aim-point marker REDRAW (on top of shellhole decals) -------
+        # Per Coffee 2026-05-15 ("redraw the cursor after the
+        # shot decals are drawn.  don't move other draw of it.
+        # I need it on top and changing order will probably
+        # move loading of it and i dont want that"): the cursor
+        # is drawn a SECOND time right after the shellhole-
+        # decal pass so it sits visually on top of any impact
+        # decals on the surface.  The first draw lives ~line
+        # 18205 (right after terrain.render) and is the
+        # load-time anchor that fixed the cursor-at-startup
+        # spiral in 1.190.0 -- DO NOT MOVE that one.  This
+        # block mirrors the first draw's dome-vs-terrain
+        # branching but skips the blue debug sphere (already
+        # painted during the first pass) and uses an isolated
+        # error-log flag so the two draws don't share state.
+        #
+        # Why this works visually: the shellhole-decal pass
+        # alpha-blends onto the existing framebuffer without
+        # writing depth, so re-grabbing scene depth here
+        # returns the same Z values as the first cursor draw
+        # (= terrain only).  The cursor's SS reconstruction
+        # therefore lands on the same world point, but now
+        # paints AFTER the decal alpha layer -- so the
+        # reticle is unobscured.
+        if self._aim_hit_world is not None:
+            try:
+                if (self._aim_hit_kind == 'dome'
+                        and self._aim_hit_normal is not None):
+                    if (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world,
+                            self._aim_hit_normal,
+                            self.decal_shader, view, proj)
+                else:
+                    n_up = np.array([0.0, 1.0, 0.0],
+                                     dtype=np.float32)
+                    if self.terrain is not None:
+                        eps = 0.5
+                        ip  = self._aim_hit_world
+                        try:
+                            hL = float(self.terrain.sample_height(
+                                ip[0] - eps, ip[2]))
+                            hR = float(self.terrain.sample_height(
+                                ip[0] + eps, ip[2]))
+                            hD = float(self.terrain.sample_height(
+                                ip[0], ip[2] - eps))
+                            hU = float(self.terrain.sample_height(
+                                ip[0], ip[2] + eps))
+                            dyx = (hR - hL) / (2.0 * eps)
+                            dyz = (hU - hD) / (2.0 * eps)
+                            n_up = np.array(
+                                [-dyx, 1.0, -dyz],
+                                dtype=np.float32)
+                            ln = float(np.linalg.norm(n_up))
+                            if ln > 1e-6:
+                                n_up /= ln
+                        except Exception:
+                            pass
+                    if (self.aim_crosshair_ss is not None
+                            and self.ss_decal_shader is not None):
+                        _depth_tex = self._grab_scene_depth(
+                            scene_x, console_h, scene_w, scene_h)
+                        if _depth_tex:
+                            self.aim_crosshair_ss.render_single(
+                                self._aim_hit_world, n_up,
+                                self.ss_decal_shader, view, proj,
+                                _depth_tex, scene_w, scene_h,
+                                viewport_x=scene_x,
+                                viewport_y=console_h)
+                    elif (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world, n_up,
+                            self.decal_shader, view, proj)
+            except Exception as _ex_aim_redraw:
+                if not getattr(self,
+                               '_aim_redraw_err_logged', False):
+                    print(f"[aim-crosshair-redraw] render "
+                          f"failed: "
+                          f"{type(_ex_aim_redraw).__name__}: "
+                          f"{_ex_aim_redraw}")
+                    self._aim_redraw_err_logged = True
+
         # ---- Per-projectile trail smoke ---------------------------------
         # Coffee 2026-05-13 ("short smoke trail.. nearly faint" + "use
         # the sliders for the other smoke emitters" + "tracer smoke
