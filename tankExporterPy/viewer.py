@@ -18295,6 +18295,147 @@ class Viewer:
                           f"{_ex_aim_ball}")
                     self._aim_ball_err_logged = True
 
+        # ---- Shell-hole decal projector ----------------------------------
+        # Per Coffee 2026-05-14 ("time to add a decal projector to
+        # where the shells hit") + 2026-05-15 ("look here at my
+        # decal projector frag and vert" -- nuTerra reference) +
+        # 2026-05-15 ("Cursor needs to draw before tanks and other
+        # decals are drawn"): the screen-space volumetric projector
+        # replaces the earlier flat-quad approach.  Grabs the
+        # current scene depth into a cached texture first, then
+        # draws one cube decal per active impact; the frag stage
+        # reconstructs the surface world position from the depth
+        # snapshot and clips anything outside the cube volume.
+        # Falls back to the legacy flat-quad path when the
+        # screen-space shader didn't compile.
+        #
+        # POSITION: right after the first aim-cursor block, BEFORE
+        # any opaque mesh pass (tanks, hardpoint markers, etc.).
+        # Earlier (1.175.0 - 1.198.0) we placed this block in the
+        # transparent-layer sequence way downstream, AFTER tanks
+        # had already written depth.  The SS reconstruction kept
+        # snapping to tank surfaces instead of terrain.  Moving
+        # the block here keeps the scene-depth grab terrain-only,
+        # so the cube reconstructs against the right surface.
+        # Opaque tank renders later naturally cover decals at
+        # tank screen pixels via standard depth replacement.
+        if self.impacts.has_alive:
+            if (self.shellhole_ss_decals is not None
+                    and self.ss_decal_shader is not None):
+                try:
+                    _depth_tex = self._grab_scene_depth(
+                        scene_x, console_h, scene_w, scene_h)
+                    if _depth_tex:
+                        self.shellhole_ss_decals.render_impacts(
+                            self.impacts.active_impacts,
+                            self.ss_decal_shader, view, proj,
+                            _depth_tex, scene_w, scene_h,
+                            viewport_x=scene_x,
+                            viewport_y=console_h)
+                except Exception as _ex_decal:
+                    if not getattr(self, '_decal_err_logged', False):
+                        print(f"[ss-decal] render failed: "
+                              f"{type(_ex_decal).__name__}: "
+                              f"{_ex_decal}")
+                        self._decal_err_logged = True
+            elif (self.shellhole_decals is not None
+                    and self.decal_shader is not None):
+                # Legacy fallback when the screen-space pipeline
+                # isn't available (shader compile failed, etc.).
+                try:
+                    self.shellhole_decals.render(
+                        self.impacts.active_impacts,
+                        self.decal_shader, view, proj)
+                except Exception as _ex_decal:
+                    if not getattr(self, '_decal_err_logged', False):
+                        print(f"[decal] render failed: "
+                              f"{type(_ex_decal).__name__}: "
+                              f"{_ex_decal}")
+                        self._decal_err_logged = True
+
+        # ---- Aim-point marker REDRAW (on top of shellhole decals) -------
+        # Per Coffee 2026-05-15 ("redraw the cursor after the
+        # shot decals are drawn.  don't move other draw of it.
+        # I need it on top and changing order will probably
+        # move loading of it and i dont want that" + "Cursor
+        # needs to draw before tanks and other decals are
+        # drawn"): the cursor renders a SECOND time right after
+        # the shellhole-decal block, BEFORE tanks render.  Both
+        # the decal block above and this redraw operate on
+        # terrain-only scene depth, so the SS projector
+        # reconstructs against the correct surface.  Skips the
+        # blue debug sphere (already painted during the first
+        # pass) and uses an isolated error-log flag so the two
+        # draws don't share state.
+        #
+        # Earlier (1.198.0) the redraw lived way down in the
+        # transparent-layer sequence, AFTER tanks had already
+        # written depth.  The SS shader's world reconstruction
+        # then lost the terrain target -- new cursor fragments
+        # reconstructed onto tank surfaces or fell outside the
+        # cube and discarded, so visually nothing changed.
+        # Moving both blocks ahead of the tank pass restored
+        # clean depth for the reconstruction.
+        if self._aim_hit_world is not None:
+            try:
+                if (self._aim_hit_kind == 'dome'
+                        and self._aim_hit_normal is not None):
+                    if (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world,
+                            self._aim_hit_normal,
+                            self.decal_shader, view, proj)
+                else:
+                    n_up = np.array([0.0, 1.0, 0.0],
+                                     dtype=np.float32)
+                    if self.terrain is not None:
+                        eps = 0.5
+                        ip  = self._aim_hit_world
+                        try:
+                            hL = float(self.terrain.sample_height(
+                                ip[0] - eps, ip[2]))
+                            hR = float(self.terrain.sample_height(
+                                ip[0] + eps, ip[2]))
+                            hD = float(self.terrain.sample_height(
+                                ip[0], ip[2] - eps))
+                            hU = float(self.terrain.sample_height(
+                                ip[0], ip[2] + eps))
+                            dyx = (hR - hL) / (2.0 * eps)
+                            dyz = (hU - hD) / (2.0 * eps)
+                            n_up = np.array(
+                                [-dyx, 1.0, -dyz],
+                                dtype=np.float32)
+                            ln = float(np.linalg.norm(n_up))
+                            if ln > 1e-6:
+                                n_up /= ln
+                        except Exception:
+                            pass
+                    if (self.aim_crosshair_ss is not None
+                            and self.ss_decal_shader is not None):
+                        _depth_tex = self._grab_scene_depth(
+                            scene_x, console_h, scene_w, scene_h)
+                        if _depth_tex:
+                            self.aim_crosshair_ss.render_single(
+                                self._aim_hit_world, n_up,
+                                self.ss_decal_shader, view, proj,
+                                _depth_tex, scene_w, scene_h,
+                                viewport_x=scene_x,
+                                viewport_y=console_h)
+                    elif (self.aim_crosshair is not None
+                            and self.decal_shader is not None):
+                        self.aim_crosshair.render(
+                            self._aim_hit_world, n_up,
+                            self.decal_shader, view, proj)
+            except Exception as _ex_aim_redraw:
+                if not getattr(self,
+                               '_aim_redraw_err_logged', False):
+                    print(f"[aim-crosshair-redraw] render "
+                          f"failed: "
+                          f"{type(_ex_aim_redraw).__name__}: "
+                          f"{_ex_aim_redraw}")
+                    self._aim_redraw_err_logged = True
+
         # Background helpers (rendered without depth test so they never clip mesh)
         glLineWidth(1.0)
         glDisable(GL_DEPTH_TEST)
@@ -18937,141 +19078,6 @@ class Viewer:
             self.fire_smoke_particles.update(self._frame_dt)
             self.fire_smoke_particles.render(
                 self.particle_shader, view, proj)
-
-        # ---- Shell-hole decal projector ----------------------------------
-        # Per Coffee 2026-05-14 ("time to add a decal projector. to
-        # where the shells hit") + Coffee 2026-05-15 ("look here at
-        # my decal projector frag and vert" -- nuTerra reference):
-        # the screen-space volumetric projector replaces the
-        # earlier flat-quad approach.  Grabs the current scene
-        # depth into a cached texture first, then draws one cube
-        # decal per active impact; the frag stage reconstructs
-        # the surface world position from the depth snapshot and
-        # clips anything outside the cube volume.  Falls back to
-        # the legacy flat-quad path when the screen-space shader
-        # didn't compile.
-        #
-        # Drawn FIRST in the transparent-layers sequence so the
-        # decals sit on the surface underneath every other alpha
-        # layer (trail smoke, muzzle smoke, fire_billboards,
-        # impact dust, muzzle flash, impact fire).
-        if self.impacts.has_alive:
-            if (self.shellhole_ss_decals is not None
-                    and self.ss_decal_shader is not None):
-                try:
-                    _depth_tex = self._grab_scene_depth(
-                        scene_x, console_h, scene_w, scene_h)
-                    if _depth_tex:
-                        self.shellhole_ss_decals.render_impacts(
-                            self.impacts.active_impacts,
-                            self.ss_decal_shader, view, proj,
-                            _depth_tex, scene_w, scene_h,
-                            viewport_x=scene_x,
-                            viewport_y=console_h)
-                except Exception as _ex_decal:
-                    if not getattr(self, '_decal_err_logged', False):
-                        print(f"[ss-decal] render failed: "
-                              f"{type(_ex_decal).__name__}: "
-                              f"{_ex_decal}")
-                        self._decal_err_logged = True
-            elif (self.shellhole_decals is not None
-                    and self.decal_shader is not None):
-                # Legacy fallback when the screen-space pipeline
-                # isn't available (shader compile failed, etc.).
-                try:
-                    self.shellhole_decals.render(
-                        self.impacts.active_impacts,
-                        self.decal_shader, view, proj)
-                except Exception as _ex_decal:
-                    if not getattr(self, '_decal_err_logged', False):
-                        print(f"[decal] render failed: "
-                              f"{type(_ex_decal).__name__}: "
-                              f"{_ex_decal}")
-                        self._decal_err_logged = True
-
-        # ---- Aim-point marker REDRAW (on top of shellhole decals) -------
-        # Per Coffee 2026-05-15 ("redraw the cursor after the
-        # shot decals are drawn.  don't move other draw of it.
-        # I need it on top and changing order will probably
-        # move loading of it and i dont want that"): the cursor
-        # is drawn a SECOND time right after the shellhole-
-        # decal pass so it sits visually on top of any impact
-        # decals on the surface.  The first draw lives ~line
-        # 18205 (right after terrain.render) and is the
-        # load-time anchor that fixed the cursor-at-startup
-        # spiral in 1.190.0 -- DO NOT MOVE that one.  This
-        # block mirrors the first draw's dome-vs-terrain
-        # branching but skips the blue debug sphere (already
-        # painted during the first pass) and uses an isolated
-        # error-log flag so the two draws don't share state.
-        #
-        # Why this works visually: the shellhole-decal pass
-        # alpha-blends onto the existing framebuffer without
-        # writing depth, so re-grabbing scene depth here
-        # returns the same Z values as the first cursor draw
-        # (= terrain only).  The cursor's SS reconstruction
-        # therefore lands on the same world point, but now
-        # paints AFTER the decal alpha layer -- so the
-        # reticle is unobscured.
-        if self._aim_hit_world is not None:
-            try:
-                if (self._aim_hit_kind == 'dome'
-                        and self._aim_hit_normal is not None):
-                    if (self.aim_crosshair is not None
-                            and self.decal_shader is not None):
-                        self.aim_crosshair.render(
-                            self._aim_hit_world,
-                            self._aim_hit_normal,
-                            self.decal_shader, view, proj)
-                else:
-                    n_up = np.array([0.0, 1.0, 0.0],
-                                     dtype=np.float32)
-                    if self.terrain is not None:
-                        eps = 0.5
-                        ip  = self._aim_hit_world
-                        try:
-                            hL = float(self.terrain.sample_height(
-                                ip[0] - eps, ip[2]))
-                            hR = float(self.terrain.sample_height(
-                                ip[0] + eps, ip[2]))
-                            hD = float(self.terrain.sample_height(
-                                ip[0], ip[2] - eps))
-                            hU = float(self.terrain.sample_height(
-                                ip[0], ip[2] + eps))
-                            dyx = (hR - hL) / (2.0 * eps)
-                            dyz = (hU - hD) / (2.0 * eps)
-                            n_up = np.array(
-                                [-dyx, 1.0, -dyz],
-                                dtype=np.float32)
-                            ln = float(np.linalg.norm(n_up))
-                            if ln > 1e-6:
-                                n_up /= ln
-                        except Exception:
-                            pass
-                    if (self.aim_crosshair_ss is not None
-                            and self.ss_decal_shader is not None):
-                        _depth_tex = self._grab_scene_depth(
-                            scene_x, console_h, scene_w, scene_h)
-                        if _depth_tex:
-                            self.aim_crosshair_ss.render_single(
-                                self._aim_hit_world, n_up,
-                                self.ss_decal_shader, view, proj,
-                                _depth_tex, scene_w, scene_h,
-                                viewport_x=scene_x,
-                                viewport_y=console_h)
-                    elif (self.aim_crosshair is not None
-                            and self.decal_shader is not None):
-                        self.aim_crosshair.render(
-                            self._aim_hit_world, n_up,
-                            self.decal_shader, view, proj)
-            except Exception as _ex_aim_redraw:
-                if not getattr(self,
-                               '_aim_redraw_err_logged', False):
-                    print(f"[aim-crosshair-redraw] render "
-                          f"failed: "
-                          f"{type(_ex_aim_redraw).__name__}: "
-                          f"{_ex_aim_redraw}")
-                    self._aim_redraw_err_logged = True
 
         # ---- Per-projectile trail smoke ---------------------------------
         # Coffee 2026-05-13 ("short smoke trail.. nearly faint" + "use

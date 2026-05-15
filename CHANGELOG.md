@@ -9,6 +9,47 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Move shellhole + cursor-redraw blocks ahead of tank render (1.199.0)
+
+Per Coffee 2026-05-15 ("no change.  Cursor needs to draw
+before tanks and other decals are drawn"): the redraw I
+added in 1.198.0 was producing no visible difference
+because by the time we reached it (way downstream in the
+transparent-layer sequence), tanks had already written
+depth and the SS projector's world reconstruction was
+reading contaminated Z values -- new cursor fragments
+snapped to tank surfaces or fell outside the cube and
+discarded.
+
+Fix: move BOTH the shellhole-decal block AND the cursor
+redraw block out of the transparent-layer sequence and
+into a slot right after the first aim-cursor block, BEFORE
+any opaque mesh pass.  The scene-depth grab at this earlier
+point holds only terrain Z, so the SS reconstruction lands
+on the correct surface for both passes.
+
+New per-frame order around the cursor:
+
+    terrain.render
+      first  cursor draw      (load-time anchor)
+      shellhole decals        (MOVED -- was downstream)
+      second cursor draw      (MOVED -- now on terrain depth)
+    background helpers (grid/axes)
+    tank meshes               (opaque -- naturally covers
+                               anything alpha-blended above
+                               at tank screen pixels)
+    other transparency layers (smoke / fire / etc.)
+
+Why this is safe: shellhole decals use `glDepthMask(GL_FALSE)`,
+so they never wrote to depth at the old position either.
+Moving them earlier doesn't lose anything -- alpha layers
+that came AFTER them (trail smoke, muzzle smoke, fire
+billboards) still draw on top via normal blending order.
+Tanks render later opaquely and depth-replace any alpha
+content at their pixels.  Visual result: shellhole decals
+still hidden behind tanks, cursor still on top of decals,
+and the cursor's SS reconstruction now actually works.
+
 ### Redraw aim cursor on top of shellhole decals (1.198.0)
 
 Per Coffee 2026-05-15 ("redraw the cursor after the shot
