@@ -1969,6 +1969,85 @@ def _build_decal_matrix(pos, normal, size_x, size_y, size_z):
     return M
 
 
+def _build_decal_matrix_surface(pos, normal, size_x, size_y, size_z):
+    """Compose a decal-cube -> world matrix oriented to the surface
+    normal (frisvad basis).  Sister function to `_build_decal_matrix`
+    above, which keeps the cube world-axis-aligned regardless of
+    the surface slope.
+
+    Use this when the decal needs to lay TANGENT to a curved or
+    arbitrarily-oriented surface (the dome, a tank hull, etc.) --
+    the cube's projection axis aligns with the surface normal so
+    the texture sits flat on the surface instead of projecting
+    straight down in world -Y.
+
+    Per Coffee 2026-05-15 ("turn depth write on for 2nd dome edge
+    hiding draw and convert cursor to draw on it using the decal
+    projection shader"): introduced to support the SS volumetric
+    cursor on dome hits.  The flat-quad path (`AimCrosshair.render`)
+    used to do this with its own inline frisvad basis -- this
+    function consolidates that math into the same place the
+    world-axis-aligned variant lives.
+
+    Basis construction (frisvad-style):
+
+        N = normalize(normal)
+        seed = world axis with smallest |N.dot(axis)|
+        T    = normalize(cross(seed, N))
+        B    = cross(N, T)
+
+        local +X axis = T   (tangent,  scaled by size_x)
+        local +Y axis = N   (normal,   scaled by size_z) -- projection
+        local +Z axis = B   (bitangent, scaled by size_y)
+
+    Compass orientation on the surface depends on the seed choice
+    (whichever world axis is least aligned with the normal).  The
+    aim cursor accepts this on dome surfaces because the player's
+    viewpoint moves with the camera; for terrain hits the
+    world-axis-aligned variant is preferred so N/E/S/W stay fixed
+    on hillsides.
+
+    Args:
+        pos     : (3,) world center of the decal.
+        normal  : (3,) surface normal.  Must be a non-zero vector;
+                  caller is responsible for handing in something
+                  meaningful (e.g., the inward sphere normal for
+                  a dome hit, or the terrain finite-difference
+                  normal for a sloped-ground hit).
+        size_x  : tangent-direction span (m).
+        size_y  : bitangent-direction span (m).
+        size_z  : projection-box thickness along the normal (m).
+
+    Returns:
+        (4, 4) float32 row-major matrix.
+    """
+    n = np.asarray(normal, dtype=np.float32)
+    nl = float(np.linalg.norm(n))
+    if nl < 1e-6:
+        n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    else:
+        n = n / nl
+    ax, ay, az = abs(float(n[0])), abs(float(n[1])), abs(float(n[2]))
+    if ax <= ay and ax <= az:
+        seed = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    elif ay <= ax and ay <= az:
+        seed = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    else:
+        seed = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    t = np.cross(seed, n)
+    t /= max(float(np.linalg.norm(t)), 1e-6)
+    b = np.cross(n, t)
+    t = t.astype(np.float32)
+    b = b.astype(np.float32)
+    # Compose: columns are scaled basis vectors; translation is `pos`.
+    M = np.eye(4, dtype=np.float32)
+    M[0:3, 0] = t * float(size_x)        # local +X = tangent
+    M[0:3, 1] = n * float(size_z)        # local +Y = normal (projection)
+    M[0:3, 2] = b * float(size_y)        # local +Z = bitangent
+    M[0:3, 3] = np.asarray(pos, dtype=np.float32)
+    return M
+
+
 class ScreenSpaceDecals:
     """Volumetric screen-space decal projector.
 
@@ -2102,10 +2181,35 @@ class ScreenSpaceDecals:
         glActiveTexture(GL_TEXTURE0)
 
     def _draw_one(self, pos, normal, age_frac, shader, view, proj,
-                   size=None, thickness=None):
+                   size=None, thickness=None,
+                   surface_aligned=False):
+        """Issue one decal draw with the cube transformed to `pos`.
+
+        Args:
+            pos             : (3,) world center.
+            normal          : (3,) surface normal.  Used only when
+                              `surface_aligned=True`; ignored
+                              otherwise (the world-axis-aligned
+                              matrix builder doesn't read it).
+            age_frac        : 0..1 -- drives u_age_frac fade.
+            shader, view, proj: from `_begin_pass`.
+            size, thickness : override `self.size` / `self.thickness`.
+            surface_aligned : when True, use the frisvad basis on
+                              `normal` so the cube's projection
+                              axis aligns with the surface normal
+                              -- needed for arbitrary surfaces
+                              (dome, tank hull, etc.).  When False
+                              (default) the cube is world-axis-
+                              aligned (terrain / ground plane
+                              decals -- keeps compass directions
+                              fixed regardless of slope).
+        """
         sz = self.size if size is None else float(size)
         th = self.thickness if thickness is None else float(thickness)
-        M = _build_decal_matrix(pos, normal, sz, sz, th)
+        if surface_aligned:
+            M = _build_decal_matrix_surface(pos, normal, sz, sz, th)
+        else:
+            M = _build_decal_matrix(pos, normal, sz, sz, th)
         mvp = (np.asarray(proj, dtype=np.float64)
                @ np.asarray(view, dtype=np.float64)
                @ M.astype(np.float64))
@@ -2153,9 +2257,36 @@ class ScreenSpaceDecals:
                        size=None, thickness=None,
                        viewport_x=0, viewport_y=0,
                        light_dir=(0.5, 1.0, 0.3),
-                       cam_pos=(0.0, 0.0, 0.0)):
+                       cam_pos=(0.0, 0.0, 0.0),
+                       surface_aligned=False):
         """Single-decal draw with age=0 and fade disabled.  For
-        the aim crosshair / one-shot debug markers."""
+        the aim crosshair / one-shot debug markers.
+
+        Args:
+            pos             : (3,) world center, or None to no-op.
+            normal          : (3,) surface normal.  Read only when
+                              `surface_aligned=True`.
+            shader          : the SS decal shader.
+            view, proj      : 4x4 row-major.
+            scene_depth_tex : GL texture id from `Viewer.
+                              _grab_scene_depth(...)`.
+            viewport_w/h    : viewport size in pixels.
+            size, thickness : override `self.size` / `self.thickness`.
+            viewport_x/y    : viewport origin in WINDOW pixels (UI
+                              panels push the 3D viewport away from
+                              (0,0)).
+            surface_aligned : when True, the cube is rotated by a
+                              frisvad basis on `normal` so its
+                              projection axis aligns with the
+                              surface.  Used for dome cursor hits
+                              (the dome's inward normal varies by
+                              hit point).  When False (default) the
+                              cube is world-axis-aligned -- the
+                              right choice for terrain hits where
+                              the cursor's compass directions
+                              should stay fixed regardless of
+                              ground slope.
+        """
         if pos is None:
             return
         self._begin_pass(shader, view, proj,
@@ -2168,7 +2299,8 @@ class ScreenSpaceDecals:
         shader.set_float('u_fade_start', 2.0)
         self._draw_one(pos, normal, 0.0,
                         shader, view, proj,
-                        size=size, thickness=thickness)
+                        size=size, thickness=thickness,
+                        surface_aligned=surface_aligned)
         shader.set_float('u_fade_start', float(prev_fade))
         self._end_pass()
 

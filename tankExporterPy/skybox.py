@@ -734,6 +734,20 @@ class SkyDome:
         # geometry effectively spins under a stationary camera.
         # Tiny enough (0.01 deg) that the visual content is the
         # same image -- the only useful effect is the seam shift.
+        #
+        # Per Coffee 2026-05-15 ("turn depth write on for 2nd
+        # dome edge hiding draw and convert cursor to draw on
+        # it using the decal projection shader"): enable depth
+        # WRITE on this second pass so the dome's depth ends up
+        # in the buffer.  The downstream aim-cursor block uses
+        # the SS volumetric decal projector for dome hits (same
+        # path as terrain hits) and the projector's frag stage
+        # reconstructs the surface from a scene-depth snapshot
+        # -- without dome depth in the buffer the reconstruction
+        # falls into the cleared far value and discards.  Depth
+        # TEST stays off (no occlusion of the dome itself); only
+        # the write is enabled so the depth value lands.
+        glDepthMask(GL_TRUE)
         try:
             angle = math.radians(float(self.rotate_pass_deg))
             c = math.cos(angle)

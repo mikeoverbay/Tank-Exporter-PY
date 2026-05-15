@@ -9,6 +9,73 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Dome cursor via SS projector + dome depth write (1.201.0)
+
+Per Coffee 2026-05-15 ("turn depth write on for 2nd dome
+edge hiding draw and convert cursor to draw on it using
+the decal projection shader"): the cursor on dome hits now
+renders through the SAME screen-space volumetric projector
+as terrain hits, with the cube rotated to align with the
+inward sphere normal.
+
+Two coordinated changes make this work:
+
+1. **`SkyDome.render` (`tankExporterPy/skybox.py`):** the
+   second (edge-hiding) pass now has `glDepthMask(GL_TRUE)`
+   enabled.  Pass 1 stays at depth-write OFF for the
+   alpha-blended opaque seed; pass 2 writes dome depth into
+   the buffer.  Depth TEST stays off on both passes -- the
+   dome is still a pure backdrop without self-occlusion,
+   only the depth value lands so downstream SS-projector
+   passes can read it.
+
+2. **Cursor dome branch (`tankExporterPy/viewer.py`):**
+   was `aim_crosshair.render(pos, normal, decal_shader,
+   ...)` (flat quad).  Now
+   `aim_crosshair_ss.render_single(pos, normal,
+   ss_decal_shader, ..., surface_aligned=True)` with the
+   SS volumetric projector.  Flat-quad path kept as a
+   fallback when the SS shader didn't compile.
+
+Supporting plumbing in `tankExporterPy/particles.py`:
+
+* New `_build_decal_matrix_surface(pos, normal, ...)` --
+  frisvad-basis variant of `_build_decal_matrix`.  Builds
+  a cube with `local +Y = surface normal`, `local +X / +Z`
+  spanning the tangent plane.  Consolidates the same
+  frisvad math that `AimCrosshair.render` uses inline.
+* `ScreenSpaceDecals._draw_one` accepts `surface_aligned=False`
+  (default), routes between the two matrix builders.
+* `ScreenSpaceDecals.render_single` exposes the same flag.
+
+Why the dome SS path was blocked before: the SS frag stage
+samples scene depth at every cube pixel to reconstruct the
+surface point.  When the dome ran with depth-write off, the
+depth buffer at dome pixels held the cleared far value
+(1.0).  The reconstruction landed at world infinity, fell
+outside the cube's `[-0.5, 0.5]^3` volume, and discarded.
+Enabling the write on pass 2 puts dome Z into the buffer
+so the reconstruction lands on the dome surface where the
+cursor's terrain-branch logic already knows how to handle
+it.
+
+Why the cube needs surface-alignment for the dome: with the
+world-axis-aligned variant, the cube's projection axis is
+world -Y (straight down).  On the dome, the surface normal
+varies arbitrarily with the hit point (horizon hits have
+near-horizontal normals).  A straight-down projection
+would shear the cursor reticle along the dome wall.  The
+frisvad basis aligns the cube's projection axis to the
+inward sphere normal so the texture lays flat on the dome
+tangent plane at every hit point.
+
+Compass orientation: the frisvad seed is whichever world
+axis has the smallest `|N.dot(axis)|`, so the on-dome
+N/E/S/W tags reorient slightly based on the hit point.
+The flat-quad path used the same logic, so the visual is
+consistent with what shipped before -- only the
+reconstruction-vs-flat-quad pipeline changed.
+
 ### Cursor draws once after shellhole decals -- final layout (1.200.0)
 
 Per Coffee 2026-05-15 (the multi-message iteration of
