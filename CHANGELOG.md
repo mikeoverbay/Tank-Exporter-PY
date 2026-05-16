@@ -9,6 +9,30 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Half-pad phase shift to align teeth with gears (1.216.0)
+
+Per Coffee 2026-05-16 ("pitch dia is dead on.  now we need
+the radial offset to fit the teeth to the gear.  Wed need
+to slip it by 1/2 of seg section length").  Confirmed the
+1.215.0 `R + segmentsInnerThickness` shift landed the
+chain at the pitch diameter; this entry adds the
+ROTATIONAL phase shift so the pad bodies line up with the
+wheel gear teeth instead of straddling the gaps between
+them.
+
+In `viewer._compute_homie_chain_for_frame` (inner
+`_chain_for_side`), just before the `assemble_chain_arrays`
+call:
+
+    s_offset += 0.5 * seg_len
+
+The bias is applied ONLY at the pad-placement call site --
+the persisted `_track_chain_s_offset_<side>` keeps
+integrating `v * dt` cleanly without the bias baked in.
+This lets the half-pad shift be tuned later (e.g. swapped
+for `arc_dist / 2` per the user's note) without resetting
+the chain animation state.
+
 ### Add pad inner-thickness offset to wheel R (1.215.0)
 
 Per Coffee 2026-05-16 ("hell..  add pad inner offset to

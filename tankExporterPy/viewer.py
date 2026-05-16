@@ -7846,6 +7846,18 @@ class Viewer:
                          cur * (new_total / last_total))
             setattr(self, last_total_attr, float(new_total))
             s_offset = float(getattr(self, s_offset_attr, 0.0))
+            # Per Coffee 2026-05-16 ("now we need the radial
+            # offset to fit the teeth to the gear.  Wed need to
+            # slip it by 1/2 of seg section length"): constant
+            # phase shift so each pad lines up with a wheel gear
+            # tooth instead of straddling the gap between two
+            # teeth.  Half-pad shift = `seg_len / 2`.  Applied
+            # only at the pad-placement call site -- the stored
+            # cumulative `_track_chain_s_offset_<side>` keeps
+            # accumulating `v * dt` cleanly without the bias
+            # baked in, so the phase shift can be tuned later
+            # without resetting the chain animation state.
+            s_offset += 0.5 * float(seg_len)
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
