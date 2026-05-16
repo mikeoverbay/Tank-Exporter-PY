@@ -16911,6 +16911,34 @@ class Viewer:
                                 color=(255, 180, 120))
                     self.camera_mode = (
                         self.camera_mode + 1) % self._N_CAMERA_MODES
+                    if (self.camera_mode == 0
+                            and self.tank_physics is not None):
+                        # Per Coffee 2026-05-16 ("Fix free cam so
+                        # look at is center of the tanks location.
+                        # angle up 30 and back 15.  trigger for
+                        # this is in key board event for c key"):
+                        # snap the orbit camera to a fixed pose
+                        # whenever C lands the cycle on mode 0 --
+                        # look-at = tank chassis ground centre,
+                        # distance = 15 m, pitch = 30 deg above
+                        # horizon, yaw = tank yaw so the eye sits
+                        # BEHIND the tank.  Overrides any prior
+                        # orbit state (including the commander->
+                        # orbit eye / look-at snapshot a few
+                        # lines up -- the snapshot now becomes
+                        # redundant but is left in place so the
+                        # diff is small and the commander-saved
+                        # state is still useful if a future call
+                        # site wants it).
+                        tp = self.tank_physics
+                        self.camera.center = np.array([
+                            float(tp.pos[0]),
+                            float(tp.pos[1]),
+                            float(tp.pos[2]),
+                        ], dtype=np.float32)
+                        self.camera.distance = 15.0
+                        self.camera.pitch    = 30.0
+                        self.camera.yaw      = float(tp.yaw_deg)
                     if self.camera_mode == 2:
                         # Reset head rotation on entry so the
                         # seat ride starts facing forward.

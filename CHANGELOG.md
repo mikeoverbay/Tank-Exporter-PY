@@ -7,6 +7,33 @@ available at the time this file was written).
 
 ---
 
+## 2026-05-16
+
+### Free-cam snap behind tank on C-key cycle (1.209.0)
+
+Per Coffee 2026-05-16 ("Fix free cam so look at is center
+of the tanks location.  angle up 30 and back 15.  trigger
+for this is in key board event for c key"): when the C
+key cycles the camera mode and lands on mode 0 (free /
+orbit cam), the orbit camera now snaps to a fixed pose:
+
+* `center`   = `tank_physics.pos` (chassis ground centre)
+* `distance` = 15 m
+* `pitch`    = +30 deg (eye above the horizon, looking
+                       down at the tank)
+* `yaw`      = `tank_physics.yaw_deg` (eye is BEHIND
+                       the tank along its current
+                       forward direction)
+
+Skipped when no tank is loaded (`tank_physics is None`) --
+the camera then stays at whatever state it was in.
+
+The pre-existing commander->orbit eye/look-at snapshot at
+lines 16837-16906 still runs but is now redundant for the
+common 2->0 transition; left in place because the diff
+stays small and the snapshot is still useful state if a
+future caller wants it.
+
 ## 2026-05-15 (early morning)
 
 ### Chassis track-segment analyzers (1.208.0)
