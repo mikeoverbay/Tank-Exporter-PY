@@ -9,6 +9,38 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Redirect main-loop stdout to debug_log.txt (1.207.0)
+
+Per Coffee 2026-05-15 ("stop the output to the cmd window of
+debug info.  constant writing is slow"): Windows console
+writes via `print(...)` are synchronous `WriteConsole` calls
+at a few hundred KB/s; on a session with per-frame
+`print(...)` traffic (per-shot fire summary, F3 recorder
+dumps, log-once error traces) the cmd window can drop
+frames just keeping up.
+
+Fix in `Viewer.run()`: just after the splash teardown and
+just before the main loop, redirect `sys.stdout` to a
+file `debug_log.txt` (overwritten on each launch).  The
+file is line-buffered so each `print(...)` flushes its
+line to disk -- a hard kill loses at most the in-flight
+line.  Writes hit the disk at hundreds of MB/s instead of
+the cmd window's hundreds of KB/s.
+
+Startup prints (pkg pre-warm, shader compile, runtime
+extracts, Pillow / GL warm-up) still hit the cmd window
+so the user sees the boot sequence and any early failures.
+After this point, anything `print(...)`-ed in the main
+loop goes to the file.  `sys.stderr` is left untouched so
+Python tracebacks + real errors still surface visually.
+
+Opt-out: set `TEPY_NO_LOG_REDIRECT=1` in the environment
+before launch.  Useful when debugging under an IDE that
+captures stdout or when chasing a print that's missing
+from the log.
+
+`debug_log.txt` added to `.gitignore`.
+
 ### Cap zoom-out at dome radius (1.206.0)
 
 Per Coffee 2026-05-15 ("stop allowing the zoom radius to

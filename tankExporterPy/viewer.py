@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import time
 from collections import deque
 
@@ -20278,6 +20279,51 @@ class Viewer:
             except Exception as exc:
                 print(f"[viewer] splash cleanup: {exc}")
             self.splash = None
+
+        # Per Coffee 2026-05-15 ("stop the output to the cmd window
+        # of debug info. constant writing is slow"): redirect stdout
+        # to `debug_log.txt` once we enter the main loop.  Windows
+        # console writes are notoriously expensive (each `print(...)`
+        # is a synchronous WriteConsole call); funneling everything
+        # to a regular file moves the same bytes to disk at hundreds
+        # of MB/s instead of a few hundred KB/s.
+        #
+        # Startup prints (pkg pre-warm, shader compile, runtime
+        # extracts, etc.) still hit the console so the user sees
+        # the boot sequence and any early failures.  Anything
+        # printed AFTER this point -- per-frame error log-once
+        # spam, per-shot fire summary, F3 recorder dumps -- goes
+        # to the file.  `sys.stderr` is intentionally left at the
+        # console so Python tracebacks + real errors still surface
+        # visually; only the chatty `print(...)` traffic goes to
+        # the file.
+        #
+        # Set the env var `TEPY_NO_LOG_REDIRECT=1` before launch to
+        # keep stdout on the console (debugging / running under a
+        # capturing IDE that pipes stdout elsewhere already).
+        try:
+            if not os.environ.get('TEPY_NO_LOG_REDIRECT'):
+                _log_path = os.path.join(
+                    os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__))),
+                    'debug_log.txt')
+                print(f"[viewer] stdout -> {os.path.basename(_log_path)} "
+                      f"(set TEPY_NO_LOG_REDIRECT=1 to keep on console)")
+                try:
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                # line-buffered so each `print(...)` flushes its line
+                # to the file -- otherwise a hard kill loses the tail.
+                self._stdout_log_fp = open(
+                    _log_path, 'w', encoding='utf-8', buffering=1)
+                self._stdout_orig = sys.stdout
+                sys.stdout = self._stdout_log_fp
+        except Exception as _exc:
+            # Redirect failed (filesystem permissions, weird stdout
+            # state, etc.) -- log to console and proceed with the
+            # console-attached stdout.
+            print(f"[viewer] stdout redirect skipped: {_exc}")
         # Window chrome was already restored at the END of __init__
         # (after preload).  Doing it here was racing the SW_MAXIMIZE
         # below -- the WM_NCCALCSIZE message hadn't drained, so the

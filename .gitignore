@@ -138,6 +138,12 @@ math_images/
 test_runs/
 tanks_index.txt
 
+# Stdout-redirect target from `Viewer.run()` (1.207.0).  Captures
+# the per-frame / per-shot print spam that previously slowed the
+# Windows console.  Local-only; rotated every launch (opened
+# with mode='w').
+debug_log.txt
+
 # ---------------------------------------------------------------------------
 # Worktree directories created by `git worktree add` for parallel
 # Claude / branch experiments.  Each subfolder is its own branch
