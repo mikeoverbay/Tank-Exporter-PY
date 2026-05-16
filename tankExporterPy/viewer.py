@@ -1071,7 +1071,21 @@ class Viewer:
         # ignored.  Flip back to a real toggle when Phase D parks
         # the rubber-band track and the spline becomes the visible
         # default.
-        self._show_track_spline = True
+        #
+        # Per Coffee 2026-05-16 ("I want tracks and spline
+        # visibility persistent across loading.  I will need to
+        # be read after the other buttons were added when the
+        # tank was loaded"): the two virtual mesh-window rows
+        # `Track Segments` and `Track Splines` now restore their
+        # state from `_cfg` at init.  Defaults stay True so a
+        # fresh install with no cfg keys behaves like the old
+        # build.  `_populate_mesh_window` (called from every
+        # tank-load + flip + import path) reads these flags
+        # AFTER it adds the mesh rows + the two virtual rows,
+        # so the persisted state lands on the checkboxes the
+        # moment the window contents are rebuilt.
+        self._show_track_spline = bool(
+            self._cfg.get('show_track_spline', True))
         # Per Coffee 2026-05-10 ("add F8 to hide pads"): bound
         # to F8 in `handle_input` -- toggles instanced pad
         # render at the entry of `_render_track_pad_instanced`.
@@ -1079,7 +1093,8 @@ class Viewer:
         # F8 when investigating chain math (the spline
         # overlay alone is enough to verify positions without
         # the pad mesh on top).
-        self._show_track_pads = True
+        self._show_track_pads = bool(
+            self._cfg.get('show_track_pads', True))
         # Per Coffee 2026-05-11 ("we need a radial resolver for
         # for the force on the chain..  can we do all wheels if
         # the physics works?"): toggle for the position-based-
@@ -4564,13 +4579,29 @@ class Viewer:
         """Mesh-window callback: dispatch the checkbox state onto the
         right target.  Real mesh indices (>= 0) flip `Mesh.visible`;
         the two virtual sentinel indices flip the track-system
-        rendering flags.
+        rendering flags AND persist to `_cfg` so the choice
+        survives tank reload (per Coffee 2026-05-16).  Real-mesh
+        visibility intentionally does NOT persist -- those rows
+        reset each tank load to "visible" (a different tank's
+        mesh list isn't comparable to the previous one's).
         """
         if mesh_index == self._MESH_ROW_TRACK_SEGS:
             self._show_track_pads = bool(new_visible)
+            self._cfg['show_track_pads'] = bool(new_visible)
+            try:
+                _config.save(self._cfg)
+            except Exception as exc:
+                print(f"[viewer] config save "
+                      f"(show_track_pads) failed: {exc}")
             return
         if mesh_index == self._MESH_ROW_TRACK_SPLINES:
             self._show_track_spline = bool(new_visible)
+            self._cfg['show_track_spline'] = bool(new_visible)
+            try:
+                _config.save(self._cfg)
+            except Exception as exc:
+                print(f"[viewer] config save "
+                      f"(show_track_spline) failed: {exc}")
             return
         if 0 <= mesh_index < len(self.meshes):
             self.meshes[mesh_index].visible = bool(new_visible)
@@ -16640,6 +16671,17 @@ class Viewer:
                     # pads are hidden.
                     self._show_track_pads = not getattr(
                         self, '_show_track_pads', True)
+                    # Per Coffee 2026-05-16 (persistence): F8 also
+                    # writes to cfg so the choice survives across
+                    # tank loads + app restarts.  Mirrors the
+                    # mesh-window checkbox callback's persist.
+                    self._cfg['show_track_pads'] = bool(
+                        self._show_track_pads)
+                    try:
+                        _config.save(self._cfg)
+                    except Exception as exc:
+                        print(f"[viewer] config save "
+                              f"(show_track_pads) failed: {exc}")
                     self.log(
                         f"track pads: "
                         f"{'on' if self._show_track_pads else 'off'}",

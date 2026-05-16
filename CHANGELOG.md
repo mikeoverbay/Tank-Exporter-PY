@@ -9,6 +9,47 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Persist Track Segments + Track Splines visibility (1.211.0)
+
+Per Coffee 2026-05-16 ("The panel it opens, I want tracks
+and spline visibility persistent across loading.  I will
+need to be read after the other buttons were added when
+the tank was loaded").
+
+The Visible panel's two virtual rows -- `Track Segments`
+(bound to `_show_track_pads`) and `Track Splines` (bound
+to `_show_track_spline`) -- now survive tank loads and app
+restarts.
+
+Three persistence sites in `viewer.py`:
+
+* **Init** (~line 1074, 1082): both flags read from
+  `_cfg.get('show_track_spline', True)` /
+  `_cfg.get('show_track_pads', True)` at viewer
+  construction.  Default True (= old behaviour) on a fresh
+  install with no cfg keys.
+* **Mesh-window checkbox callback** (`_on_mesh_visibility_
+  toggled`, ~line 4569): when the user clicks either
+  virtual row, the new state writes to `_cfg` + `_config.
+  save(self._cfg)` lands the JSON to disk immediately.
+  Real-mesh rows still don't persist -- a different
+  tank's mesh list isn't comparable to the previous
+  one's.
+* **F8 handler** (~line 16641): the keyboard pad-toggle
+  also writes the cfg so a user who prefers F8 to the
+  panel checkbox gets the same persistence.
+
+The "read after the other buttons were added" timing the
+user called out is satisfied automatically: every code
+path that calls `_populate_mesh_window` (flip set, FBX
+import, `load_vehicle`, etc.) appends the real-mesh rows
+first, then appends the two virtual rows, then enters a
+`for row in mw.rows` loop that sets each virtual row's
+`visible` from the current flag value.  Since the flag
+is loaded once at init and never reset during a tank
+load, the post-populate sync lands the persisted state on
+the checkbox the moment the window is rebuilt.
+
 ### Rename "Meshes" toolbar button to "Visible" (1.210.0)
 
 Per Coffee 2026-05-16 ("I want the Meshes button name
