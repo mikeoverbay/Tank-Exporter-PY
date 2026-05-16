@@ -9,6 +9,66 @@ available at the time this file was written).
 
 ## 2026-05-15 (early morning)
 
+### Chassis track-segment analyzers (1.208.0)
+
+Per Coffee 2026-05-15 ("we need to start analyzing the
+chassis tracks/segments.  pl4 scrambled.  gb174 has 4
+tracks, 2 show.  many are ok" + "i want you to analyze all
+tanks.  find things that we are missing..  some tanks have
+only 1/2 of the segments needed" + "tanks_index.txt useful").
+
+Two new diagnostic tools under `cust_tools/`:
+
+* `analyze_chassis_tracks.py <tank_tag>` -- per-tank
+  deep dive.  Extracts the chassis primitives_processed
+  + visual_processed for a given tank, enumerates every
+  section whose name contains "track" or "chass", prints
+  a side-by-side table of:
+    * section name + vertex / triangle count
+    * xyz bounds for the section's bind-pose mesh
+    * the viewer's `track_*Shape*` SKIP prediction
+  Then prints which renderSets reference each track
+  group + the bone palette (filtered to Track / Susp /
+  Wheel bones).  Final block lists predicted-VISIBLE vs
+  predicted-SKIPPED section names.
+
+* `scan_all_chassis_tracks.py` -- bulk scanner that
+  walks every tank in `tanks_index.txt` (1215 tanks,
+  auto-built by TEPY on every ItemList rebuild) and
+  writes a TSV report `chassis_track_scan.txt`.  Per
+  tank: section count, L / R / unknown side counts,
+  has-Shape count, viewer-skipped count, visible count.
+  Each tank gets a list of anomaly flags:
+    * `ASYM`  -- left-side count != right-side count
+    * `HALF`  -- visible count == skipped count (the
+                  user's "1/2 of segments needed"
+                  signature)
+    * `NOTRK` -- zero track sections found
+    * `ALLSHP`-- every track section matches the SKIP
+                  rule (whole track invisible)
+    * `NOSHP` -- no section matches the SKIP rule
+                  (tracks stay visible; some tanks
+                  legitimately do this, but worth a
+                  spot check)
+    * `ERR`   -- pkg extract or parse failed
+
+  Tool ends with a "first 10 suspects per flag" preview
+  printed to stdout so the user can immediately see the
+  most likely problem tanks without sifting the TSV.
+
+  Filter switch:
+      python cust_tools/scan_all_chassis_tracks.py \
+          --filter '^Pl|^GB'
+  scans just Polish + British tanks.
+
+Output file `chassis_track_scan.txt` added to .gitignore --
+local-only, regenerable, ~1215 lines.
+
+Workflow: bulk scan first to find the anomaly clusters,
+then per-tank deep dive on each suspect to compare
+naming patterns and renderSet bindings vs a known-good
+baseline (e.g. `A83_T110E4`).
+
 ### Redirect main-loop stdout to debug_log.txt (1.207.0)
 
 Per Coffee 2026-05-15 ("stop the output to the cmd window of

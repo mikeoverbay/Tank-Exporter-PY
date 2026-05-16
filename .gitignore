@@ -137,6 +137,7 @@ gun_recoil_dump.txt
 math_images/
 test_runs/
 tanks_index.txt
+chassis_track_scan.txt
 
 # Stdout-redirect target from `Viewer.run()` (1.207.0).  Captures
 # the per-frame / per-shot print spam that previously slowed the
