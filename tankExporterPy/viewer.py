@@ -3080,12 +3080,20 @@ class Viewer:
         # supplies (Dracula orange, Solarized yellow, ...).
         _MODEL_BURNT_ORANGE = _theme.c1()
 
-        # 'Meshes' opens / closes the mesh-visibility window.  Always
-        # available; population happens at load time.
-        meshes_btn = self.ui.add_button(_('Meshes'), x, y, 70, h, active=False,
+        # 'Visible' opens / closes the mesh-visibility window.
+        # Always available; population happens at load time.
+        # Per Coffee 2026-05-16 ("I want the Meshes button name
+        # changed to Visible") the button label was renamed from
+        # 'Meshes' to 'Visible'.  Action unchanged -- still
+        # `_toggle_mesh_window` -- only the user-visible label
+        # changed.  Local variable + lookup string in the
+        # `button_groups` block lower in this file were renamed
+        # in lockstep so `btn_by_label` still finds it.
+        visible_btn = self.ui.add_button(_('Visible'), x, y, 70, h,
+                                          active=False,
                                           action=self._toggle_mesh_window)
-        meshes_btn.accent_color = _MODEL_BURNT_ORANGE
-        meshes_btn.theme_slot   = 'c1'
+        visible_btn.accent_color = _MODEL_BURNT_ORANGE
+        visible_btn.theme_slot   = 'c1'
         x       += 70 + self.ui.BUTTON_SPACING
 
 
@@ -13635,9 +13643,10 @@ class Viewer:
             panel.add_root(shells_section)
 
         # (Mesh visibility toggles live in the dedicated UIMeshWindow,
-        # opened via the "Meshes" bar button -- see _toggle_mesh_window
-        # / _populate_mesh_window below.  Keeping them out of this read-
-        # only stats panel avoids accidental clicks while reading specs.)
+        # opened via the "Visible" bar button -- see _toggle_mesh_window
+        # / _populate_mesh_window below.  Renamed from "Meshes" per
+        # Coffee 2026-05-16.  Keeping them out of this read-only
+        # stats panel avoids accidental clicks while reading specs.)
 
     # ------------------------------------------------------------------
     # Tree-view callbacks
@@ -16004,12 +16013,15 @@ class Viewer:
             ]),
             # Model tools -- act on the loaded tank rather than
             # the viewport.  Burnt-orange accent so they match
-            # Meshes / Flip / Compare.  Wireframe and Shaded are
-            # toggle-style; Meshes / Flip / Compare are action-
+            # Visible / Flip / Compare.  Wireframe and Shaded are
+            # toggle-style; Visible / Flip / Compare are action-
             # style.  Both flavours land here because they all
-            # operate on the loaded tank.
+            # operate on the loaded tank.  (Per Coffee 2026-05-16
+            # the 'Visible' button was previously labeled 'Meshes';
+            # both the registration string and this lookup key
+            # changed together.)
             (_('Model'), [
-                (_('Meshes'),    0, 1),
+                (_('Visible'),   0, 1),
                 (_('Flip'),      1, 1),
                 (_('Compare'),   2, 1),
                 (_('Wireframe'), 0, 1),

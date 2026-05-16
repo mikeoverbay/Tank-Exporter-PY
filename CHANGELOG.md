@@ -9,6 +9,35 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Rename "Meshes" toolbar button to "Visible" (1.210.0)
+
+Per Coffee 2026-05-16 ("I want the Meshes button name
+changed to Visible").  The toolbar button that opens / closes
+the mesh-visibility window is now labeled `Visible` instead
+of `Meshes`.
+
+Three call-site changes in `viewer.py`, all in lockstep so
+the registration string and the lookup keys still match:
+
+* `_build_ui` (line ~3085): `add_button(_('Meshes'), ...)` ->
+  `add_button(_('Visible'), ...)`.  Local variable renamed
+  `meshes_btn` -> `visible_btn` for clarity.
+* `button_groups` `Model` section (~line 16012): the lookup
+  key `_('Meshes')` -> `_('Visible')` so the button-by-label
+  lookup in the section-collapse map still finds it.
+* Stale "Meshes bar button" comment in the tank-stats-panel
+  builder updated to reference the new name.
+
+Action / behaviour unchanged -- the button still calls
+`_toggle_mesh_window` and the window itself is unaffected.
+
+Locale `.po` catalogs still carry `msgid "Meshes"` from
+the old key; English speakers see `Visible` via the source
+string fallback (no `msgstr "Visible"` entry needed when
+the msgid IS the user-facing text).  Non-English locales
+fall back to the source string `Visible` until catalogs
+are updated.
+
 ### Free-cam snap behind tank on C-key cycle (1.209.0)
 
 Per Coffee 2026-05-16 ("Fix free cam so look at is center
