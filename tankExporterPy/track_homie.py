@@ -410,7 +410,7 @@ def _place_pads(arcs, n_pads, s_offset=0.0):
 
 
 def build_chain_segments(bones, radii, roles, side, n_pads,
-                          seg_len):
+                          seg_len, outer_thickness=0.0):
     """Build the chain's line+arc segment list -- the heavy
     half of `compute_homie_chain`.  Per Coffee 2026-05-10
     ("once the spline shape be recycled?"): split out so a
@@ -419,15 +419,41 @@ def build_chain_segments(bones, radii, roles, side, n_pads,
     re-call `_place_pads` on the cached segments.
 
     Steps:
-      _collect_wheels -> _order_loop -> _measure_loop -> err calc
-        -> _correct_R (mutates wheel R) -> _measure_loop again
+      _collect_wheels -> _order_loop -> [pad-centre R fix]
+        -> _measure_loop
+
+    Per Coffee 2026-05-16 ("R + outer / 1/2 seg length [for]
+    inv sine of pad center radius"): each pad is a flat rigid
+    chord whose two pin axes sit on the wheel's chain-engagement
+    circle of radius `R + outer_thickness` (where `outer_thickness`
+    is the chassis XML's `<segmentsOuterThickness>` -- the pad's
+    ground-side thickness).  The pad's GEOMETRIC CENTRE (which
+    is the local origin the renderer places at the spline pad
+    position) sits INSIDE that pin circle by the chord's
+    sagitta:
+
+            theta       = asin( (seg_len / 2) / (R + outer) )
+            R_pad_centre = (R + outer) * cos( theta )
+                        =  sqrt( (R + outer)^2 - (seg_len / 2)^2 )
+
+    With the spline now riding at `R_pad_centre`, the rendered
+    pad mesh's local origin actually lands ON the chain curve
+    instead of poking outward by the sagitta amount.  Each pad
+    naturally tilts up at its two ends because the chord between
+    consecutive pad centres along the wrap subtends the same
+    angle the pad subtends -- the result is the visible
+    "pad rotates at 0, tilts up on each end" behaviour.
+
+    `outer_thickness` defaults to 0.0 (no correction = old
+    behaviour) so callers that don't yet pass it keep working
+    while the change rolls out.
 
     Returns the post-correction `arcs_3` segment list, OR
     `None` on failure (missing inputs / degenerate loop).
     The wheel objects inside arcs_3 carry their CORRECTED
     radii after this call -- re-using them is the cache's
     raison d'etre, but caller MUST treat the returned data
-    as frozen (re-running `_correct_R` on it would compound
+    as frozen (re-running the radius math would compound
     the correction).
     """
     if not bones or not radii or not roles:
@@ -437,22 +463,36 @@ def build_chain_segments(bones, radii, roles, side, n_pads,
     wheels = _collect_wheels(bones, radii, roles, side)
     if len(wheels) < 3:
         return None
+    # Pad-centre radius correction (see docstring for derivation).
+    # Apply to EVERY wheel role (sprocket / idler / road / roller)
+    # because every wheel's wrap arc carries pads whose centres
+    # need to ride on the inner circle, not the pin circle.
+    if outer_thickness and outer_thickness > 0.0:
+        half_seg = 0.5 * float(seg_len)
+        outer_t  = float(outer_thickness)
+        for w in wheels:
+            R_pin = float(w['R']) + outer_t
+            # Guard against an impossibly large pad spanning a
+            # tiny wheel -- if `half_seg >= R_pin` the chord
+            # doesn't fit on the circle, leave R unchanged so
+            # downstream tangent math still has a sane value.
+            if R_pin > half_seg > 0.0:
+                theta = math.asin(half_seg / R_pin)
+                w['R'] = float(R_pin * math.cos(theta))
     loop = _order_loop(wheels)
     if len(loop) < 3:
         return None
     # Per Coffee 2026-05-11 ("our spline diameters are off..
     # make sure the correct dia wheels are use in the proper
     # locations of our spline"): SKIP `_correct_R` so every
-    # wheel keeps its authored radius (= chassis XML's
-    # `<wheelGroup><groupRadius>` minus segmentsInnerThickness
-    # applied upstream).  The old _correct_R scaled active
-    # wheels (sprockets / rollers) up by a factor `k` to make
-    # the geometric loop length match `segmentLength *
-    # segmentsCount` exactly -- but the cost was inflated
-    # sprockets that no longer matched their authored visible
-    # diameter.  Now the chain's natural geometric length is
-    # used verbatim; pad pitch falls out as
-    # `natural_length / n_pads`, typically within 1-2 % of
+    # wheel keeps its authored radius.  The old _correct_R
+    # scaled active wheels (sprockets / rollers) up by a factor
+    # `k` to make the geometric loop length match
+    # `segmentLength * segmentsCount` exactly -- but the cost
+    # was inflated sprockets that no longer matched their
+    # authored visible diameter.  Now the chain's natural
+    # geometric length is used verbatim; pad pitch falls out
+    # as `natural_length / n_pads`, typically within 1-2 % of
     # `segmentLength`.
     arcs_3, _, _, _ = _measure_loop(loop)
     return arcs_3

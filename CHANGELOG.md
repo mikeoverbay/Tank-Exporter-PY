@@ -9,6 +9,51 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Spline radius = pad-centre, not pin-circle (1.213.0)
+
+Per Coffee 2026-05-16 ("we need the center pad r.  take that
+R + outer and 1/2 of seg length to inv sine of pad center
+radius" -> corrected to "1/2 seg L / R+ outer").
+
+Each track pad is a flat rigid chord between two pin axes
+that sit on the wheel's chain-engagement circle of radius
+`R + segmentsOuterThickness`.  The pad's GEOMETRIC CENTRE
+(= the local origin the renderer places at the spline
+position) sits INSIDE that pin circle by the chord's
+sagitta:
+
+    theta        = asin( (seg_len / 2) / (R + outer) )
+    R_pad_centre = (R + outer) * cos( theta )
+                 = sqrt( (R + outer)^2 - (seg_len / 2)^2 )
+
+Pre-1.213 the chain spline wrapped each wheel at the
+chassis XML's `<groupRadius>` verbatim -- the OUTER track-
+surface circle -- so the rendered pad centres poked outward
+beyond the actual chain by the sagitta amount.
+
+Implementation in two locked files (still under Coffee's
+2026-05-16 unlock):
+
+* `track_homie.build_chain_segments` -- new
+  `outer_thickness=0.0` arg.  Applied AFTER `_collect_wheels`,
+  BEFORE `_order_loop` so every wheel role (sprocket,
+  idler, road, return roller) gets its R replaced with the
+  pad-centre radius.  Guard against `half_seg >= R_pin`
+  (degenerate -- the pad is wider than the wheel
+  circumference can chord -- so the radius stays at its
+  authored value).
+* `viewer._compute_homie_chain_for_frame` (inner
+  `_chain_for_side`) -- reads `ci.get('segmentsOuterThickness')`
+  and passes through to `build_chain_segments`.
+
+`segmentsOuterThickness` is already parsed by
+`loaders.py:2937-2944` into `info['chassis']
+['segmentsOuterThickness']` -- no parser changes needed.
+T110E4: outer = 0.0291 m, road R ≈ 0.39 m, seg ≈ 0.13 m,
+so R_pad_centre ≈ 0.413 m (down ~5 mm from R+outer =
+0.419 m) -- enough to land each pad's centre cleanly on
+the visible chain instead of poking outward.
+
 ### Fix chain jitter + jump-on-rebuild (1.212.0)
 
 Per Coffee 2026-05-16 ("the tracks are still doing odd shit.
