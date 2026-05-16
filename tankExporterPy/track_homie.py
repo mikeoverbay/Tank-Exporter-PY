@@ -410,7 +410,7 @@ def _place_pads(arcs, n_pads, s_offset=0.0):
 
 
 def build_chain_segments(bones, radii, roles, side, n_pads,
-                          seg_len):
+                          seg_len, inner_thickness=0.0):
     """Build the chain's line+arc segment list -- the heavy
     half of `compute_homie_chain`.  Per Coffee 2026-05-10
     ("once the spline shape be recycled?"): split out so a
@@ -418,16 +418,27 @@ def build_chain_segments(bones, radii, roles, side, n_pads,
     bone positions haven't changed frame-to-frame and just
     re-call `_place_pads` on the cached segments.
 
+    Per Coffee 2026-05-16 ("add pad inner offset to R"): the
+    chain spline rides at `R + segmentsInnerThickness` -- a
+    plain additive offset that pushes the wrap circle out by
+    the pad's wheel-facing thickness so the rendered chain
+    sits at the chain-link inner face instead of the wheel
+    rim.  No sagitta / pad-centre correction (we tried that
+    in v1.213.0; reverted because it was the wrong math
+    after the user mapped out the geometry).
+    `inner_thickness` defaults to 0.0 (= old behaviour) so
+    callers that don't yet pass it keep working.
+
     Steps:
-      _collect_wheels -> _order_loop -> _measure_loop -> err calc
-        -> _correct_R (mutates wheel R) -> _measure_loop again
+      _collect_wheels -> [R += inner_thickness per wheel]
+        -> _order_loop -> _measure_loop
 
     Returns the post-correction `arcs_3` segment list, OR
     `None` on failure (missing inputs / degenerate loop).
     The wheel objects inside arcs_3 carry their CORRECTED
     radii after this call -- re-using them is the cache's
     raison d'etre, but caller MUST treat the returned data
-    as frozen (re-running `_correct_R` on it would compound
+    as frozen (re-running the shift on it would compound
     the correction).
     """
     if not bones or not radii or not roles:
@@ -437,6 +448,15 @@ def build_chain_segments(bones, radii, roles, side, n_pads,
     wheels = _collect_wheels(bones, radii, roles, side)
     if len(wheels) < 3:
         return None
+    # Per Coffee 2026-05-16: shift every wheel's wrap radius
+    # outward by the pad's inner thickness.  Applies to every
+    # role (sprocket / idler / road / roller) because every
+    # wheel in the chain's pie-arc loop has the chain wrap it
+    # at the same offset from its rim.
+    if inner_thickness and inner_thickness > 0.0:
+        inner_t = float(inner_thickness)
+        for w in wheels:
+            w['R'] = float(w['R']) + inner_t
     loop = _order_loop(wheels)
     if len(loop) < 3:
         return None

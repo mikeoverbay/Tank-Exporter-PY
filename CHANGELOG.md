@@ -9,6 +9,38 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Add pad inner-thickness offset to wheel R (1.215.0)
+
+Per Coffee 2026-05-16 ("hell..  add pad inner offset to
+R"): each wheel's chain-wrap radius is now shifted outward
+by the chassis XML's `<segmentsInnerThickness>` value.
+Plain additive offset -- no sagitta math, no asin/cos
+(that was v1.213.0, reverted in v1.214.0 as the wrong
+approach).
+
+    R_chain = R_wheel + segmentsInnerThickness
+
+* `track_homie.build_chain_segments` -- new
+  `inner_thickness=0.0` kwarg, applied per-wheel right
+  after `_collect_wheels` and BEFORE `_order_loop` so
+  every wheel role (sprocket, idler, road, return roller)
+  gets the same offset.
+* `viewer._compute_homie_chain_for_frame` -- reads
+  `ci.get('segmentsInnerThickness', 0.0)` and passes
+  through.
+
+`segmentsInnerThickness` is already parsed at
+`loaders.py:2945-2952` into
+`info['chassis']['segmentsInnerThickness']` -- no parser
+work.  T110E4 = 0.0615 m, so the spline now rides ~6 cm
+outside the bare-wheel circle, putting the chain on the
+inner face of the pad mesh instead of penetrating the
+wheel rim.
+
+`inner_thickness` defaults to 0.0 in `build_chain_segments`
+so existing tools (`cust_tools/plot_*` etc.) keep working
+unchanged.
+
 ### Revert pad-centre radius substitution (1.214.0)
 
 Per Coffee 2026-05-16 ("revert"): undo v1.213.0 which

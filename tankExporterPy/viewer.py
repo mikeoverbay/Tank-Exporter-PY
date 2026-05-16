@@ -7814,9 +7814,18 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
+                # Per Coffee 2026-05-16 ("add pad inner offset
+                # to R"): shift each wheel's wrap radius by the
+                # chassis XML's `<segmentsInnerThickness>` so
+                # the chain spline rides at the chain inner
+                # face rather than the wheel rim.  Default 0.0
+                # when the field is missing -- old behaviour.
+                inner_t = float(
+                    ci.get('segmentsInnerThickness', 0.0) or 0.0)
                 arcs_3 = _th.build_chain_segments(
                     bones, radii, roles, side,
-                    n_pads, float(seg_len))
+                    n_pads, float(seg_len),
+                    inner_thickness=inner_t)
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
