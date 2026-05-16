@@ -692,7 +692,20 @@ class TankPhysics:
         self.lateral_lean_gain           = 0.7
         self._last_a_lat_mps2            = 0.0   # telemetry
         self._last_speed_mps             = 0.0   # telemetry
-        self._last_yaw_rate_dps          = 0.0   # telemetry
+        # Per Coffee 2026-05-16 ("one is speeding up and slowing
+        # down...  jump from time to time"): the chain-animation
+        # code reads `_last_yaw_rate_dps` to differentiate per-side
+        # speeds (v_L = v - omega*b, v_R = v + omega*b).  The raw
+        # `Δyaw / dt` is noisy at low speed -- tiny yaw jitter
+        # divided by tiny dt produces a flickering omega which
+        # shows up as one track speeding up while the other slows.
+        # Field now carries an EMA-smoothed value (alpha = 0.20,
+        # 5-frame trailing average) so downstream consumers get
+        # a clean signal.  The raw per-frame value is preserved at
+        # `_last_yaw_rate_dps_raw` for any diagnostic / telemetry
+        # consumer that genuinely wants instantaneous deltas.
+        self._last_yaw_rate_dps          = 0.0   # smoothed (EMA)
+        self._last_yaw_rate_dps_raw      = 0.0   # raw Δyaw / dt
         self._target_lat_lean_roll_deg   = 0.0   # integrator offset
 
         # Per Coffee 2026-05-13 ("we are adding wheel rotations"):
@@ -1430,7 +1443,17 @@ class TankPhysics:
         self._last_a_long_mps2       = float(a_long_raw)
         self._last_speed_mps         = float(abs(signed_speed_mps))
         self._last_signed_speed_mps  = float(signed_speed_mps)
-        self._last_yaw_rate_dps      = float(yaw_rate_dps)
+        # Per Coffee 2026-05-16: smooth the yaw rate too.  Same
+        # EMA alpha (0.20) the accel signals use.  The chain-
+        # animation code reads `_last_yaw_rate_dps` to compute
+        # per-side speed -- a noisy raw value here was the
+        # primary cause of one track speeding up while the other
+        # slowed at low chassis speed.  Raw value preserved for
+        # diagnostic consumers.
+        self._last_yaw_rate_dps_raw  = float(yaw_rate_dps)
+        self._last_yaw_rate_dps      = (
+            ALPHA * float(yaw_rate_dps)
+            + (1.0 - ALPHA) * self._last_yaw_rate_dps)
 
     def _step_pose_integrator(self, dt, terrain=None):
         """Critically-damped second-order pull of the rendered pose

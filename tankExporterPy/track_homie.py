@@ -228,6 +228,57 @@ def _correct_R(loop, arcs, active, err):
     return k
 
 
+def compute_chain_total(arcs_3):
+    """Sum of all line + arc segment lengths in the closed chain.
+
+    Per Coffee 2026-05-16 ("They both jump from time to time.  It
+    looks like they jump backwards"): the wheel-position cache in
+    `viewer._chain_for_side` invalidates whenever a wheel hub moves
+    by >0.1 mm.  When that happens `arcs_3` is rebuilt and the
+    new geometry can land at a slightly different `total` chain
+    length.  Inside `_place_pads` the line
+        s_off = s_offset % total
+    means the same accumulated `s_offset` lands at a different
+    `target` when `total` changes -- every pad jumps along the
+    chain.
+
+    This helper exposes the loop-length math `_place_pads` uses
+    internally so the caller can scale its persistent `s_offset`
+    by `new_total / last_total` BEFORE the next pad-placement,
+    preserving the fractional position across the rebuild.
+
+    Args:
+        arcs_3 -- output of `_measure_loop` (the cache payload
+                  `build_chain_segments` returns).  None or
+                  empty -> returns 0.0.
+
+    Returns:
+        float -- summed length of every line + non-degenerate arc
+                 segment around the closed chain (metres).
+    """
+    if not arcs_3:
+        return 0.0
+    DEGEN_ARC_RAD = 0.005
+    total = 0.0
+    for i, entry in enumerate(arcs_3):
+        # Line segment from this wheel's exit contact to the next
+        # wheel's entry contact.
+        tt = entry.get('tangent_to_next')
+        if tt is not None:
+            total += float(np.linalg.norm(tt[1] - tt[0]))
+        # Arc segment wrapping the NEXT wheel.
+        nxt = arcs_3[(i + 1) % len(arcs_3)]
+        a_in  = nxt.get('a_in')
+        a_out = nxt.get('a_out')
+        if a_in is None or a_out is None:
+            continue
+        d = _short_arc_signed_diff(a_in, a_out)
+        if abs(d) < DEGEN_ARC_RAD:
+            continue
+        total += abs(d) * float(nxt['wheel']['R'])
+    return float(total)
+
+
 def _place_pads(arcs, n_pads, s_offset=0.0):
     """Walk the closed loop of alternating line + arc segments
     at uniform arc-length pitch.  Returns [(pos_2d, tan_2d), ...].

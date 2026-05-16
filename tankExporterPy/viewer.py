@@ -1171,6 +1171,21 @@ class Viewer:
         # for it.
         self._track_chain_s_offset_L = 0.0
         self._track_chain_s_offset_R = 0.0
+        # Per Coffee 2026-05-16 ("They both jump from time to
+        # time.  It looks like they jump backwards"): track the
+        # last frame's chain-loop total length per side.  When
+        # the chain rebuild lands a slightly different total
+        # (typical on a wheel-deflection cache invalidation),
+        # we scale `_track_chain_s_offset_<side>` by
+        # `new_total / old_total` so the pads' FRACTIONAL
+        # position around the loop stays continuous -- otherwise
+        # the `s_offset % total` line inside `_place_pads` lands
+        # at a different `target` and every pad jumps along the
+        # chain.  Zero = "no previous total" (first frame after
+        # tank load) so the scaling is skipped on the first
+        # build.
+        self._last_chain_total_L = 0.0
+        self._last_chain_total_R = 0.0
         # Per Coffee 2026-05-11 ("The Xml Files <-- bar name
         # haha"): collapsible XML-tab bar at the TOP of the
         # central viewport.  Persistent tabs (always present
@@ -7779,8 +7794,21 @@ class Viewer:
                     round(float(b[2]), 4)))
             return tuple(out)
 
-        def _chain_for_side(side, side_letter, s_offset,
-                             cache_attr):
+        def _chain_for_side(side, side_letter, s_offset_attr,
+                             cache_attr, last_total_attr):
+            """Build / retrieve the chain segments for one side
+            and place pads at the current `s_offset`.
+
+            Per Coffee 2026-05-16 (pad-jump fix): now reads /
+            writes the per-side `s_offset` attribute via name
+            (`s_offset_attr`) instead of a value arg, so when
+            the chain rebuild lands a different `total` chain
+            length we can scale the persistent offset on the
+            viewer in-place.  Without this, every rebuild
+            shifted the `s_offset % total` wrap point and the
+            pads jumped (visibly backwards when the new total
+            was shorter than the old).
+            """
             key = _wheel_pos_key(side_letter)
             cached = getattr(self, cache_attr, None)
             if cached is not None and cached[0] == key:
@@ -7793,15 +7821,35 @@ class Viewer:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
                 setattr(self, cache_attr, (key, arcs_3))
+            # Per Coffee 2026-05-16: scale the persistent
+            # `s_offset` so the FRACTIONAL position around the
+            # loop is preserved across geometry rebuilds.  Skip
+            # when last_total is zero (first frame after tank
+            # load) or when totals are within 1 um of each other
+            # (no rebuild / float noise).
+            new_total  = _th.compute_chain_total(arcs_3)
+            last_total = float(getattr(self, last_total_attr, 0.0))
+            if (last_total > 1e-6
+                    and new_total > 1e-6
+                    and abs(new_total - last_total) > 1e-6):
+                cur = float(getattr(self, s_offset_attr, 0.0))
+                setattr(self, s_offset_attr,
+                         cur * (new_total / last_total))
+            setattr(self, last_total_attr, float(new_total))
+            s_offset = float(getattr(self, s_offset_attr, 0.0))
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
         lp_L, lt_L, lh_L, la_L = _chain_for_side(
-            'left',  'L', self._track_chain_s_offset_L,
-            '_homie_arcs_cache_L')
+            'left',  'L',
+            '_track_chain_s_offset_L',
+            '_homie_arcs_cache_L',
+            '_last_chain_total_L')
         lp_R, lt_R, lh_R, la_R = _chain_for_side(
-            'right', 'R', self._track_chain_s_offset_R,
-            '_homie_arcs_cache_R')
+            'right', 'R',
+            '_track_chain_s_offset_R',
+            '_homie_arcs_cache_R',
+            '_last_chain_total_R')
         # Per Coffee 2026-05-10 ("pads follow splines well..
         # they are flipped in Z"): chassis bones are read raw
         # from the visual hierarchy and live in the un-flipped

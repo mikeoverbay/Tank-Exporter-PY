@@ -9,6 +9,73 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Fix chain jitter + jump-on-rebuild (1.212.0)
+
+Per Coffee 2026-05-16 ("the tracks are still doing odd shit.
+one is speeding up and slowing down... They both jump from
+time to time.  It looks like they jump backwards.").  Coffee
+unlocked `tank_physics.py` + `track_homie.py` for this fix.
+
+Two coordinated root causes addressed:
+
+**(1) Per-side speed jitter at low chassis speed.**
+`tank_physics._update_lateral_lean` stored `_last_yaw_rate_dps`
+as the raw `Δyaw / dt` -- no smoothing.  The chain-animation
+code in `viewer._compute_homie_chain_for_frame` reads that
+field to differentiate the per-side speeds:
+
+    v_L = v_fwd - omega * half_gauge
+    v_R = v_fwd + omega * half_gauge
+
+At low chassis speed tiny yaw oscillations divided by tiny
+`dt` produce a noisy omega -- and because the differential
+is asymmetric (one side gets `+`, the other `-`), any noise
+on omega ALWAYS reads as one track speeding up while the
+other slows.
+
+Fix: smooth `_last_yaw_rate_dps` with the same EMA (alpha =
+0.20, 5-frame trailing) the existing `_smoothed_a_lat_mps2`
+and `_smoothed_a_long_mps2` use.  Raw value preserved at
+the new `_last_yaw_rate_dps_raw` field for diagnostic
+consumers that genuinely want instantaneous deltas.  Single
+source-line change in the `_update_lateral_lean` telemetry
+block.
+
+**(2) Pad jumps on chain rebuild.**
+The wheel-position cache in `viewer._chain_for_side`
+invalidates whenever any wheel hub moves by >0.1 mm.  When
+the rebuild lands an `arcs_3` with a slightly different
+geometric length `total`, the line
+
+    s_off = s_offset % total
+
+inside `track_homie._place_pads` maps the same accumulated
+`s_offset` to a different `target` along the chain ->
+every pad jumps along the chain (visibly backwards when
+the new total is shorter).  Happens at random whenever
+suspension residuals tick past the 0.1 mm cache
+threshold.
+
+Fix: scale the persistent `s_offset` by `new_total /
+old_total` AT REBUILD TIME so the fractional position
+around the loop stays continuous.
+
+* `track_homie.py`: new `compute_chain_total(arcs_3)`
+  helper exposes the loop-length math that `_place_pads`
+  used internally.  Stateless, exact same DEGEN_ARC_RAD
+  + tangent / arc length accumulation `_place_pads`
+  applies.
+* `viewer.py`: new `_last_chain_total_L` / `_R` fields
+  on the Viewer.  `_chain_for_side` now takes the
+  `s_offset_attr` + `last_total_attr` names (instead of
+  a value), reads / writes the persistent offset via
+  `getattr` / `setattr`, scales it on every total
+  change, and updates `last_total_attr` for next frame.
+
+Both fixes are inside files that were previously locked
+(`tank_physics.py` + `track_homie.py`).  Coffee unlocked
+both with "you have my permission to unlock".
+
 ### Persist Track Segments + Track Splines visibility (1.211.0)
 
 Per Coffee 2026-05-16 ("The panel it opens, I want tracks
