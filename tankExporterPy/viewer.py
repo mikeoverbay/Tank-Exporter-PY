@@ -7814,20 +7814,9 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
-                # Per Coffee 2026-05-16 ("we need the center pad
-                # r ... R + outer  /  1/2 of seg length [for] inv
-                # sine"): pass `segmentsOuterThickness` so the
-                # chain math substitutes each wheel's spline-wrap
-                # radius with the pad-centre radius (= pin-circle
-                # cos of the half-chord-angle).  No-op when the
-                # chassis XML didn't carry the field -- old
-                # behaviour preserved.
-                outer_t = float(
-                    ci.get('segmentsOuterThickness', 0.0) or 0.0)
                 arcs_3 = _th.build_chain_segments(
                     bones, radii, roles, side,
-                    n_pads, float(seg_len),
-                    outer_thickness=outer_t)
+                    n_pads, float(seg_len))
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
