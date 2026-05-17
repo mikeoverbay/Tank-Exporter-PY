@@ -143,7 +143,98 @@ def _order_loop(wheels):
     top.sort   (key=lambda w: w['hub'][0])
     if top and bottom:
         bottom.append(top.pop(0))
-    return bottom + top
+    # Per Coffee 2026-05-16 ("W_L0 and W_L5 are below the
+    # spline"): v1.225.0's `_filter_glancing_touches` pass is
+    # DISABLED.  On tanks like Archer where the road wheels are
+    # compressed UP by suspension while corner wheels (also in
+    # the chain loop, classified as idlers in the chassis XML)
+    # stay at bind, the filter saw the road wheels as
+    # "above the chord between corner idlers" and dropped them.
+    # The chain then ran flat at the corner-idler tangent, with
+    # the actual ground-contact wheels (= the road wheels) all
+    # ignored.  Filter call removed; the fold on OVER_COMP
+    # wheels remains visible but the more common geometry is
+    # correct again.  A better fix needs ground-level awareness
+    # which homie doesn't have today.
+    loop = bottom + top
+    return loop
+
+
+def _filter_glancing_touches(loop):
+    """Drop ROAD wheels whose hub bottom sits ABOVE the bottom-
+    tangent line between their immediate neighbours in the loop.
+
+    Per Coffee 2026-05-16 ("still folding the spline on
+    depressed wheels"): when a road wheel is compressed up by
+    suspension while its neighbours stay HANGING below, the
+    homie tangent math forces the chain to glancingly wrap the
+    compressed wheel from below.  The resulting arc covers a
+    tiny rim band and produces a visible chain "fold" where
+    the line into / out of the wheel meets the arc at near-
+    180 degrees.
+
+    Physically, the chain has tension; it would lift OFF the
+    compressed wheel and run straight from the lower neighbour
+    on one side to the lower neighbour on the other.  That's
+    what this filter implements: detect wheels whose
+    `(hub.Y - R)` is above the tangent line between their
+    neighbours and drop them from the loop.
+
+    Restricted to ROAD wheels only.  Sprockets / idlers / return
+    rollers stay in regardless -- they're rigidly attached to
+    the chassis and the chain definitely wraps them.
+    Iteratively prunes until stable so a cascade of compressed
+    road wheels (multiple in a row) all drop together.
+    """
+    if len(loop) < 3:
+        return loop
+    keep = list(loop)
+    # Margin: only drop wheels that sit MORE THAN this far above
+    # the bottom-tangent line between their neighbours.  Without
+    # the margin, ANY positive deflection (= wheel at suspension
+    # CONTACT with even tiny residual_y > 0) causes a drop --
+    # which collapses the loop down to whichever wheel happens
+    # to be at the lowest point that frame.  5 cm is enough to
+    # catch wheels near or at the OVER_COMP cap (typically
+    # 10 cm) while leaving normal-driving small bumps alone.
+    GUARD = 0.05
+    safety_iters = len(keep) + 1
+    for _ in range(safety_iters):
+        n = len(keep)
+        if n < 3:
+            break
+        drop_idx = None
+        for i in range(n):
+            wB = keep[i]
+            if wB.get('role') != 'road':
+                continue
+            wA = keep[(i - 1) % n]
+            wC = keep[(i + 1) % n]
+            contacts_AC = _external_tangent_contacts(
+                wA['hub'], wA['R'], wC['hub'], wC['R'], n_side=+1)
+            if contacts_AC is None:
+                continue
+            p_A_out, p_C_in = contacts_AC
+            line_dir = p_C_in - p_A_out
+            dz = float(line_dir[0])
+            if abs(dz) < 1e-9:
+                continue
+            t = (wB['hub'][0] - p_A_out[0]) / dz
+            # Reject extrapolations outside the [0, 1] segment --
+            # `wB` isn't actually between A and C in Z then.
+            if t < -0.05 or t > 1.05:
+                continue
+            y_line = float(p_A_out[1] + t * line_dir[1])
+            b_bottom = float(wB['hub'][1] - wB['R'])
+            # B's bottom sits ABOVE the tangent line -> chain
+            # would lift OFF B.  Drop B.
+            if b_bottom > y_line + GUARD:
+                drop_idx = i
+                break
+        if drop_idx is None:
+            break
+        keep.pop(drop_idx)
+    return keep
 
 
 def _compute_pie_arcs(loop):
@@ -226,6 +317,194 @@ def _correct_R(loop, arcs, active, err):
     for w in active:
         w['R'] *= k
     return k
+
+
+def compute_tooth_phase_offset(arcs_3, tooth_syncs, side, n_pads,
+                                 k_target=0):
+    """Phase shift that aligns a pad to a sprocket tooth.
+
+    Per Coffee 2026-05-16 ("Is there any value in the tank def
+    file?"): the chassis XML's `<teethSyncs><sync>` blocks carry
+    `<startAngle>` + `<teethCount>` per drive wheel.  Tooth k on a
+    drive sprocket sits, in chassis-local bone XYZ, at::
+
+        tooth_k.y = wheel_y - R * sin(startAngle + k * 2*pi / N)
+        tooth_k.z = wheel_z - R * cos(startAngle + k * 2*pi / N)
+
+    Translated into the chain-loop's atan2(dY, dZ) angle this is::
+
+        tooth_chain_angle = startAngle + k * 2*pi / N + pi
+
+    Tooth k=0's arc-length along the closed loop is then the cumulative
+    arc-length up to the drive sprocket's arc segment plus the walk
+    from its `a_in` to `tooth_chain_angle` in the loop traversal
+    direction.  The phase offset returned is::
+
+        (arc_length_at_tooth_k0) mod pad_pitch
+
+    Adding this to the accumulating `s_offset` makes some pad land
+    exactly on tooth k=0 of the first drive sprocket on `side`.  Once
+    the chain has been moved to the pitch circle by
+    `segmentsInnerThickness` (v1.215), all other teeth + pads should
+    fall into line modulo small (1-2 %) chord-vs-arc residuals.
+
+    Replaces the v1.216 blind `0.5 * seg_len` half-pad shift that
+    happened to land close on A38 but had no tank-specific
+    grounding.
+
+    Args:
+        arcs_3       -- output of `build_chain_segments`.
+        tooth_syncs  -- chassis['tooth_syncs'] dict keyed by drive
+                        wheel bone name -> {'startAngle': float,
+                        'teethCount': int}.  Empty / None -> 0.0.
+        side         -- 'left' or 'right'.
+        n_pads       -- chassis['segmentsCount'] (= pad count;
+                        used to derive per-pad arc-length pitch).
+        k_target     -- which tooth index to align to.  Default 0
+                        (= the XML's reference tooth).  Other
+                        choices just rotate the chain by an integer
+                        multiple of `per_tooth` -- pick whatever
+                        the user finds visually pleasing.
+
+    Returns:
+        Phase shift in metres, normalized to [0, pitch).  Returns
+        0.0 when there's no usable drive sprocket on this side
+        (= same effect as no phase shift; safe fallback for tanks
+        whose chassis XML lacks `<teethSyncs>`).
+    """
+    if not arcs_3 or not tooth_syncs or n_pads <= 0:
+        return 0.0
+    side_token = 'L' if side.lower().startswith('l') else 'R'
+
+    # Rebuild segment_lens parallel to `_place_pads` so the cum
+    # indices line up.  We don't need the geometric payload --
+    # only segment lengths + a flag for "this segment is the arc
+    # on wheel X".
+    DEGEN_ARC_RAD = 0.005
+    seg_lens   = []
+    seg_arc_on = []   # per-segment: wheel name if arc, else None
+    seg_a_in   = []   # per-segment: a_in if arc, else None
+    seg_dir    = []   # per-segment: direction if arc, else 0
+    seg_R      = []   # per-segment: R if arc, else 0
+    for i, entry in enumerate(arcs_3):
+        tt = entry.get('tangent_to_next')
+        if tt is not None:
+            seg_lens.append(
+                float(np.linalg.norm(tt[1] - tt[0])))
+            seg_arc_on.append(None)
+            seg_a_in.append(None)
+            seg_dir.append(0)
+            seg_R.append(0.0)
+        nxt = arcs_3[(i + 1) % len(arcs_3)]
+        a_in  = nxt.get('a_in')
+        a_out = nxt.get('a_out')
+        if a_in is None or a_out is None:
+            continue
+        d = _short_arc_signed_diff(a_in, a_out)
+        if abs(d) < DEGEN_ARC_RAD:
+            continue
+        direction = -1 if d > 0 else +1
+        R         = float(nxt['wheel']['R'])
+        seg_lens.append(abs(d) * R)
+        seg_arc_on.append(nxt['wheel'].get('name'))
+        seg_a_in.append(float(a_in))
+        seg_dir.append(int(direction))
+        seg_R.append(R)
+
+    if not seg_lens:
+        return 0.0
+    total = sum(seg_lens)
+    if total <= 0:
+        return 0.0
+    pitch = total / float(n_pads)
+    if pitch <= 0:
+        return 0.0
+
+    cum = []
+    acc = 0.0
+    for L in seg_lens:
+        cum.append(acc)
+        acc += L
+
+    # Find a drive sprocket on `side` that has both:
+    # (a) a `<sync>` entry in tooth_syncs (directly OR by side-
+    #     mirror lookup, since most chassis XMLs declare the L
+    #     side only and the R side mirrors by reflection); and
+    # (b) a non-degenerate arc segment in the chain.
+    #
+    # When multiple drive sprockets qualify (e.g. T30 has WD_L0
+    # at the rear AND WD_L9 at the front, both with explicit
+    # teethSyncs), prefer the one whose suffix has the LOWEST
+    # numeric index -- that's the WoT convention for the rear /
+    # mechanical-drive sprocket (the one with more pronounced
+    # teeth that actually transmits engine torque).  Fall back
+    # to "first seen in chain order" when no numeric suffix can
+    # be parsed.
+    def _mirror_to_L(nm):
+        # WD_R0 -> WD_L0, Track_R3 -> Track_L3, etc.
+        return nm.replace('_R', '_L', 1)
+
+    def _trailing_int(nm):
+        i = len(nm)
+        while i > 0 and nm[i - 1].isdigit():
+            i -= 1
+        try:
+            return int(nm[i:])
+        except ValueError:
+            return None
+
+    candidates = []   # (suffix_idx_or_BIG, seg_idx, ts_name)
+    BIG = 1 << 30
+    for seg_idx, wname in enumerate(seg_arc_on):
+        if wname is None:
+            continue
+        if side_token not in wname:
+            continue
+        ts_name = None
+        if wname in tooth_syncs:
+            ts_name = wname
+        elif side_token == 'R':
+            mirror = _mirror_to_L(wname)
+            if mirror in tooth_syncs:
+                ts_name = mirror
+        if ts_name is None:
+            continue
+        idx = _trailing_int(wname)
+        candidates.append((idx if idx is not None else BIG,
+                            seg_idx, ts_name))
+    if not candidates:
+        return 0.0
+    # Prefer lowest trailing index; ties broken by chain-order.
+    candidates.sort(key=lambda t: (t[0], t[1]))
+    _, target_idx, target_ts_name = candidates[0]
+
+    a_in  = seg_a_in[target_idx]
+    drct  = seg_dir[target_idx]
+    R     = seg_R[target_idx]
+    ts    = tooth_syncs[target_ts_name]
+    sa    = float(ts['startAngle'])
+    N     = int(ts['teethCount'])
+    if N <= 0 or R <= 0:
+        return 0.0
+
+    per_tooth = 2.0 * math.pi / N
+    s_xml = sa + float(k_target) * per_tooth
+    # XML formula (-sin, -cos) -> chain atan2(dY, dZ) -> +pi shift.
+    tooth_chain_angle = s_xml + math.pi
+    # Walk from a_in toward tooth angle in the chain traversal
+    # direction.  Reduce delta into (-pi, pi] so a tooth that
+    # straddles the 2*pi seam picks the short way.
+    delta = (tooth_chain_angle - a_in) * float(drct)
+    while delta >   math.pi: delta -= 2.0 * math.pi
+    while delta <= -math.pi: delta += 2.0 * math.pi
+    local_t = R * delta
+    arc_length_at_tooth = cum[target_idx] + local_t
+    # Reduce to [0, pitch).  floor-mod handles negative
+    # `arc_length_at_tooth` cleanly (= tooth is just BEFORE the
+    # arc's a_in, still valid as a phase reference).
+    phase = arc_length_at_tooth - pitch * math.floor(
+        arc_length_at_tooth / pitch)
+    return float(phase)
 
 
 def compute_chain_total(arcs_3):

@@ -133,9 +133,13 @@ def apply_y_lift(viewer, dy):
       dy < 0 (mouse up)   -> centre.y DECREASES
                              -> visible scene shifts UP
 
-    Half the pan-XZ speed factor (0.06 vs 0.12) so Y lift feels
-    deliberate and lands precisely instead of overshooting on
-    quick vertical drags.
+    Per Coffee 2026-05-16 ("in vert mouse  nav in z only.  gummy
+    kicking in", "only when move thie look at point"): bumped
+    speed factor from 0.06 -> 0.12 so Y lift moves at the SAME
+    rate as XZ pan.  The half-speed default was meant to feel
+    "deliberate" but read as gummy / sluggish when nudging the
+    look-at vertically.  XZ pan and Y lift now share the same
+    feel; either axis lands at the same metres-per-pixel.
     """
-    speed_y = 0.01 * viewer.camera.distance * 0.06
+    speed_y = 0.01 * viewer.camera.distance * 0.12
     viewer.camera.center[1] += dy * speed_y

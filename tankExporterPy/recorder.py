@@ -38,6 +38,7 @@ drive code, so it earns its own follow-up extraction.
 The viewer fields each function reads / writes are documented at
 the top of every helper.  None of them are GL-bound.
 """
+import math
 import os
 import json
 import shutil
@@ -210,7 +211,175 @@ def build_recorder_frame(viewer, dt, t_accum_s, frame_idx,
         'state_changes_count':   int(n_state_changes),
         'frame_timers_ms':       dict(getattr(viewer, '_frame_timers_complete', {})),
         'wheels':                wheels_out,
+        'chain_focus':           _build_chain_focus_safe(viewer),
     }
+
+
+def _build_chain_focus_safe(viewer):
+    try:
+        return _build_chain_focus(viewer)
+    except Exception as _ex:
+        if not getattr(viewer, '_chain_focus_err_logged', False):
+            import traceback as _tb
+            print(f"[manual_record] chain_focus build failed: "
+                  f"{type(_ex).__name__}: {_ex}")
+            _tb.print_exc()
+            viewer._chain_focus_err_logged = True
+        return {}
+
+
+def _json_safe(obj):
+    """Recursively convert `obj` into JSON-native Python types.
+
+    Per Coffee 2026-05-16 ("says nothing saved"): the F3 save
+    silently failed because `_pending_chassis_info` carries
+    tuples of numpy arrays (`track_sag_L`, `track_sag_R`) that
+    `json.dump` doesn't know how to serialise.  The write
+    truncated mid-meta and the caught exception only logged
+    "save failed" once -- the user just saw "STOPPED (...
+    nothing saved)" and moved on.
+
+    Handles:
+        * numpy scalars  -> Python scalar
+        * numpy ndarrays -> nested list
+        * tuples         -> list (json has no tuple type)
+        * dicts          -> dict with stringified keys
+        * lists          -> list (recursed)
+        * bytes          -> latin-1 decoded string
+        * everything else passes through; if it's still
+          non-native after this pass, `json.dump` will fall
+          back to its standard TypeError, which is what we
+          want for genuinely unserialisable types.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    # numpy: scalar -> .item(); array -> .tolist().
+    if hasattr(obj, 'tolist'):
+        try:
+            return obj.tolist()
+        except Exception:
+            pass
+    if hasattr(obj, 'item'):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            return obj.decode('latin-1')
+        except Exception:
+            return repr(obj)
+    return obj
+
+
+def _build_chain_focus(viewer):
+    """Per Coffee 2026-05-16 ("F3 is bound to record.  lets
+    record the seg positions that are affected by one of the
+    bottom wheels.  maybe other info?").
+
+    Captures chain-pad context around ONE bottom wheel per side
+    so offline analysis can correlate pad motion against
+    suspension travel, wheel rotation, and the chain s_offset
+    flow.
+
+    Per Coffee 2026-05-16 ("i was on the edge again"): the
+    middle-road-wheel focus missed L-side flips when W_L1 was
+    at the cap and W_L2 was HANGING.  Now each side returns a
+    LIST of focus dicts, one per road wheel, so offline
+    analysis can scan every wheel for chain anomalies.
+
+    For each road wheel per side records:
+
+      * `wheel_name`         -- bone name (`W_L2`, etc.).
+      * `hub_chassis_yz`     -- wheel hub (Y, Z) in chassis-
+        local renderer frame (post Z-flip).
+      * `hub_R_m`            -- wheel radius from chassis XML
+        `<wheelGroups><groupRadius>` (bare rim).
+      * `wheel_angle_rad`    -- accumulated spin angle.
+      * `s_offset_m`         -- chain arc-length accumulator.
+      * `pads`               -- per-pad list of `(idx, Y, Z,
+        d_hub_m)` for every pad whose centre sits within
+        `1.5 * (R + inner_thickness)` of the hub in YZ.
+
+    Layout:
+
+        {'L': [{...W_L0...}, {...W_L1...}, ..., {...W_Ln...}],
+         'R': [{...W_R0...}, {...W_R1...}, ..., {...W_Rn...}]}
+    """
+    out = {}
+    tp = viewer.tank_physics
+    if tp is None:
+        return out
+    ci = getattr(viewer, '_pending_chassis_info', None) or {}
+    roles = ci.get('wheel_roles') or {}
+    radii_xml = ci.get('wheel_radii') or {}
+    inner_t = float(ci.get('segmentsInnerThickness') or 0.0)
+    bones_now = (getattr(viewer, '_last_homie_bones', None)
+                 or getattr(viewer, '_track_chassis_bones_bind', None))
+    if not isinstance(bones_now, dict) or not bones_now:
+        return out
+    names_road = list(getattr(tp, 'wheel_bone_names', []))
+    wheel_angles = getattr(tp, 'wheel_angles_rad', None)
+    for side_token in ('L', 'R'):
+        pos_attr = f'_last_homie_pos_{side_token}'
+        pos = getattr(viewer, pos_attr, None)
+        if pos is None or len(pos) == 0:
+            continue
+        road = roles.get(f'road_wheels_{side_token}') or []
+        if not road:
+            continue
+        s_offset = float(getattr(
+            viewer, f'_track_chain_s_offset_{side_token}', 0.0))
+        per_wheel = []
+        for wheel_name in road:
+            b = bones_now.get(wheel_name)
+            if b is None:
+                b = bones_now.get(wheel_name + '_BlendBone')
+            if b is None:
+                continue
+            hub_y = float(b[1])
+            hub_z = -float(b[2])
+            R = float(radii_xml.get(wheel_name) or 0.0)
+            if R <= 0.0:
+                continue
+            spin = 0.0
+            try:
+                ri = names_road.index(wheel_name)
+            except ValueError:
+                ri = -1
+            if (ri >= 0 and wheel_angles is not None
+                    and ri < len(wheel_angles)):
+                spin = float(wheel_angles[ri])
+            rng = 1.5 * (R + inner_t)
+            pads = []
+            for i, p in enumerate(pos):
+                dy = float(p[1]) - hub_y
+                dz = float(p[2]) - hub_z
+                d = math.sqrt(dy * dy + dz * dz)
+                if d <= rng:
+                    pads.append({
+                        'idx':   int(i),
+                        'y':     float(p[1]),
+                        'z':     float(p[2]),
+                        'd_hub': float(d),
+                    })
+            per_wheel.append({
+                'wheel_name':      wheel_name,
+                'hub_chassis_yz':  [hub_y, hub_z],
+                'hub_R_m':         R,
+                'inner_t_m':       inner_t,
+                'wheel_angle_rad': spin,
+                's_offset_m':      s_offset,
+                'n_pads_in_band':  len(pads),
+                'pads':            pads,
+            })
+        if per_wheel:
+            out[side_token] = per_wheel
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -422,9 +591,16 @@ def turn_test_save_json(viewer, reason='complete'):
     }
     ci = getattr(viewer, '_pending_chassis_info', None) or {}
     if ci:
-        meta['chassis_info_xml'] = {
-            k: (float(v) if isinstance(v, (int, float)) else v)
-            for k, v in ci.items()}
+        # Per Coffee 2026-05-16 ("says nothing saved"): some
+        # entries in `_pending_chassis_info` are tuples of
+        # numpy arrays (e.g. `track_sag_L = (zs_array,
+        # ys_array)`).  `json.dump` can't serialise numpy
+        # arrays and the write truncated mid-meta -- the
+        # recorder silently logged "nothing saved" because the
+        # save exception was caught by
+        # `manual_record_finalize`'s try/except.  Run the dict
+        # through `_json_safe` first.
+        meta['chassis_info_xml'] = _json_safe(ci)
 
     payload = {'meta': meta, 'frames': viewer._turn_test_frames}
     with open(out_path, 'w', encoding='utf-8') as fh:
@@ -618,11 +794,23 @@ def manual_record_save_json(viewer):
     }
     ci = getattr(viewer, '_pending_chassis_info', None) or {}
     if ci:
-        meta['chassis_info_xml'] = {
-            k: (float(v) if isinstance(v, (int, float)) else v)
-            for k, v in ci.items()}
+        # Per Coffee 2026-05-16 ("says nothing saved"): some
+        # entries in `_pending_chassis_info` are tuples of
+        # numpy arrays (e.g. `track_sag_L = (zs_array,
+        # ys_array)`).  `json.dump` can't serialise numpy
+        # arrays and the write truncated mid-meta -- the
+        # recorder silently logged "nothing saved" because the
+        # save exception was caught by
+        # `manual_record_finalize`'s try/except.  Run the dict
+        # through `_json_safe` first.
+        meta['chassis_info_xml'] = _json_safe(ci)
 
     payload = {'meta': meta, 'frames': viewer._manual_record_frames}
     with open(out_path, 'w', encoding='utf-8') as fh:
-        json.dump(payload, fh, indent=1)
+        # `default=_json_safe` is the safety net: anything that
+        # slipped past the meta+frame builders (= a stray numpy
+        # array deep in `chassis_info_xml` or a future field)
+        # gets converted on the fly instead of truncating the
+        # write.
+        json.dump(payload, fh, indent=1, default=_json_safe)
     return out_path

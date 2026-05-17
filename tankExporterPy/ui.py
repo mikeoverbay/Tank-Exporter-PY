@@ -35,6 +35,7 @@ import pygame
 from OpenGL.GL import *
 
 from .shaders import UIShader
+from .localization import _
 
 
 # ===========================================================================
@@ -1392,9 +1393,17 @@ class UIMeshWindow:
                 label, (220, 225, 235))
             self.rows.append(row)
         # Static title / close-glyph textures (built once, reused)
+        # Per Coffee 2026-05-16 ("rename the meshes (visibility)
+        # panel to Visible.  .MO file handles all our button,
+        # tab and panel titles"): title routes through the
+        # `_()` localization wrapper so WoT's gettext catalogs
+        # can substitute the string per active language.
+        # Matches the v1.210.0 toolbar rename ("Meshes" ->
+        # "Visible") -- panel title now matches the button
+        # that opens it.
         if self._title_tex is None:
             self._title_tex, self._title_w, self._title_h = make_tex(
-                "Meshes (visibility)", (240, 245, 255))
+                _("Visible"), (240, 245, 255))
         if self._close_tex is None:
             self._close_tex, self._close_w, self._close_h = make_tex(
                 "x", (240, 240, 245))

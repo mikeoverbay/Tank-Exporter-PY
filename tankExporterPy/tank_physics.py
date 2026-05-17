@@ -1592,6 +1592,55 @@ class TankPhysics:
             comp_needed = target_y_r - wy_r       # >0 = wheel below target
             over        = comp_needed - comp_cap  # >0 = wheel SUNK past comp_cap
             lift_needed = float(np.max(over))
+            # Per Coffee 2026-05-16 ("W_L0 and W_L5 are below the
+            # terrain"): also test the EXTRA RIGID wheels --
+            # sprockets / idlers / return rollers -- against the
+            # terrain.  These bones carry no suspension travel
+            # (= comp_cap = 0), so any sink past terrain is
+            # immediate.  Most extras (rear / front sprocket,
+            # return rollers high on the chassis) have bottoms
+            # well above ground so the check is a no-op.  On
+            # tanks like Archer that classify ground-level
+            # corner wheels (W_L0 / W_L5) as idlers, the check
+            # catches them and lifts the chassis just enough to
+            # keep them above the terrain.
+            extras = getattr(self, 'extra_rotating_hubs', None)
+            ex_radii = getattr(self, 'extra_rotating_radii', None)
+            if (extras is not None and ex_radii is not None
+                    and len(extras) > 0):
+                ex_local_h = np.column_stack([
+                    extras[:, 0], extras[:, 1], extras[:, 2],
+                    np.ones(len(extras), dtype=np.float64)])
+                ex_world_h = (m_render @ ex_local_h.T).T
+                ex_wx = ex_world_h[:, 0]
+                ex_wy = ex_world_h[:, 1]
+                ex_wz = ex_world_h[:, 2]
+                if hasattr(terrain, 'sample_heights'):
+                    ex_ty = np.asarray(
+                        terrain.sample_heights(ex_wx, ex_wz),
+                        dtype=np.float64)
+                elif hasattr(terrain, 'sample_height'):
+                    ex_ty = np.array(
+                        [float(terrain.sample_height(
+                            float(x), float(z)))
+                         for x, z in zip(ex_wx, ex_wz)],
+                        dtype=np.float64)
+                else:
+                    ex_ty = np.zeros(len(extras), dtype=np.float64)
+                # Target hub Y for each extra: terrain + own R +
+                # track_thickness + pad_lift.  Same formula as
+                # the suspended path but using the per-extra R
+                # instead of the road-wheel R.
+                ex_target_y = (
+                    ex_ty
+                    + np.asarray(ex_radii, dtype=np.float64)
+                    + self.track_thickness
+                    + float(getattr(self, 'pad_lift', 0.0)))
+                # comp_cap = 0 for rigid extras (no suspension).
+                ex_over = (ex_target_y - ex_wy) - 0.0
+                ex_lift = float(np.max(ex_over))
+                if ex_lift > lift_needed:
+                    lift_needed = ex_lift
             if lift_needed > 0.0:
                 # Lift the chassis just enough so the worst wheel
                 # exactly fits within comp_cap.  Zero vertical vel
@@ -2415,12 +2464,12 @@ class TankPhysics:
         self._extra_rot_name_to_idx = {
             nm: i for i, nm in enumerate(names) if nm}
 
-    def advance_wheel_angles(self, v_L, v_R, dt):
+    def advance_wheel_angles(self, v_L, v_R, dt, inner_thickness=0.0):
         """Advance each rotating wheel's spin angle by
-        (v_track / R) * dt.  Covers BOTH road wheels (W_<side><i>
-        bones via `self.wheels`) and any extras registered via
-        `set_extra_rotating_wheels` (sprockets / idlers /
-        rollers).
+        (v_track / R_pitch) * dt.  Covers BOTH road wheels
+        (W_<side><i> bones via `self.wheels`) and any extras
+        registered via `set_extra_rotating_wheels` (sprockets /
+        idlers / rollers).
 
         Per Coffee 2026-05-13 ("we are adding wheel rotations" +
         "rotate all wheels" + "spinning backwards").  Sign on
@@ -2428,26 +2477,44 @@ class TankPhysics:
         the chain advance direction (Coffee verified after the
         v1.118.113 first pass).
 
+        Per Coffee 2026-05-16 ("the shader that rotates each
+        wheel isn't obeying our start stop math.  The pads have
+        spring, the wheels should follow"): the chain animation
+        now wraps every wheel at the pitch circle (`R +
+        segmentsInnerThickness`) per v1.215.0, so the angular
+        rate that keeps the wheels visually locked to the pads
+        is
+
+            omega_wheel = v_chain / (R + inner_thickness)
+
+        not the old `v / R`.  Adjacent pads sliding around the
+        wheel arc at chain-flow speed `v` advance angularly at
+        `v / R_pitch` -- the wheel teeth must spin at the SAME
+        rate to keep their phase relationship with the pads.
+        Using bare R was too fast and drifted the wheels off
+        the chain over time (visible as slow rotation of the
+        wheel-vs-pad alignment, even when v_L/v_R were
+        perfectly side-differentiated).
+
         Side derived from each bone's chassis-local X sign:
         X < 0 -> left -> use v_L; X >= 0 -> right -> use v_R.
+
+        Args:
+            v_L, v_R: per-side track speeds in m/s.
+            dt:       frame delta-time in seconds.
+            inner_thickness: chassis['segmentsInnerThickness']
+                in metres.  Default 0.0 (= old behaviour, used
+                only as a safe fallback for tanks whose chassis
+                XML lacks the field).
         """
-        # Per Coffee 2026-05-13 ("radius miscalculation"): for a
-        # tracked vehicle, the wheel rolls on the CHAIN'S inner
-        # face at radius R (the bare wheel rim) -- the chain's
-        # OUTER face is what touches the ground.  With no-slip at
-        # both contacts:
-        #   omega_wheel * R = chain_speed     (no slip wheel-chain)
-        #   chain_speed     = chassis_speed   (no slip chain-ground)
-        # so omega_wheel = v / R.  `track_thickness` does NOT enter
-        # the wheel-spin rate (only relevant if the wheel rolled
-        # directly on ground, which it doesn't here).
+        inner_t = float(inner_thickness or 0.0)
 
         # ---- Road wheels --------------------------------------
         if (self.wheel_angles_rad is None
                 or len(self.wheel_angles_rad) != len(self.wheels)):
             self.wheel_angles_rad = np.zeros(
                 len(self.wheels), dtype=np.float32)
-        R_road = max(float(self.radius), 1e-3)
+        R_road = max(float(self.radius) + inner_t, 1e-3)
         for i in range(len(self.wheels)):
             x = float(self.wheels[i, 0])
             v = float(v_L) if x < 0.0 else float(v_R)
@@ -2462,7 +2529,7 @@ class TankPhysics:
             for i in range(len(self.extra_rotating_bones)):
                 x = float(hubs[i, 0])
                 v = float(v_L) if x < 0.0 else float(v_R)
-                R_i = max(float(radii[i]), 1e-3)
+                R_i = max(float(radii[i]) + inner_t, 1e-3)
                 self.extra_rotating_angles_rad[i] += (
                     -(v / R_i) * float(dt))
 

@@ -3320,11 +3320,12 @@ class Viewer:
                                                 group_id='lighting')
         # Mouse sensitivity multiplier (camera orbit + mouse aim).
         # cy2 placeholder -- final on-screen position is set in
-        # `_layout_widgets` to the row below Ambient.  Range 0.1..3.0;
-        # 1.0 = base sensitivity, 1.8 = +80% (default).
+        # `_layout_widgets` to the row below Ambient.  Range 0.1..6.0
+        # (Coffee 2026-05-16 "up max mouse speed to 6 on Mouse
+        # slider"); 1.0 = base sensitivity, 1.8 = +80% (default).
         self._mouse_sens_slider = self.ui.add_slider(
             _('Mouse'), tx, cy2, tw,
-            value=mouse_sens_init, value_max=3.0,
+            value=mouse_sens_init, value_max=6.0,
             group_id='lighting')
 
         # Smoke particle tunables (drive the smoke ParticleSystem each
@@ -4571,14 +4572,33 @@ class Viewer:
                 # Per Coffee 2026-05-11 ("un check the
                 # track_mat_r/l_skinned on the meshes visibility
                 # panel"): skinned-track ribbon meshes default
-                # to UNCHECKED.  The pad-mesh chain (Track
-                # Segments virtual row) is now the visible
-                # chain; the ribbon is on standby for any A/B
-                # the user wants to toggle on by clicking the
-                # checkbox.  Pattern matches the
+                # to UNCHECKED on tanks that ALSO have the
+                # instanced pad-mesh chain (= the new chain
+                # path).  Pattern matches the
                 # `track_<L|R>Shape*` / `track_<L|R>_Shape`
                 # primitive groups as well as their split
                 # variants (Tiger I, etc.).
+                #
+                # Per Coffee 2026-05-16 ("Move on to finding why
+                # we [are] missing some chassis tracks being
+                # missed"): the `scan_all_chassis_tracks.py`
+                # sweep flagged 850 / 1215 tanks with ALLSHP --
+                # every chassis-track section matches the
+                # ribbon SKIP pattern.  That includes a long
+                # tail of low-tier and Czech tanks whose ONLY
+                # chassis-track mesh is the ribbon (no separate
+                # pad meshes authored).  Auto-hiding the
+                # ribbon on those tanks leaves them with no
+                # visible chassis track at all -- the chain
+                # just disappears.
+                #
+                # Gate the auto-hide on whether this tank ships
+                # `track_segment_models` (= the pad-mesh
+                # references) in the chassis XML.  If present,
+                # the new pad system can stand in for the
+                # ribbon and we hide it as before.  If absent,
+                # the ribbon stays visible (no replacement
+                # available).
                 idx = row.mesh_index
                 if 0 <= idx < len(self.meshes):
                     mn = (getattr(self.meshes[idx], 'name',
@@ -4587,6 +4607,42 @@ class Viewer:
                         mn.startswith('track_')
                         and 'Shape' in mn)
                     if is_ribbon:
+                        ci_check = (getattr(
+                            self, '_pending_chassis_info', None)
+                            or {})
+                        has_pads = bool(
+                            (ci_check.get('track_segment_models')
+                             or {}).get('segmentModelLeft'))
+                        if has_pads:
+                            row.visible = False
+                            self.meshes[idx].visible = False
+                    # Per Coffee 2026-05-16 ("make all _MAT
+                    # rubber band invisible when you populate
+                    # the Visible window.. unchecked default
+                    # for rubber bands"): WoT chassis primitives
+                    # ship `track_mat_<L|R>` rubber-band meshes
+                    # alongside the skinned ribbon.  In TEPY
+                    # the instanced-pad chain + spline overlay
+                    # cover that role, so the static rubber
+                    # band shouldn't render by default.
+                    #
+                    # Per Coffee 2026-05-16 ("trank_mat_l/r is
+                    # still being created cheked on the
+                    # visivlity panel"): the rubber-band name
+                    # actually lives on `mesh.identifier`
+                    # (= the WoT material identifier shown as
+                    # the visibility row label) -- NOT on
+                    # `mesh.name` (= primitive-group name).
+                    # Check both attrs for the `_mat` substring,
+                    # case-insensitive.  Unconditional (not
+                    # gated on pad-system presence) -- the
+                    # static rubber band doesn't deform with
+                    # suspension on any tank that ships it.
+                    mn_id = (getattr(
+                        self.meshes[idx], 'identifier',
+                        '') or '')
+                    if ('_mat' in mn.lower()
+                            or '_mat' in mn_id.lower()):
                         row.visible = False
                         self.meshes[idx].visible = False
 
@@ -6939,15 +6995,42 @@ class Viewer:
                     and not getattr(self,
                                      '_show_right_track', True)):
                 continue
-            # Per Coffee 2026-05-11 ("remove any existing offset
-            # to the spline and subtract the inner thickness from
-            # all wheel dias"): the runtime pad shift is dropped
-            # -- the spline itself now rides at the chain-
-            # engagement radius (wheel R minus
-            # segmentsInnerThickness), so the pad mesh's local
-            # origin lands at the chain anchor without any
-            # further translation.
+            # Per Coffee 2026-05-16 ("2 at pads at center.. see
+            # it?", "spline looks better.. pads not so much"):
+            # for TWO-piece pads, align the segment2 mesh with
+            # the segment mesh so they share the hinge pin in
+            # world space.
+            #
+            # On two-piece pads the chassis XML carries DISTINCT
+            # `segmentOffset` and `segment2Offset` values
+            # describing where each mesh's hinge pin sits in its
+            # own local coordinate system.  With v1.215.0
+            # dropping the runtime shift, both meshes land at
+            # the SAME chain anchor in world space -- their
+            # bounding boxes coincide and we see "2 pads at
+            # center".
+            #
+            # Single-piece pads (Pudel etc.) only have ONE
+            # renderer per side; their mesh-local origin is
+            # placed at the chain anchor by v1.215.0's design
+            # and that renders correctly today.  This fix is
+            # therefore GATED on the two-piece case: shift
+            # ONLY the `segment2*` renderers by
+            # `(seg_offset - seg2_offset) * z_axis` so that the
+            # segment2 mesh's hinge aligns with the segment
+            # mesh's hinge -- both end up at
+            # `chain_anchor + seg_offset * z_axis` in world.
+            # `segment*` (and `link*`) keep the v1.215.0
+            # placement.
             xform_clamped = xform_world.copy()
+            is_two_piece = (seg_offset != 0.0
+                             and seg2_offset != 0.0)
+            if is_two_piece and 'segment2' in key:
+                delta_offset = seg_offset - seg2_offset
+                z_axis = xform_clamped[:, 0:3, 2]
+                xform_clamped[:, 0:3, 3] = (
+                    xform_clamped[:, 0:3, 3]
+                    + delta_offset * z_axis)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
@@ -7367,19 +7450,39 @@ class Viewer:
             inst = getattr(self, attr, None)
             need_seed = (inst is None
                          or inst.n_pads != len(lp))
+            # Per Coffee 2026-05-16 (sleep + study session):
+            # the homie chain wraps each wheel at `R +
+            # segmentsInnerThickness` (since v1.215.0).  PBD
+            # MUST use the same inflated radii or the chain
+            # passed to seed_from_homie sits outside the PBD
+            # wheel circles -- bind tolerance (3 mm) is dwarfed
+            # by inner_thickness (T110E4 = 6.1 cm), so on those
+            # tanks NO pads get bound.  Chain becomes entirely
+            # FREE and slowly sags / drifts under gravity until
+            # pads reach the bare-R circle, at which point the
+            # wheel push fires asymmetrically -- visible as
+            # pads "rolling over an edge" and "2 pads at center"
+            # when the kink concentrates several pads at the
+            # first inside-radius pad.
+            ci_local = (getattr(self, '_pending_chassis_info',
+                                None) or {})
+            inner_t_pbd = float(
+                ci_local.get('segmentsInnerThickness', 0.0)
+                or 0.0)
+            rs_inflated = [r + inner_t_pbd for r in rs]
             if need_seed:
                 inst = _pbd.TrackChainPBD(
                     side_x=side_x,
                     seg_len=float(seg_len),
                     n_pads=len(lp),
                     hubs_yz=hubs_yz,
-                    wheel_radii=rs,
+                    wheel_radii=rs_inflated,
                     wheel_names=names,
                     wheel_kinds=kinds)
                 inst.seed_from_homie(lp)
                 setattr(self, attr, inst)
             else:
-                inst.update_hubs(hubs_yz, rs)
+                inst.update_hubs(hubs_yz, rs_inflated)
             # Per Coffee 2026-05-13 ("PBD won't [work] as is..
             # not using the gravity vector"): project world
             # gravity into chassis-local YZ each step so the
@@ -7751,8 +7854,70 @@ class Viewer:
         # with the chain.  Sprockets / idlers / return rollers
         # are NOT yet rotated -- they need per-bone R lookups
         # that aren't in `tp.wheel_bone_names` yet.
+        # Per Coffee 2026-05-16 ("the shader that rotates each
+        # wheel isn't obeying our start stop math.  The pads have
+        # spring, the wheels should follow"): pass the same
+        # `segmentsInnerThickness` value the homie chain uses to
+        # offset each wheel's wrap radius (v1.215.0), so the
+        # wheels spin at `v / (R + inner_thickness)` -- the
+        # angular rate of pads sliding around the pitch circle.
+        # Bare-R was the old (drifting) formula; with it, wheel
+        # teeth slowly walked off the pads over time.  `ci` here
+        # is the chassis-subdict (same handle the chain code
+        # reads from above); fall back to 0.0 when the field is
+        # missing.
+        ci_inner_t = float(ci.get('segmentsInnerThickness', 0.0)
+                            or 0.0)
         try:
-            tp.advance_wheel_angles(v_L, v_R, dt)
+            tp.advance_wheel_angles(v_L, v_R, dt,
+                                     inner_thickness=ci_inner_t)
+        except Exception:
+            pass
+
+        # Per Coffee 2026-05-16 ("now, fix the segment stick as
+        # before and it it will be peachy"): build a per-frame
+        # filtered roles dict that drops road wheels whose
+        # suspension state is OVER_COMP.  The chain bridges
+        # over those wheels instead of trying to wrap them --
+        # this kills the v1.224.x "fold on depressed wheels"
+        # symptom that the v1.225.0 geometric filter tried to
+        # address but broke Archer with.
+        #
+        # Contact-state gating is the correct discriminator:
+        # an OVER_COMP wheel is one whose suspension has
+        # bottomed out, which physically means the chain has
+        # lifted off it.  CONTACT wheels (residual within
+        # comp_cap) ARE in chain contact; HANGING wheels float
+        # below the natural chain path so they're skipped by
+        # geometry anyway via the natural tangent path.  Only
+        # OVER_COMP needs explicit drop.
+        #
+        # Archer's road wheels sit at residual +0.137 with
+        # comp_cap +0.150 -> state stays CONTACT -> NOT dropped.
+        # Single-bump OVER_COMP scenarios (T49 etc.) drop the
+        # one capped wheel -> chain bridges over.
+        chain_roles = roles
+        try:
+            wheel_states = getattr(tp, 'last_wheel_state', None)
+            wheel_names  = getattr(tp, 'wheel_bone_names', None)
+            if (wheel_states is not None and wheel_names is not None
+                    and len(wheel_states) == len(wheel_names)):
+                over_comp_set = set()
+                for i, st in enumerate(wheel_states):
+                    if int(st) == 3:   # OVER_COMP
+                        nm = wheel_names[i] or ''
+                        # Strip _BlendBone suffix to match
+                        # role-list bone names.
+                        if nm.endswith('_BlendBone'):
+                            nm = nm[:-len('_BlendBone')]
+                        if nm:
+                            over_comp_set.add(nm)
+                if over_comp_set:
+                    chain_roles = dict(roles)
+                    for rkey in ('road_wheels_L', 'road_wheels_R'):
+                        orig = chain_roles.get(rkey) or []
+                        chain_roles[rkey] = [
+                            n for n in orig if n not in over_comp_set]
         except Exception:
             pass
 
@@ -7823,7 +7988,7 @@ class Viewer:
                 inner_t = float(
                     ci.get('segmentsInnerThickness', 0.0) or 0.0)
                 arcs_3 = _th.build_chain_segments(
-                    bones, radii, roles, side,
+                    bones, radii, chain_roles, side,
                     n_pads, float(seg_len),
                     inner_thickness=inner_t)
                 if arcs_3 is None:
@@ -7846,18 +8011,35 @@ class Viewer:
                          cur * (new_total / last_total))
             setattr(self, last_total_attr, float(new_total))
             s_offset = float(getattr(self, s_offset_attr, 0.0))
-            # Per Coffee 2026-05-16 ("now we need the radial
-            # offset to fit the teeth to the gear.  Wed need to
-            # slip it by 1/2 of seg section length"): constant
-            # phase shift so each pad lines up with a wheel gear
-            # tooth instead of straddling the gap between two
-            # teeth.  Half-pad shift = `seg_len / 2`.  Applied
-            # only at the pad-placement call site -- the stored
-            # cumulative `_track_chain_s_offset_<side>` keeps
-            # accumulating `v * dt` cleanly without the bias
-            # baked in, so the phase shift can be tuned later
-            # without resetting the chain animation state.
-            s_offset += 0.5 * float(seg_len)
+            # Per Coffee 2026-05-16 ("Is there any value in the
+            # tank def file?"): the constant `0.5 * seg_len`
+            # half-pad shift from v1.216 was a blind guess that
+            # happened to land close on A38 but had no tank-
+            # specific grounding.  The chassis XML carries the
+            # real value -- `<teethSyncs><sync><startAngle>` per
+            # drive sprocket -- and `track_homie.
+            # compute_tooth_phase_offset` turns that into the
+            # along-chain arc-length where tooth k=0 sits, modulo
+            # pad pitch.  Adding the result to the running
+            # `s_offset` makes some pad land exactly on tooth k=0
+            # of the first drive sprocket on this side.  Falls
+            # back to 0.0 (= no phase shift) for tanks whose
+            # chassis XML lacks the `<teethSyncs>` block.  Like
+            # the old shift, this is applied ONLY at the
+            # placement call -- the stored cumulative
+            # `_track_chain_s_offset_<side>` keeps accumulating
+            # `v * dt` cleanly without the bias baked in.
+            tooth_syncs = ci.get('tooth_syncs') or {}
+            if tooth_syncs:
+                # Per Coffee 2026-05-16 ("try other direction"):
+                # subtracting the phase walks the chain backward
+                # by the same amount, landing the pad on the
+                # OTHER side of tooth k=0.  Either direction puts
+                # a pad on the lattice -- this sign matches the
+                # `cur_forward_mps * dt` accumulation sense so the
+                # animated chain stays aligned over time.
+                s_offset -= _th.compute_tooth_phase_offset(
+                    arcs_3, tooth_syncs, side, n_pads)
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
@@ -8046,6 +8228,19 @@ class Viewer:
         self._homie_onarc_L  = la_L
         self._homie_hubs_R   = lh_R
         self._homie_onarc_R  = la_R
+        # Per Coffee 2026-05-16 ("F3 is bound to record.  lets
+        # record the seg positions that are affected by one of
+        # the bottom wheels"): stash the per-frame chain pad
+        # arrays so the F3 recorder can extract focus-wheel
+        # context.  Renderer-frame (post Z-flip) coords -- same
+        # frame the visible pads use.  Also stash the live
+        # wheel bone positions (= bind + suspension residual)
+        # so the recorder sees the same hub Y the chain saw.
+        self._last_homie_pos_L = lp_L
+        self._last_homie_pos_R = lp_R
+        self._last_homie_tan_L = lt_L
+        self._last_homie_tan_R = lt_R
+        self._last_homie_bones = bones
         return lp_L, lt_L, lp_R, lt_R
 
 
@@ -17498,14 +17693,10 @@ class Viewer:
             # ---- Decide TARGET forward speed -------------------------
             # `move_speed` is already negated for TEPY's render-Z
             # convention (so `pos[2] += cyy * move_speed * dt` moves
-            # the tank in its visible-forward direction).  We compute
-            # a TARGET signed velocity for the current input set, then
-            # ramp `self._current_forward` toward it using accel /
-            # decel rates -- so W press doesn't snap to full speed,
-            # release doesn't stop instantly.
+            # the tank in its visible-forward direction).
             #
             # Auto-circle, cruise, and W want forward (full step).
-            # S wants backward (negate).  No keys = decel toward 0.
+            # S wants backward (negate).  No keys = stop.
             # WASD-style binding per Coffee 2026-05-09 -- the
             # legacy Z / X reverse keys were dropped in the same
             # change (W/S now mirror left-hand WASD; A/D handle
@@ -17518,37 +17709,31 @@ class Viewer:
             elif keys[pygame.K_s]:
                 target_forward = -move_speed
 
-            # ---- Ramp toward target ----------------------------------
-            # ACCEL: tank spools up to step speed in ~2 seconds at
-            #   default values -- a real heavy tank takes longer but
-            #   3-5 m/s^2 reads as snappy-but-not-instant on screen.
-            # DECEL: ~2x ACCEL so braking + direction reversal feel
-            #   responsive (real tanks can brake harder than they
-            #   accelerate; matches tank handling intuition).
-            DRIVE_ACCEL = 5.0    # m/s^2, spool-up
-            DRIVE_DECEL = 10.0   # m/s^2, braking + reversal
-            cur   = float(self._current_forward)
-            delta = target_forward - cur
-            # Same direction AND target larger in magnitude = accel.
-            # Opposite direction OR target smaller in magnitude = decel.
-            if (target_forward * cur >= 0.0
-                    and abs(target_forward) > abs(cur)):
-                rate = DRIVE_ACCEL
-            else:
-                rate = DRIVE_DECEL
-            step = rate * dt
-            if abs(delta) <= step:
-                cur = target_forward
-            else:
-                cur += step if delta > 0 else -step
+            # ---- Hand the speed straight to physics ------------------
+            # Per Coffee 2026-05-16 ("Tracks cant spring if the
+            # drive wheel is stopped.  slip should only be on the
+            # non drive wheels", "just remove the pad spring for
+            # accel and decel.  not real for a 100 ton tank"):
+            # the previous ACCEL / DECEL ramp on
+            # `self._current_forward` (5 m/s^2 spool-up, 10 m/s^2
+            # brake) imparted spring-like motion to the chain pads
+            # during velocity changes -- the chassis kept moving
+            # for ~1 s after a brake input as the ramp wound down,
+            # and the pads visibly drifted past where the drive
+            # sprocket said they should be.  Real 100-ton tank
+            # drivetrain has effectively zero compliance between
+            # the engine output shaft and the sprocket; once the
+            # driver lifts off the throttle the chain stops with
+            # the sprocket.  Drop the ramp and feed `target_forward`
+            # straight through.
+            #
+            # If we later model wheel slip, the SLIP should live on
+            # the road wheels (which only ROLL on the chain's inner
+            # face -- they CAN slip relative to it) rather than on
+            # the drive coupling itself.
+            cur = float(target_forward)
             self._current_forward = cur
-            # Hand the smooth ramped speed to the physics layer
-            # (negated to flip viewer's "forward = negative move_speed
-            # convention" to physics's "forward = +cur_forward_mps").
-            # Used by `_update_lateral_lean` for the centripetal /
-            # squat-dive leans -- much cleaner signal than deriving
-            # speed from chassis position deltas.
-            tp.cur_forward_mps = -float(cur)
+            tp.cur_forward_mps    = -cur
 
             # ---- Track NURB test deflection (LEFT / RIGHT arrows) ----
             # While the spline overlay is on, hold:
@@ -18444,7 +18629,25 @@ class Viewer:
         # which runs every frame regardless of whether a tank
         # has loaded.  The block fires whenever the cursor ray
         # has a target (terrain / dome).
-        if self._aim_hit_world is not None:
+        #
+        # Per Coffee 2026-05-16 ("hide the cursor if alt key is
+        # down so i can take clean screen grabs", then "curser
+        # turns back on before screen cap"): suppress the whole
+        # aim-cursor block while ALT is held AND while an alt-
+        # rect capture is pending.  The grabber queues
+        # `_pending_alt_capture` on ALT-RELEASE and consumes it
+        # AFTER this render frame -- meaning the frame whose
+        # back-buffer gets glReadPixels'd is one where ALT is
+        # already up.  Without the pending-gate we'd render the
+        # cursor for that one frame and bake it into the
+        # clipboard image.
+        _alt_held_cursor = bool(
+            pygame.key.get_mods() & pygame.KMOD_ALT)
+        _alt_pending_cap = (
+            getattr(self, '_pending_alt_capture', None) is not None)
+        if (self._aim_hit_world is not None
+                and not _alt_held_cursor
+                and not _alt_pending_cap):
             try:
                 # TERRAIN hit -> SS volumetric projector,
                 # world-axis-aligned cube (compass directions

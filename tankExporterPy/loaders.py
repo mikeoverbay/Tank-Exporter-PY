@@ -3236,9 +3236,10 @@ class VehicleXMLLoader:
                 'ground_bones_L':    [], 'ground_bones_R':    [],
             }
             wheels_el = best_chassis.find('.//wheels')
+            # Collect singular <wheel> entries first; reclassify
+            # after we've seen the <group> road-wheel sizes.
+            _singular_wheels = []   # list of (name, side, is_lead)
             if wheels_el is not None:
-                # Singular <wheel> entries: drive sprocket if
-                # <isLeading>true</isLeading>, idler otherwise.
                 for w in wheels_el.findall('wheel'):
                     nm = (w.findtext('name') or '').strip()
                     if not nm:
@@ -3251,7 +3252,12 @@ class VehicleXMLLoader:
                     if is_lead:
                         roles[f'drive_sprockets_{side}'].append(nm)
                     else:
-                        roles[f'idlers_{side}'].append(nm)
+                        # Defer non-leading singulars to the
+                        # post-pass below.  They might be idlers,
+                        # tensioners, or Archer-style ground-
+                        # level corner wheels (= road wheels in
+                        # all but XML form).
+                        _singular_wheels.append((nm, side))
                 # <group> entries: arrays of wheels expanded by
                 # template + count + optional startIndex.
                 for g in wheels_el.findall('group'):
@@ -3281,6 +3287,66 @@ class VehicleXMLLoader:
                             expanded)
                     elif template.startswith('W_'):
                         roles[f'road_wheels_{side}'].extend(expanded)
+
+            # Per Coffee 2026-05-16 ("all W_L wheels should act
+            # line the W_L0"): post-pass that resolves the
+            # singular <wheel> entries deferred above.
+            #
+            # A singular <wheel> with a W_-prefixed name SHOULD
+            # be a road wheel when its radius is comparable to
+            # the chassis's group road-wheel radius (= Archer's
+            # ground-level corner W_L0/W_L5 case).  When its
+            # radius is much SMALLER (= a tensioner / aux wheel,
+            # e.g. T30's W_L8 at R=0.150 vs road wheels at
+            # R=0.345), keep it as an idler -- those wheels
+            # don't carry suspension and don't sit at the road-
+            # wheel ground tangent.
+            #
+            # Threshold: R >= 0.7 * median(road_R).  Below that
+            # the size mismatch is too big to treat as a road
+            # wheel; above and the wheel's clearly in the road-
+            # wheel class.  When there are no group road wheels
+            # to compare against, fall back to the legacy
+            # "everything singular = idler" rule.
+            for side_token in ('L', 'R'):
+                group_road = roles.get(
+                    f'road_wheels_{side_token}', [])
+                group_rs = []
+                for _gn in group_road:
+                    _R = wheel_radii.get(_gn)
+                    if _R is None:
+                        _R = wheel_radii.get(_gn + '_BlendBone')
+                    if _R is not None:
+                        group_rs.append(float(_R))
+                if group_rs:
+                    median_R = sorted(group_rs)[len(group_rs)//2]
+                    R_threshold = 0.7 * median_R
+                else:
+                    median_R = None
+                    R_threshold = None
+                for nm, side in list(_singular_wheels):
+                    if side != side_token:
+                        continue
+                    if not (nm.startswith('W_')
+                            and not nm.startswith('WD_')):
+                        # Non-W_ named singulars stay idlers.
+                        roles[f'idlers_{side}'].append(nm)
+                        continue
+                    if R_threshold is None:
+                        # No group road wheels to compare --
+                        # legacy fallback.
+                        roles[f'idlers_{side}'].append(nm)
+                        continue
+                    R_nm = wheel_radii.get(nm)
+                    if R_nm is None:
+                        R_nm = wheel_radii.get(nm + '_BlendBone')
+                    if R_nm is None or float(R_nm) < R_threshold:
+                        # Too small to be a road wheel -- it's
+                        # a tensioner / aux.  Keep as idler.
+                        roles[f'idlers_{side}'].append(nm)
+                    else:
+                        roles[f'road_wheels_{side}'].append(nm)
+
             # Ground bones from <groundNodes>.  Format is the same
             # template + count expansion as the <wheels><group>
             # blocks.  Used to drive suspension physics.
@@ -3308,6 +3374,76 @@ class VehicleXMLLoader:
             # Always store the dict, even when partially empty,
             # so consumers can rely on the keys being present.
             info['chassis']['wheel_roles'] = roles
+
+            # ---- Drive-sprocket tooth phase (chain-pad input) --
+            # Per Coffee 2026-05-16 ("i just look at the a38 and
+            # it is close to where it needs to be, Is there any
+            # value in the tank def file?"): the chassis XML
+            # carries the authoritative tooth phase for each
+            # drive sprocket:
+            #
+            #   <teethSyncs>
+            #     <segmentSyncPivotOffset>...</segmentSyncPivotOffset>
+            #     <sync>
+            #       <name>WD_L0</name>
+            #       <startAngle>...</startAngle>     -- radians
+            #       <teethCount>15</teethCount>
+            #     </sync>
+            #     <sync>...</sync>
+            #   </teethSyncs>
+            #
+            # Tooth k = 0 sits at hub-relative offset
+            #   (delta_Y, delta_Z) = (-R*sin(startAngle),
+            #                         -R*cos(startAngle))
+            # in chassis-local bone coordinates (= the same frame
+            # the homie chain math runs in -- no Z-flip).  Adding
+            # `k * 2*pi / teethCount` walks around the sprocket
+            # tooth-by-tooth.  See docs/TRACK_PHYSICS.md for the
+            # plot_t30_spline_math.py reference that nailed this
+            # down (V_loc anchors land on tooth positions at
+            # machine precision once Z is in the correct sense).
+            #
+            # Stored as a dict keyed by wheel bone-name so the
+            # chain code can match against the same names it
+            # already pulls from `wheel_roles['drive_sprockets_L
+            # | _R']`.  Some chassis XMLs list multiple
+            # `<teethSyncs>` blocks across LODs; we take the
+            # first one found (highest-LOD), matching the
+            # convention used for track_segment_models above.
+            tooth_syncs = {}
+            ts_pivot = None
+            for ts_el in best_chassis.iter('teethSyncs'):
+                piv_txt = ts_el.findtext('segmentSyncPivotOffset')
+                if piv_txt and ts_pivot is None:
+                    try:
+                        ts_pivot = float(piv_txt.strip())
+                    except ValueError:
+                        pass
+                for s_el in ts_el.findall('sync'):
+                    nm = (s_el.findtext('name') or '').strip()
+                    sa_txt = s_el.findtext('startAngle')
+                    tc_txt = s_el.findtext('teethCount')
+                    if not nm or not sa_txt or not tc_txt:
+                        continue
+                    try:
+                        sa = float(sa_txt.strip())
+                        tc = int(tc_txt.strip())
+                    except ValueError:
+                        continue
+                    if tc <= 0:
+                        continue
+                    if nm not in tooth_syncs:
+                        tooth_syncs[nm] = {
+                            'startAngle': sa,
+                            'teethCount': tc,
+                        }
+                if tooth_syncs:
+                    break
+            if tooth_syncs:
+                info['chassis']['tooth_syncs'] = tooth_syncs
+                if ts_pivot is not None:
+                    info['chassis']['segmentSyncPivotOffset'] = (
+                        ts_pivot)
 
             # ---- Track thickness (TankPhysics input) -----------
             # Two source fields, in order of preference:

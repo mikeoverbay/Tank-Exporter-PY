@@ -361,6 +361,29 @@ class TrackChainPBD:
             # 2026-05-13), so this push-out is the ONLY thing
             # that keeps the chain from passing through them;
             # those wheels are solid objects.
+            #
+            # Per Coffee 2026-05-16 ("when we have a ground wheel
+            # under being push by the spline, we don't allow it
+            # in side the wheel radius?  That is making the
+            # segment location snap to the push back location in
+            # Y and Z..  it should only snap you Y"): for ROAD
+            # wheels (and return rollers -- both pure rollers
+            # that the chain slides past in Z, never wraps), the
+            # constraint must lift the chain VERTICALLY only.
+            # The full-radial push moved the pad in Z too, which
+            # snapped pads forward / backward along the chain
+            # whenever a road wheel hub overlapped a free pad --
+            # visible as pad jitter when the suspension
+            # compressed.  Y-only projection: solve
+            #   (target_dY)^2 + dZ^2 = R^2
+            # for target_dY, keeping dZ fixed.  Discriminant is
+            # always non-negative when pad is inside (since
+            # |pad - hub| < R implies dZ^2 < R^2).  Sprocket /
+            # idler wheels still get the full radial push (the
+            # chain WRAPS them, so Z-correction is physically
+            # part of the constraint -- a pad inside a sprocket
+            # belongs back ON the sprocket rim, not just lifted
+            # to its Y-tangent).
             diff = (self.pos[:, None, :]
                      - self.hubs[None, :, :])    # (N, W, 2)
             r    = np.linalg.norm(diff, axis=2)  # (N, W)
@@ -375,12 +398,75 @@ class TrackChainPBD:
                 pen     = penetration[pad_idx, w_idx]
                 mask    = (pen > 0.0) & free
                 if mask.any():
+                    # Per-pad worst-penetrating-wheel data.
+                    dY_w  = diff[pad_idx, w_idx, 0]
+                    dZ_w  = diff[pad_idx, w_idx, 1]
+                    R_w   = self.radii[w_idx]
+                    # Build deltas: full radial for non-road,
+                    # Y-only for road / roller.
                     push_dir = (diff[pad_idx, w_idx]
                                 / r[pad_idx, w_idx, None])
-                    self.pos[mask] += (
-                        push_dir[mask]
-                        * pen[mask, None]
-                        * self.WHEEL_PUSH_MULT)
+                    radial_delta = (push_dir
+                                     * pen[:, None]
+                                     * self.WHEEL_PUSH_MULT)
+                    # Per Coffee 2026-05-16 ("travel the chain
+                    # and watch all pad points... like it is
+                    # rolling over an edge"): the push magnitude
+                    # for road / roller pads must scale with the
+                    # PENETRATION DEPTH `pen`, not with the full
+                    # (target_dY - dY) Y correction.
+                    #
+                    # The radial branch (used for sprocket /
+                    # idler) is already pen-scaled: it computes
+                    # `delta = pen * push_dir` where push_dir is
+                    # a unit vector -> magnitude = pen.  A pad
+                    # barely inside (pen ~ 0) gets a barely-any
+                    # push; a deeply-inside pad gets a strong
+                    # push.  Smooth gradient at the wheel
+                    # boundary.
+                    #
+                    # v1.220 / v1.221.2 Y-only used the FULL
+                    # `(target_dY - dY_w)` magnitude.  For a pad
+                    # at e.g. (dY=+0.1, dZ=0.2) inside an
+                    # R=0.5 wheel: pen = 0.276 m but the Y
+                    # correction `target_dY - dY` = -0.558 m.
+                    # The push was 2x the penetration depth,
+                    # snapping the pad from above-hub to
+                    # below-hub in one shot -- visible as the
+                    # chain "rolling over an edge" as the
+                    # animation flowed pads through the wheel
+                    # boundary.
+                    #
+                    # Fix: drop the target_dY math entirely.
+                    # Push direction is locked by wheel kind
+                    # (road -> -Y, roller -> +Y); magnitude is
+                    # `pen` (matches the radial branch).  Over
+                    # PBD's 14 iterations the pad converges
+                    # smoothly to the wheel-tangent line.
+                    is_road   = np.array(
+                        [self.wheel_kinds[int(wi)] == 'road'
+                         for wi in w_idx], dtype=bool)
+                    is_roller = np.array(
+                        [self.wheel_kinds[int(wi)] == 'roller'
+                         for wi in w_idx], dtype=bool)
+                    # Sign by kind: road = -1 (down), roller = +1
+                    # (up), other = 0 (no Y-only push -- those
+                    # pads stay on the radial delta).
+                    sign_y = np.where(is_road, -1.0,
+                              np.where(is_roller, +1.0, 0.0))
+                    # Apply: start from the full radial delta
+                    # (correct for sprocket / idler).  For road /
+                    # roller pads, replace Y with `sign * pen`
+                    # and zero Z.
+                    delta = radial_delta.copy()
+                    flat_mask = is_road | is_roller
+                    if flat_mask.any():
+                        delta[flat_mask, 0] = (
+                            sign_y[flat_mask]
+                            * pen[flat_mask]
+                            * self.WHEEL_PUSH_MULT)
+                        delta[flat_mask, 1] = 0.0
+                    self.pos[mask] += delta[mask]
 
         # ---- 3. Build output ----------------------------------------
         self._prev_dt = dt
