@@ -9,6 +9,1048 @@ available at the time this file was written).
 
 ## 2026-05-16
 
+### Add `Mouse` + `Visible` to all locale catalogs (1.230.5)
+
+Per Coffee 2026-05-16 ("make sure the language pack is
+current for all tiles").  v1.230.4 wrapped the "Visible"
+panel title in `_()` and the existing v1.219.1 mouse-sens
+slider's `_("Mouse")` label was also unwrapped from the
+catalogs.  Diff: 2 msgids in code, NOT in `.po` -- non-
+English languages were silently falling back to the English
+strings.
+
+**Fix.**  New `cust_tools/add_locale_entries.py` tool:
+
+* Walks every `tankExporterPy/locale/<code>/LC_MESSAGES/
+  tepy.po`.
+* Idempotent insert / update for the new `Mouse` +
+  `Visible` msgids.
+* Translations for all 21 supported languages (en, fr, de,
+  ru, es, es_ar, pt_br, pl, cs, it, hu, bg, ro, tr, uk, ko,
+  ja, zh_cn, zh_tw, vi, th).
+* Re-runs `build_locale_mo` at the end to compile updated
+  `.po` -> `.mo`.
+
+After this pass every supported language carries the two
+new strings:
+
+| code | Mouse  | Visible   |
+|------|--------|-----------|
+| en   | Mouse  | Visible   |
+| fr   | Souris | Visible   |
+| de   | Maus   | Sichtbar  |
+| ru   | Мышь   | Видимый   |
+| ja   | マウス | 表示       |
+| zh_cn| 鼠标   | 可见       |
+| ... etc                    |
+
+Re-runnable: `python cust_tools/add_locale_entries.py`
+when new strings get added in code; the tool either
+overwrites existing entries (= rolls in updated
+translations) or appends new ones at the end with a
+section header comment.
+
+### Rename "Meshes (visibility)" panel to "Visible" (1.230.4)
+
+Per Coffee 2026-05-16 ("rename the meshes (visibility) panel
+to Visible.  .MO file handles all our button, tab and panel
+titles").  Matches the v1.210.0 toolbar rename
+("Meshes" -> "Visible") so the panel title now reads the
+same as the button that opens it.
+
+* `ui.py` now imports `_` from `tankExporterPy.localization`.
+* `UIMeshWindow.populate` builds the title texture from
+  `_("Visible")` so the WoT gettext catalogs can substitute
+  the string per active language (matches the rest of the
+  UI's localised labels).
+
+### `_MAT` check reads identifier too (1.230.3)
+
+Per Coffee 2026-05-16 ("trank_mat_l/r is still being created
+cheked on the visivlity panel").  v1.230.1 only checked
+`mesh.name` for the `_mat` substring, but the rubber-band
+identifier `track_mat_<L|R>` actually lives on
+`mesh.identifier` (= the WoT material identifier, also what
+the visibility row label uses).  `mesh.name` is the
+primitive-group name (different value).
+
+**Fix.**  Check BOTH `mesh.name` AND `mesh.identifier` for
+the `_mat` substring (case-insensitive).  If either matches,
+the row defaults to unchecked and `mesh.visible = False`.
+
+### Look-at Y-lift speed matches XZ pan (1.230.2)
+
+Per Coffee 2026-05-16 ("in vert mouse  nav in z only.
+gummy kicking in", "only when move thie look at point").
+
+`apply_y_lift` (RMB+Ctrl-drag camera look-at Y-shift) ran at
+half the XZ pan speed (factor 0.06 vs 0.12).  The half-speed
+default was meant to feel "deliberate" but actually read as
+gummy / sluggish when nudging the look-at point vertically
+on its own.  Bumped factor to 0.12 so Y lift and XZ pan
+share the same metres-per-pixel feel.
+
+### `_MAT` rubber bands default to unchecked (1.230.1)
+
+Per Coffee 2026-05-16 ("make all _MAT rubber band invisible
+when you populate the Visible window..  unchecked default
+for rubber bands").
+
+WoT chassis primitives often carry `_MAT`-suffixed sibling
+meshes (e.g. `track_R_Shape_MAT`, `track_L_skin_MAT`) --
+typically the static "rubber band" decal that rendered
+behind the deforming track in the original game.  In TEPY
+the instanced-pad chain + spline overlay already cover that
+role, so the static rubber band shouldn't render by default.
+
+**Fix.**  When the mesh-window populates, any mesh whose
+name contains `_mat` (case-insensitive) gets the row
+checkbox UNCHECKED and `mesh.visible = False`.  Per-mesh
+toggle still works so users can re-enable for A/B.
+
+Unlike v1.226.0's `track_*Shape*` rule (= gated on pad-
+system presence), the `_mat` rule is UNCONDITIONAL: the
+static rubber band doesn't deform with suspension on any
+tank that ships it, so there's never a case where it should
+render by default.
+
+### Reclassify W_-prefixed singular wheels by radius (1.230.0)
+
+Per Coffee 2026-05-16 ("all W_L wheels should act line the
+W_L0").  Archer's chassis XML lists ground-level corner
+wheels (W_L0 / W_L5) under `<wheels><wheel>` singular tags
+alongside the corner sprockets / idlers, while the inner
+road wheels (W_L1..L4) are under `<wheels><group>`.  The
+original loader bucketed every non-leading singular `<wheel>`
+as an idler -- which left Archer with road-wheel-sized,
+road-wheel-positioned corner wheels classified as idlers.
+Downstream that meant:
+
+* `tank_physics.wheels` only included W_L1..L4 (the suspended
+  ones).  Terrain settling didn't account for W_L0 / W_L5 ->
+  chassis sank past them into terrain (fixed in v1.228.0 via
+  the rigid-extras lift check).
+* The chain loop wrapped W_L0 / W_L5 at their rigid bind
+  positions and W_L1..L4 at their compressed (residual_y +0.14)
+  positions -> 14 cm asymmetry that the user saw as "spline
+  deform works at the front and rear but not in the middle".
+
+**Fix (single edit in `loaders.py`).**  Defer non-leading
+singular `<wheel>` entries to a post-pass after `<group>`
+parsing.  Each deferred wheel is reclassified::
+
+    if not nm.startswith('W_') or nm.startswith('WD_'):
+        -> idler (= legacy behaviour)
+    elif R(nm) >= 0.7 * median(group_road_wheel_R):
+        -> road_wheel
+    else:
+        -> idler (small wheel = tensioner / aux)
+
+The 0.7x threshold separates Archer's corner W_L0/L5
+(R=0.310 vs road-wheel R=0.248 -> ratio 1.25 -> reclassify
+as road wheel) from T30's W_L8 tensioner (R=0.150 vs
+road-wheel R=0.345 -> ratio 0.43 -> stays idler).
+
+Verified across 5 tanks:
+
+| tank   | before                                | after                                 |
+|--------|--------------------------------------|--------------------------------------|
+| Archer | idlers_L = WD_L0, WD_L4, W_L0, W_L5  | idlers_L = WD_L0, WD_L4              |
+|        | road_wheels_L = W_L1..L4 (4)          | road_wheels_L = W_L0..W_L5 (6)        |
+| T30    | idlers_L = W_L8                       | idlers_L = W_L8 (R=0.15 below thresh) |
+| T92    | (no singular non-leading)             | unchanged                             |
+| Pudel  | (no singular non-leading)             | unchanged                             |
+| T110E4 | (no singular non-leading)             | unchanged                             |
+
+Archer's W_L0/W_L5 now share the road-wheel pipeline:
+suspension residual, terrain check, chain-loop inclusion,
+extra rotation -- everything that already worked correctly
+for W_L1..L4.
+
+### Drop OVER_COMP road wheels from chain loop (1.229.0)
+
+Per Coffee 2026-05-16 ("now, fix the segment stick as before
+and it will be peachy").
+
+Re-introduces the segment-stick / glancing-touch bypass that
+v1.225.0 broke Archer with -- but gates it on
+**suspension state**, not geometry, so Archer's normal
+configuration is untouched.
+
+**Rule.**  Each frame, viewer builds a `chain_roles` dict by
+walking `tp.last_wheel_state`.  Any wheel with `state == 3
+(OVER_COMP)` is removed from the
+`road_wheels_{L,R}` list before the homie chain is built.
+The chain then bridges over that wheel's natural tangent
+path instead of trying to wrap it.
+
+**Why state, not geometry.**  v1.225.0 used a geometric
+heuristic ("wheel sits above chord between neighbours by
+>= 5 cm"), which broke Archer because Archer's road wheels
+at residual_y = +0.137 (within their +0.150 comp_cap, so
+state = CONTACT) looked geometrically "above chord" relative
+to the chassis-rigid corner wheels W_L0 / W_L5.  Contact
+state ignores positions entirely:
+
+* CONTACT (residual within comp_cap) -> wheel IS in chain
+  contact, keep in loop.
+* HANGING (residual at -ext_cap) -> wheel below natural
+  chain path, naturally bypassed by tangent math anyway.
+* OVER_COMP (residual at +comp_cap) -> wheel pressed
+  past its travel limit, chain has lifted off, drop.
+
+For Archer this is a no-op (road wheels stay CONTACT).  For
+T49 + similar one-wheel-bump scenarios the single OVER_COMP
+wheel is correctly dropped, chain bridges over.
+
+The chain cache (`_homie_arcs_cache_<side>`) is keyed on
+wheel bone positions which change when residuals change, so
+state transitions naturally invalidate the cache.  No
+explicit cache-key change needed.
+
+### Terrain-floor lift checks rigid extras (1.228.0)
+
+Per Coffee 2026-05-16 ("W_L0 and W_L5 are below the
+terrain").  Archer's chassis XML classifies W_L0 and W_L5 as
+idlers, so they get NO suspension and NO place in
+`tank_physics.wheels`.  The terrain-floor lift at the end of
+`_step_pose_integrator` only checked `self.wheels`, which
+means the chassis was allowed to sink past W_L0/W_L5's
+chassis-local Y without lifting -- visible as the corner
+wheels dipping below terrain.
+
+**Fix.**  Extend the terrain-floor pass to also test the
+EXTRA RIGID wheels -- `self.extra_rotating_hubs` /
+`self.extra_rotating_radii`, populated by
+`set_extra_rotating_wheels` with every sprocket / idler /
+return roller on the chassis.  Each extra uses
+`comp_cap = 0` (no suspension travel allowed), so any sink
+past terrain immediately triggers a chassis lift.
+
+For most tanks the check is a no-op: corner sprockets /
+idlers and return rollers sit well above ground level
+(hub_Y typically 0.6 -- 1.0 m), so their `target_y -
+world_y` is negative and `np.max(over)` stays dominated by
+the road wheels.  For unusual chassis like Archer with
+ground-level "idler"-classified corner wheels, the rigid
+check kicks in and lifts the chassis enough to keep W_L0/L5
+above terrain.
+
+`lift_needed` is the max across both the suspended road-
+wheel check and the rigid-extras check, so the chassis lifts
+to satisfy whichever rule needs more clearance.
+
+### Disable v1.225.0 glancing-touch filter -- bad for Archer (1.227.0)
+
+Per Coffee 2026-05-16 ("W_L0 and W_L5 are below the spline"
+on GB44_Archer, with F3 recording showing the actual chain
+running at the corner-wheel tangent level while road wheels
+were stuck above).
+
+**What went wrong with v1.225.0.**  Archer's chassis XML
+classifies FOUR L-side wheels (WD_L0, W_L0, W_L5, WD_L4) as
+idlers and only the inner FOUR (W_L1..L4) as road wheels.
+W_L0 and W_L5 are visually positioned alongside the road
+wheels (hub Y +0.36, R 0.31) but they're CHASSIS-RIGID --
+no suspension residual ever applied.  When Archer sits on
+the ground, its inner road wheels W_L1..L4 get compressed
+all the way to residual_y +0.14 (well past the comp cap),
+sticking their hubs UP to chassis-local Y +0.44.  W_L0/W_L5
+stay at bind Y +0.36.
+
+The v1.225.0 `_filter_glancing_touches` pass then walked
+the loop checking each road wheel against the chord between
+ITS NEIGHBOURS in the loop -- which for Archer are W_L0 and
+the next road wheel.  W_L0 is much lower than the compressed
+road wheels.  The chord between W_L0's bottom (Y +0.029) and
+the next road wheel's bottom (Y +0.077) is well below the
+target wheel's bottom (Y +0.171, also compressed).  Filter:
+"above chord -> drop".  All four inner road wheels got
+dropped on every frame.
+
+Chain then wrapped only WD_L0 -> W_L0 -> W_L5 -> WD_L4 ->
+return rollers, ignoring the actual ground-contact wheels.
+F3 frame 0 confirms: every road wheel reports
+`pads_in_band = 0` except W_L2 which has ONE pad at
+Y=+0.028 (= the corner-wheel tangent level, not the road-
+wheel tangent level).
+
+**Fix (revert).**  v1.227.0 removes the
+`_filter_glancing_touches` call site from `_order_loop`.
+The helper function stays in the file (= might come back
+behind a different heuristic later) but the chain math is
+now back to "wrap every wheel in the loop".
+
+Cost: the original "fold on OVER_COMP wheels" symptom from
+v1.225.0 (= chain glancing-touches a single bump wheel
+between hanging neighbours) is back.  Net behaviour matches
+v1.224.x.
+
+Why the filter approach was fundamentally wrong: homie
+operates purely on chassis-local geometry and doesn't know
+which wheels are in ground contact.  A wheel "above the
+chord" between its neighbours might be a bump in the road
+(should bypass) OR the only suspended ground-contact wheel
+of a chassis with rigid corner wheels (should wrap).  The
+filter conflates the two.  A correct heuristic needs
+contact-state input from `tank_physics.last_wheel_state`,
+which the chain-build path doesn't currently have.
+
+### Ribbon auto-hide gated on pad-system presence (1.226.0)
+
+Per Coffee 2026-05-16 ("Move on to finding why we [are]
+missing some chassis tracks being missed").
+
+**Diagnosis.**  `cust_tools/scan_all_chassis_tracks.py` had
+flagged 850 / 1215 tanks with ALLSHP -- every chassis-track
+primitive group matches the ribbon SKIP pattern
+(`name.startswith('track_') and 'Shape' in name`).  The
+pattern was an unconditional auto-hide on tank-load: every
+ribbon mesh got `visible = False` and the corresponding
+mesh-window row's checkbox unchecked.
+
+That works for tanks with the NEW instanced-pad chain (= the
+pad meshes stand in for the hidden ribbon).  But of the 1215
+tanks, only ~365 ship `<trackPair><segmentModelLeft>` pad
+references.  The other ~850 (low-tier + many Czech tanks
+with names like `track_RShape`, `track_LShape4`, etc) have
+ONLY the ribbon.  Hiding it left those tanks with NO visible
+chassis track -- the chain just disappeared.
+
+**Fix.**  Gate the auto-hide on whether
+`_pending_chassis_info['track_segment_models']
+['segmentModelLeft']` is set.  When the pad system is
+available, hide the ribbon as before.  When it's missing,
+leave the ribbon visible.  Per-mesh visibility checkbox in
+the mesh window still works either way, so users can A/B
+toggle ribbon vs pads on tanks that have both.
+
+Single edit in `viewer.py` mesh-row visibility init.
+
+### Drop glancing-touch road wheels from homie loop (1.225.0)
+
+Per Coffee 2026-05-16 ("Still folding the spline on depressed
+wheels" + the F3 chain-flip scan showing every flip event on a
+wheel at CONTACT / OVER_COMP).
+
+**Root cause.**  When a road wheel is pushed UP into chain
+space (suspension compression) while its loop-order neighbours
+sit lower, the homie chain math wraps the protruding wheel
+with tangent contacts on a tiny rim band -- a "glancing
+touch".  `_place_pads` then samples one or two pads on that
+tiny arc, and the pad just past `contact_out` projects to an
+angle around the hub that's slightly BEHIND the last on-arc
+pad.  Visually that's the chain "fold" / "stretch backwards"
+on a compressed wheel.
+
+**Physically.**  A real chain has tension; it would lift OFF
+the protruding wheel and run straight from one lower neighbour
+to the other.
+
+**Fix.**  New `_filter_glancing_touches(loop)` pass between
+`_order_loop`'s return and the downstream pie-arc compute.
+For each ROAD wheel `B` in the loop:
+
+1. Compute the bottom-tangent line between B's immediate
+   neighbours `A` and `C` (skipping B).
+2. At B's Z position, find the Y on that line.
+3. If `(B.hub.Y - B.R) > Y_line + 5 cm`, B's circle is too far
+   above the chord -- chain can't reach it.  Drop B from the
+   loop.
+
+Iterates until stable so a cascade of compressed road wheels
+all drop together.
+
+* Restricted to ROAD wheels -- sprockets / idlers / return
+  rollers stay regardless (rigidly attached, chain definitely
+  wraps them).
+* 5 cm GUARD margin chosen so normal-driving small bumps
+  (residual_y +0.01 to +0.05) leave the loop unchanged.
+  Drops kick in at moderate-to-heavy compression (residual
+  +0.07 or higher).
+
+Verified with synthetic test scenarios:
+
+| scenario                                                      | drops |
+|---------------------------------------------------------------|-------|
+| Normal driving (all residuals +0.01..+0.03)                   | none  |
+| Slight bump (one wheel +0.05, others +0.02)                   | none  |
+| Moderate bump (one wheel +0.07, others -0.03, 10 cm above)    | the bump |
+| OVER_COMP cap (one wheel +0.10, others HANGING -0.07)         | the cap'd wheel |
+| All wheels HANGING uniformly                                  | none  |
+
+### Cursor hidden through ALT-release capture too (1.224.1)
+
+Per Coffee 2026-05-16 ("curser turns back on before screen
+cap").  v1.222.1 gated the cursor on `pygame.key.get_mods()
+& KMOD_ALT`, but the rectangle screenshot QUEUES on ALT-
+release (not press) -- the frame whose back-buffer gets
+glReadPixels'd is one where ALT is already up.  Cursor
+rendered for that one frame and got baked into the
+clipboard image.
+
+**Fix.**  Suppress the cursor when EITHER ALT is held OR
+`_pending_alt_capture is not None`.  Capture queue is
+consumed AFTER render returns, so the gate stays raised
+across the exact render frame whose pixels become the
+screenshot.
+
+### chain_focus = all road wheels per side (1.224.0)
+
+Per Coffee 2026-05-16 ("i was on the edge again").  The
+v1.223.0 chain_focus only captured pads near the MIDDLE road
+wheel (`road[len(road)//2]`) -- which missed L-side flips when
+W_L1 was at the cap and the middle wheel (W_L2) was HANGING.
+
+`chain_focus[side]` is now a LIST of dicts, one per road
+wheel::
+
+    chain_focus = {
+      'L': [
+        {'wheel_name': 'W_L0', 'hub_chassis_yz': [..], 'pads': [..]},
+        {'wheel_name': 'W_L1', ...},
+        ...
+        {'wheel_name': 'W_L4', ...},
+      ],
+      'R': [...],
+    }
+
+`scan_f3_chain_flips.py` now walks every wheel per side and
+reports the per-wheel flip count.  Back-compat: old recordings
+storing a single dict per side still parse (handled as a
+1-element list).
+
+The scan output adds `flips per wheel`::
+
+    L flips per wheel: {'W_L1': 142, 'W_L3': 0, ...}
+    R flips per wheel: {'W_R2': 107}
+
+Plus the chain-flip <-> compression correlation continues to
+hold: every flip event is on a wheel with `state = CONTACT`
+or `OVER_COMP` (= positive residual_y, wheel pushed up into
+chain space).  Wheels at HANGING (residual_y at the
+extension cap, no contact) never produce flips because the
+chain doesn't wrap them.
+
+### F3 recorder JSON safety net (1.223.1)
+
+Per Coffee 2026-05-16 ("says nothing saved" + the traceback
+showing `TypeError: Object of type ndarray is not JSON
+serializable` from inside `json.dump` at meta line 740).
+
+The F3 save silently failed because `_pending_chassis_info`
+carries tuples of numpy arrays (`track_sag_L`, `track_sag_R`
+= `(zs_array, ys_array)`) that `json.dump` doesn't know how
+to serialise.  The write truncated mid-meta and the caught
+exception only logged "save failed" once -- the user just
+saw "STOPPED (... nothing saved)" and moved on.  (The bug
+was actually older than v1.223.0; chain_focus was a clean
+addition.  It's just that nobody had noticed the truncated
+files until F3 started showing the failure mode.)
+
+**Fix.**  New `_json_safe(obj)` helper in `recorder.py`
+recursively walks the dict tree converting numpy scalars
+(`.item()`), numpy arrays (`.tolist()`), tuples (-> list),
+and bytes (-> latin-1 string) to JSON-native types.
+
+Applied in two places:
+
+1. `chassis_info_xml` is run through `_json_safe(ci)` before
+   it goes into the meta dict (replaces the old isinstance
+   int/float filter that just stored everything else
+   verbatim).
+2. `json.dump(..., default=_json_safe)` -- the safety net.
+   Anything that slipped past the meta + frame builders (=
+   a stray numpy array deep in a sub-dict, or a future
+   field) gets converted on the fly instead of truncating
+   the write.
+
+Verified with a synthetic dict matching the user's
+chassis_info_xml shape: `_json_safe` and `json.dumps` with
+`default=` both produce clean JSON output.
+
+### F3 recorder captures chain-pad focus (1.223.0)
+
+Per Coffee 2026-05-16 ("F3 is bound to record.  lets record
+the seg positions that are affected by one of the bottom
+wheels.  maybe other info?").
+
+Added a `chain_focus` field to every F3-recorder frame.  Per
+side (`L` and `R`), pick the MIDDLE road wheel (= the one
+furthest from the sprocket / idler ends, most likely to show
+clean suspension dynamics under terrain bumps) and capture::
+
+    {
+        'wheel_name':       'W_L4',
+        'hub_chassis_yz':   [hub_Y, hub_Z],   # post-Z-flip frame
+        'hub_R_m':          0.345,
+        'inner_t_m':        0.0615,
+        'wheel_angle_rad':  -3.821,           # accumulated spin
+        's_offset_m':       11.74,            # chain flow accumulator
+        'n_pads_in_band':   9,
+        'pads': [
+            {'idx': 17, 'y': +0.06, 'z': -0.31, 'd_hub': 0.42},
+            {'idx': 18, 'y': +0.05, 'z': -0.18, 'd_hub': 0.41},
+            ...
+        ],
+    }
+
+Pads are filtered to those whose centre sits within
+`1.5 * (R + inner_thickness)` of the hub in YZ -- covers the
+wrapped arc + the 2-3 adjacent line pads on either side.
+
+The viewer also stashes the per-frame homie chain arrays on
+`self._last_homie_pos_L / _R` plus the live bone positions on
+`self._last_homie_bones` (= bind + suspension residual + any
+manual `_track_test_dy` bias), so the recorder sees the
+exact same hub Y the chain saw.
+
+Offline analysis: an F3 recording now lets you correlate
+chain-pad Y / Z motion against suspension travel (compare to
+the per-wheel `residual_y` already in the frame) and wheel
+rotation (`wheel_angle_rad`), to track down "pad slides
+with the wheel" or "stretch is backwards" symptoms.
+
+### Revert v1.222.2 hinge-on-spline (1.222.3)
+
+Per Coffee 2026-05-16 ("nope.  worse.  revert").  Restored
+the v1.222.0 segment2-only delta shift::
+
+    if is_two_piece and 'segment2' in key:
+        delta = seg_offset - seg2_offset
+        xform_clamped[:, 0:3, 3] += delta * z_axis
+
+v1.222.2 had shifted BOTH meshes by `-offset * z_axis` so
+the hinge landed AT the chain anchor (= v1.118.x convention).
+Visually that was worse, so we go back to aligning the two
+hinges with each other but letting them sit at
+`chain_anchor + seg_offset * z_axis` (= behind the anchor in
+chain-backward direction).
+
+### Hide aim cursor while ALT is held (1.222.1)
+
+Per Coffee 2026-05-16 ("before continuing, please, hide the
+cursor if alt key is down so i can take clean screen grabs").
+
+`viewer.render` -- the aim-cursor block at line 18517 (SS
+decal projector + blue debug sphere at `_aim_hit_world`) now
+short-circuits when `pygame.key.get_mods() & KMOD_ALT` is
+set::
+
+    _alt_held_cursor = bool(
+        pygame.key.get_mods() & pygame.KMOD_ALT)
+    if (self._aim_hit_world is not None
+            and not _alt_held_cursor):
+        ...
+
+ALT is already the rectangle-screenshot modifier (per Coffee
+2026-05-10 "ALT + LMB-drag rectangle screenshot to Windows
+clipboard"); this is the visual sibling -- a clean frame
+without the reticle decal or the blue ball baked in.  Drift-
+stop on ALT (1.202.x) and the rectangle drag itself still
+fire on their own ALT checks unchanged.
+
+### Align segment2 mesh on two-piece pads (1.222.0)
+
+Per Coffee 2026-05-16 (handoff session: "2 at pads at center..
+see it?", "spline looks better.. pads not so much").
+
+**Root cause.**  Two-piece pads (T30, T92, T110E4, etc.) carry
+TWO mesh parts -- segmentModel and segment2Model -- that
+share one hinge pin in real life.  The chassis XML provides
+distinct `segmentOffset` and `segment2Offset` values
+describing where the hinge pin sits in each mesh's local
+coordinate system.
+
+`viewer._render_track_pad_body` parsed these values at line
+6511-6522 but the per-renderer dispatch loop (line 6926) used
+ONE `xform_clamped = xform_world.copy()` for ALL renderers
+on a side -- the per-variant pivot offset was never applied.
+Both the segment and segment2 meshes rendered at the SAME
+chain anchor in world space.  If their bboxes overlapped --
+they generally do, since both are pad pieces -- the result
+was a doubled mesh at every chain anchor.  The user saw it
+as "2 pads at center" near the wheel arcs.
+
+v1.215.0 (the chain-rides-at-pitch-circle change) dropped the
+runtime shift on the assumption that moving the spline
+outward by `segmentsInnerThickness` would handle pad
+placement.  That covers the GLOBAL offset of all pads as a
+group, but it doesn't compensate for the DIFFERENCE between
+`segmentOffset` and `segment2Offset` -- which is what makes
+the two halves form one rigid shoe.
+
+**Fix (conservative).**  Apply a corrective shift to the
+`segment2*` renderers ONLY.  Single-piece tanks (Pudel)
+keep the v1.215.0 placement -- they have only one renderer
+per side and have been rendering fine since v1.215.0::
+
+    is_two_piece = (seg_offset != 0.0 and seg2_offset != 0.0)
+    if is_two_piece and 'segment2' in key:
+        delta = seg_offset - seg2_offset
+        z_axis = xform_clamped[:, 0:3, 2]
+        xform_clamped[:, 0:3, 3] += delta * z_axis
+
+`z_axis` is the pad-local +Z direction (column 2 of the 3x3
+rotation block).  Shifting `+(seg_offset - seg2_offset) *
+z_axis` aligns the segment2 mesh's hinge with the segment
+mesh's hinge -- both end up at
+`chain_anchor + seg_offset * z_axis` in world space, forming
+ONE rigid shoe.
+
+`segment*` and `link*` keys are left at the v1.215.0
+placement (no shift), so this change is invisible on tanks
+without segment2.
+
+Sample offsets:
+* T30:    `segmentOffset = 0.116`, `segment2Offset = 0.061`,
+          `delta = +0.055 m` (segment2 shifts forward)
+* T92:    `segmentOffset = 0.044`, `segment2Offset = 0.071`,
+          `delta = -0.027 m` (segment2 shifts backward)
+* Pudel:  single-piece, unaffected.
+
+### PBD wheel radii inflated by inner_thickness (1.221.4)
+
+Per Coffee 2026-05-16 (handoff session: "travel the chain and
+watch all pad points... keep trying.. move along.. plot
+simple outlines.. I need sleep").
+
+Found while building the `diag_pbd_pileup.py` diagnostic: a
+production-wiring inconsistency between the homie chain and
+the PBD chain on tanks with `segmentsInnerThickness > 0`.
+
+* `viewer._compute_homie_chain_for_frame` calls
+  `track_homie.build_chain_segments(..., inner_thickness=
+  segmentsInnerThickness)` -- the homie chain wraps each
+  wheel at `R + inner_thickness` (the chain pitch circle).
+* `viewer._step_chain_pbd` was passing BARE `rs` to
+  `TrackChainPBD(wheel_radii=rs)`.
+
+For T110E4 (`inner_thickness = 0.0615 m`):
+
+* The homie chain pads sit at distance `R + 0.0615` from
+  every hub.
+* PBD's `seed_from_homie` measures `slack = dist - R` and
+  binds only when `slack < BIND_TOL = 0.003 m`.
+* `slack = 0.0615 m` >> 3 mm -> **NO PADS GET BOUND**.
+
+With no binds, the chain is entirely FREE.  Gravity (even
+at `GRAVITY_SCALE = 0.10`) slowly sags the chain over time.
+The distance / bend / skip-K constraints keep its overall
+shape but nothing PINS it to the wheels.  The chain drifts
+INWARD until pads reach the bare-R circle, at which point
+the unilateral wheel push-out fires aggressively from
+zero penetration on the entry pad to deep penetration on
+the centre pad -- visible as "pads rolling over an edge"
+and "2 pads at center" where the chain first contacts each
+wheel.
+
+**Fix.**  Pass `R + inner_thickness` to PBD too::
+
+    inner_t_pbd = ci_local.get('segmentsInnerThickness', 0.0)
+    rs_inflated = [r + inner_t_pbd for r in rs]
+    inst = _pbd.TrackChainPBD(..., wheel_radii=rs_inflated, ...)
+    inst.update_hubs(hubs_yz, rs_inflated)
+
+Same inflation the homie chain uses (v1.215.0); now the PBD
+wheel circles match the chain's effective wrap radius.
+
+Diagnostic counts confirm:
+
+| Tank   | inner_t | before fix | after fix |
+|--------|--------:|-----------:|----------:|
+| T30    | 0.0000  | 15/117 bound | 15/117 bound |
+| T110E4 | 0.0615  |  **0/80 bound** | **11/80 bound** |
+
+T30 is unaffected (inner_t = 0); T110E4 / T92 / Tiger / etc.
+should stop drifting now.
+
+### Penetration-scaled push for road / roller (1.221.3)
+
+Per Coffee 2026-05-16 ("travel the chain and watch all pad
+points" + "like it is rolling over an edge").
+
+The v1.220 / v1.221.2 Y-only push used the FULL Y correction
+magnitude::
+
+    delta_y = (target_dY - dY) * WHEEL_PUSH_MULT
+
+That magnitude routinely exceeded the actual penetration
+depth.  A pad at `(dY=+0.10, dZ=+0.20)` inside an R=0.5 wheel
+has `pen = 0.276` m, but `target_dY - dY = -0.558` m -- a
+push 2x the penetration depth.  The pad snapped from above-
+the-hub to below-the-hub in one shot, and as the chain
+animation flowed pads through the wheel boundary they
+appeared to "roll over an edge".
+
+**Fix.**  Drop the `target_dY` math entirely.  Push magnitude
+becomes `pen` (= the radial penetration depth, same scale as
+the radial branch uses for sprocket / idler):
+
+    delta_y = sign_y * pen * WHEEL_PUSH_MULT      # road: -pen, roller: +pen
+    delta_z = 0
+
+Sign is locked by wheel kind exactly as in v1.221.2 (road =
+-Y, roller = +Y).  The transition at the wheel boundary is
+now smooth: a pad just barely inside (pen near 0) gets a
+near-zero push, a deeply-inside pad gets a push proportional
+to its depth.  Over PBD's 14 iterations the pad converges
+geometrically to the wheel-tangent line.
+
+**Travel-the-chain diagnostic** (inline, not shipped): walked
+a pad at `Y=+0.1` (the bug-trigger above-hub case) through Z
+from -0.6 to +0.6 across an R=0.5 wheel.  Push ramps smoothly
+from 0 at Z=-0.5 to -0.4 at Z=0 and back to 0 at Z=+0.5
+in a single iteration -- no edge snap.  Earlier
+`target_dY` form would have pushed by -0.6 to -0.7 across
+the entire range, snapping the pad to the wheel rim.
+
+### Lock road / roller push direction by wheel kind (1.221.2)
+
+Per Coffee 2026-05-16 ("i think angle is backwards on the
+ground wheels when they are being pressed up...  Z seems
+flipped in the way the wheel rolls over the pad.  chasing
+wrong direction", followed by a screenshot of a sharp kink
+in the chain at the wheel boundary).
+
+The v1.220 sign-of-dY Y-only push had a failure mode that
+showed up when the suspension drove a wheel UP into the
+chain fast enough that a pad ended up momentarily ABOVE the
+hub.  sign(dY) flipped to +1 and the Y-only push lifted the
+pad even higher, away from the natural below-the-wheel chain
+position.  Visible as a sharp kink in the chain right at the
+wheel boundary (one pad pushed up while neighbours stayed
+below).
+
+**Fix.**  Lock the push direction to the wheel's role::
+
+    road wheel   -> target_dY = -sqrt(R^2 - dZ^2)   (always DOWN)
+    return roller-> target_dY = +sqrt(R^2 - dZ^2)   (always UP)
+    sprocket/idler -> radial push                   (chain wraps)
+
+Chain rides one specific side of road / roller wheels by
+construction; there's no scenario where the push should go
+the other way.  Wheel-kind dispatch uses `self.wheel_kinds
+[w_idx]` (same source the v1.220.0 road/roller branch used,
+just consulted per-kind now instead of as an or'd group).
+
+Verified with a unit test: pad at `(Y=+0.10, Z=+0.05)`
+(above hub, would have been pushed UP by v1.220) inside a
+road wheel at `(0, 0)`, R=0.5.  New push lands the pad at
+`(Y=-0.4975, Z=+0.0500)` -- DOWN to the wheel circle's
+bottom half, Z unchanged.
+
+### Revert v1.221.0 flat-tangent push (1.221.1)
+
+Per Coffee 2026-05-16 ("revert").  Restored the v1.220.0
+Y-only circle projection
+`target_dY = sign(dY) * sqrt(R^2 - dZ^2)` -- the flat-tangent
+form wasn't the right answer either.  PBD wheel-push for
+road / roller is back to projecting onto the wheel circle
+while keeping dZ fixed.
+
+### Road-wheel push-out is Y-only (1.220.0)
+
+Per Coffee 2026-05-16 ("when we have a ground wheel under
+being push by the spline, we don't allow it in side the
+wheel radius?  That is making the segment location snap to
+the push back location in Y and Z..  it should only snap you
+Y").
+
+`TrackChainPBD.step` step 2c -- the unilateral wheel push-
+out that keeps chain pads from penetrating wheel rims -- was
+applying a FULL RADIAL correction for every wheel type::
+
+    push_dir = (pos - hub) / |pos - hub|
+    pos += push_dir * penetration
+
+For sprockets / idlers the chain WRAPS the wheel, so a
+radial correction is physically the right answer -- a pad
+inside the sprocket circle belongs back on the sprocket rim,
+both Y and Z.
+
+But for road wheels and return rollers the chain SLIDES PAST
+the wheel along Z and is only supported VERTICALLY against
+it.  The full radial push was snapping pads forward / back
+along the chain whenever the suspension lifted a road-wheel
+hub into the chain's path -- visible as pad jitter under
+compression.
+
+**Fix.**  For road / roller wheels switch to a Y-only
+projection of the pad onto the wheel circle::
+
+    (target_dY)^2 + dZ^2 = R^2     (keep dZ fixed)
+    target_dY = sign(dY) * sqrt(R^2 - dZ^2)
+    delta_y   = (target_dY - dY) * WHEEL_PUSH_MULT
+
+`sign(dY)` keeps the pad on its current side of the hub --
+a below-the-hub pad goes further down, an above-the-hub pad
+goes further up.  Discriminant is non-negative whenever the
+pad is inside the circle (`dY^2 + dZ^2 < R^2 => dZ^2 < R^2`).
+
+Wheel kind dispatch: sprocket / idler keep the existing full
+radial correction; road / roller use Y-only.  Per-pad
+`is_road` mask is computed from `self.wheel_kinds[w_idx]`,
+where `w_idx` is the index of the worst-penetrating wheel
+chosen one line above.
+
+Verified with a surgical unit-test extract of just this
+block: pad at `(Y=0.30, Z=0.00)` inside a road wheel at
+`(Y=0, Z=0)`, R=0.5 -- after the push, pad lands at
+`(Y=0.50, Z=0.00)` (Y lifted to the wheel circle, Z
+unchanged).  Full-chain step still re-distributes Z via
+the distance / bend / skip-K constraints, but those are
+physical chain-shape constraints, not wheel-collision
+artefacts.
+
+### Mouse-sens slider max -> 6.0 (1.219.1)
+
+Per Coffee 2026-05-16 ("up max mouse speed to 6 on Mouse
+slider").  Bumped `_mouse_sens_slider`'s `value_max` from
+`3.0` to `6.0` in `Viewer._build_ui` so the slider track
+covers a wider sensitivity range (still 0.1 at the low
+end via the slider's intrinsic min; 6.0 = +500 % over the
+1.0 base sensitivity).  Persisted `mouse_aim_sens` config
+values continue to drive the initial position; existing
+defaults (1.8) now appear at the 30 % mark instead of 60 %.
+
+### Drop the chassis ACCEL / DECEL ramp (1.219.0)
+
+Per Coffee 2026-05-16 ("Tracks cant spring if the drive wheel
+is stopped.  slip should only be on the non drive wheels",
+"just remove the pad spring for accel and decel.  not real
+for a 100 ton tank").
+
+`_handle_input` carried a ramp filter on `_current_forward`::
+
+    DRIVE_ACCEL = 5.0    # m/s^2, spool-up
+    DRIVE_DECEL = 10.0   # m/s^2, braking + reversal
+    cur = float(self._current_forward)
+    delta = target_forward - cur
+    rate = DRIVE_ACCEL if accel else DRIVE_DECEL
+    step = rate * dt
+    cur += step if delta > 0 else -step
+    tp.cur_forward_mps = -cur
+
+The intent was "snappy but not instant" -- but on a 100-ton
+tank the ramp showed up as spring-like pad motion during
+accel / decel transitions.  Release the throttle and the
+chassis kept moving for ~1 s as the ramp wound down; the chain
+pads drifted past where the drive sprocket said they should
+be (the drive sprocket spins as `omega = v / R_pitch`, so its
+rotation tracks the ramped `cur_forward_mps` faithfully, but
+real-tank drivetrain has effectively zero compliance between
+sprocket and pads -- the pads should stop with the sprocket,
+not coast a half-loop further).
+
+**Fix:** snap `cur_forward_mps` straight to `target_forward`::
+
+    cur = float(target_forward)
+    self._current_forward = cur
+    tp.cur_forward_mps    = -cur
+
+Pads now stop at exactly the same instant as the sprocket.
+The chassis still has critically-damped pitch / roll / Y
+via `_step_pose_integrator`, so squat / dive / body-roll
+lean transients still feel like a tank rather than a brick.
+
+Future work: model road-wheel slip (the road wheels CAN slip
+relative to the chain's inner face, while the drive sprocket
+cannot).  No-op today -- all wheels still spin at
+`v / R_pitch` -- but the comment is in place to remind us
+which wheels are eligible for the slip term when we wire it.
+
+### Wheel spin tracks the chain pitch circle (1.218.0)
+
+Per Coffee 2026-05-16 ("the shader that rotates each wheel
+isn't obeying our start stop math.  The pads have spring, the
+wheels should follow").
+
+The chain animation has wrapped every wheel at the PITCH circle
+(`R + segmentsInnerThickness`) since v1.215.0 -- that's where
+the pad hinge pins ride.  But `tank_physics.advance_wheel_angles`
+was still spinning wheels at the BARE-RIM rate::
+
+    omega_wheel = v_track / R     (wrong: too fast)
+
+A pad sliding around a wheel arc at chain-flow speed `v_track`
+advances ANGULARLY at `v_track / R_pitch`.  The wheel teeth must
+spin at the same angular rate to keep their phase relationship
+with the pads, so the correct formula is::
+
+    omega_wheel = v_track / (R + segmentsInnerThickness)
+
+The error scales with `inner_thickness / R`: for a road wheel of
+R ~ 0.42 m and an inner thickness ~ 0.03 m, the wheels were
+spinning ~7 % faster than the chain demanded.  Over a few
+seconds of driving the teeth visibly walked off the pads.
+
+**Fix.**  `tank_physics.advance_wheel_angles` gained an
+`inner_thickness=0.0` kwarg and applies it uniformly to both
+road wheels (`self.radius`) and registered extras (sprockets /
+idlers / return rollers via `self.extra_rotating_radii`):
+
+    R_eff = max(R + inner_thickness, 1e-3)
+    angles[i] += -(v / R_eff) * dt
+
+Same offset, same role, same formula -- matches the v1.215
+chain shift exactly.
+
+**Viewer wiring.**  `_compute_homie_chain_for_frame` reads
+`ci.get('segmentsInnerThickness', 0.0)` (same handle the chain
+code uses one block lower) and passes it through to
+`tp.advance_wheel_angles(v_L, v_R, dt, inner_thickness=...)`.
+Default 0.0 keeps tanks whose chassis XML lacks the field on
+the old bare-R behaviour -- safe fallback.
+
+This is loose-coupling (rate-matched integration, same as
+before).  A future iteration could go to tight-coupling --
+derive wheel angle directly from `_track_chain_s_offset_<side>
+/ R_pitch` per frame so float drift can't accumulate -- but
+the rate match here closes the obvious gap with one-line
+changes in two places.
+
+### Flip tooth-phase sign (1.217.1)
+
+Per Coffee 2026-05-16 ("try other direction").  The v1.217.0
+phase was applied as `s_offset += phase`; flipped to `s_offset
+-= phase` so pads land on the other side of the tooth lattice.
+Both signs put a pad ON the lattice (the modulo-pitch math
+guarantees that); the minus sign matches the sense in which
+`_track_chain_s_offset_<side>` accumulates `v * dt`, so the
+phase tracks consistently with the animated chain.
+
+### Tooth phase from chassis-XML `<teethSyncs>` (1.217.0)
+
+Per Coffee 2026-05-16 ("i dont think that will work.  i just
+look at the a38 and it is close to where it needs to be, Is
+there any value in the tank def file?").  The v1.216.0 blind
+`0.5 * seg_len` half-pad shift was a constant guess that
+happened to land close on A38 (T92) but had no tank-specific
+grounding.  Replaced with the real value from the chassis
+XML's `<teethSyncs><sync>` block.
+
+**Source of truth.**  Every tank's chassis XML carries, per
+drive sprocket:
+
+    <teethSyncs>
+      <segmentSyncPivotOffset>...</segmentSyncPivotOffset>
+      <sync>
+        <name>WD_L0</name>
+        <startAngle>-3.7630</startAngle>   <!-- radians -->
+        <teethCount>15</teethCount>
+      </sync>
+      <sync>
+        <name>WD_L9</name>
+        <startAngle>-6.6104</startAngle>
+        <teethCount>15</teethCount>
+      </sync>
+    </teethSyncs>
+
+In chassis-local bone coordinates, tooth k on a drive
+sprocket sits at::
+
+    tooth_k.y = wheel.y - R * sin(startAngle + k * 2*pi / N)
+    tooth_k.z = wheel.z - R * cos(startAngle + k * 2*pi / N)
+
+This formula was verified at machine precision against the
+T30 `.track` file's V_loc anchors back in v1.105.x (see
+`cust_tools/plot_t30_spline_math.py` and
+`docs/TRACK_PHYSICS.md` "What was wrong").
+
+**Parser (`loaders.py`).**  New block right after
+`wheel_roles` storage walks `<teethSyncs>` and writes::
+
+    info['chassis']['tooth_syncs'] = {
+        'WD_L0': {'startAngle': float, 'teethCount': int},
+        'WD_L9': {'startAngle': float, 'teethCount': int},
+    }
+    info['chassis']['segmentSyncPivotOffset'] = float (if present)
+
+Sample readings (verified via `parse_info`):
+
+| Tank        | drive wheels        | teeth |
+|-------------|---------------------|------:|
+| T30         | WD_L0, WD_L9        |    15 |
+| T92 (A38)   | WD_L0, WD_L7        |    13 |
+| Pudel       | WD_L0, WD_L1        |    17 |
+| T110E4      | WD_L0, WD_L6        |    11 |
+
+`<teethSyncs>` is declared on the L side only -- the R side
+mirrors by reflection.  Most XMLs also wind the `startAngle`
+multiple turns past 2*pi (T92 publishes +15.0 rad ~ +859 deg
+for WD_L0); the math is naturally mod-2*pi so the raw value
+goes straight in without normalisation.
+
+**Helper (`track_homie.compute_tooth_phase_offset`).**  Turns
+the XML angle into a chain arc-length::
+
+    tooth_chain_angle = startAngle + k_target * 2*pi / N + pi
+
+The `+pi` accounts for the XML's `(wheel_Y - R*sin(s),
+wheel_Z - R*cos(s))` formula vs the chain code's
+`atan2(dY, dZ)` angle (the two differ by exactly pi).
+
+Steps:
+
+1. Rebuild segment-length + cum-length tables parallel to
+   `_place_pads` (so segment indices line up).
+2. Find the drive sprocket arc segment on `side` whose
+   wheel name has a `<teethSyncs>` entry.  Direct match
+   first; R-side falls back to `_R` -> `_L` mirror lookup.
+   When multiple drives qualify (T30, T92, etc.), prefer
+   the lowest trailing numeric index -- that's the WoT
+   convention for the rear / mechanical-drive sprocket
+   (the one whose teeth actually transmit engine torque).
+3. Walk from `a_in` toward `tooth_chain_angle` in the
+   chain-traversal direction, reducing the angular delta
+   into `(-pi, pi]` for short-way wrap.  Multiply by R to
+   get the local arc-length.
+4. Add to the segment's cumulative offset for the absolute
+   arc-length-at-tooth.
+5. Reduce mod pad-pitch (= `total / n_pads`) for the
+   returned phase, in `[0, pitch)`.
+
+Adding the result to the running `s_offset` makes some pad
+land exactly on tooth k=0 of the picked drive sprocket.  The
+v1.215.0 `R + segmentsInnerThickness` shift placed the chain
+on the pitch circle, so the remaining tooth-vs-pad pitch
+residual is the chord-vs-arc 1-2 % gap from
+`docs/TRACK_PHYSICS.md` "Drive wheels (WD_) and pitch radius"
+-- well under a half-pad of accumulated misalignment around
+the full loop.
+
+**Caller (`viewer._chain_for_side`).**  Replaced::
+
+    s_offset += 0.5 * float(seg_len)
+
+with::
+
+    tooth_syncs = ci.get('tooth_syncs') or {}
+    if tooth_syncs:
+        s_offset += _th.compute_tooth_phase_offset(
+            arcs_3, tooth_syncs, side, n_pads)
+
+The early-out branch protects tanks whose chassis XML lacks
+the `<teethSyncs>` block -- they keep working with `s_offset
++= 0` (= no phase shift, same effect as the old behaviour
+before v1.216.0).  Bias is still applied only at the pad-
+placement call; the persisted `_track_chain_s_offset_<side>`
+keeps integrating `v * dt` cleanly.
+
+**Unit-test harness** (inline, not shipped): built a 6-wheel
+synthetic chain with two drive sprockets and verified:
+
+* lowest-index priority picks WD_L0 over WD_L9 when both
+  are tooth-synced;
+* a startAngle delta of `2*pi/N` shifts the phase by
+  `R*per_tooth mod pitch` (the short-way wrap, not the
+  numeric mod which can land on the opposite side of
+  pitch/2);
+* R-side chain with L-only tooth_syncs uses the
+  `_R` -> `_L` mirror and lands the same phase as a direct
+  L-side compute.
+
 ### Half-pad phase shift to align teeth with gears (1.216.0)
 
 Per Coffee 2026-05-16 ("pitch dia is dead on.  now we need

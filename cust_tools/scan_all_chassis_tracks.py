@@ -208,6 +208,25 @@ def main(argv=None):
     filt = re.compile(args.filter) if args.filter else None
 
     # Read the index.
+    # `tanks_index.txt` uses the friendly nation tag ('usa', 'germany',
+    # 'uk', 'ussr', 'france') but the WoT pkg vehicle folders use the
+    # legacy demonym ('american', 'german', 'british', 'russian',
+    # 'french').  Map the index column to the pkg folder name.
+    # The newer DLC nations ('poland', 'sweden', 'italy', 'czech',
+    # 'japan', 'china') happen to match both forms.
+    NATION_INDEX_TO_PKG = {
+        'usa':      'american',
+        'germany':  'german',
+        'ussr':     'russian',
+        'uk':       'british',
+        'france':   'french',
+        'china':    'china',
+        'japan':    'japan',
+        'czech':    'czech',
+        'sweden':   'sweden',
+        'italy':    'italian',
+        'poland':   'poland',
+    }
     rows = []
     with open(tanks_index, encoding='utf-8') as f:
         for line in f:
@@ -217,7 +236,10 @@ def main(argv=None):
             parts = line.split('\t')
             if len(parts) < 4:
                 continue
-            nation, tier, basename, friendly = parts[0], parts[1], parts[2], parts[3]
+            nation_idx, tier, basename, friendly = (parts[0], parts[1],
+                                                     parts[2], parts[3])
+            nation = NATION_INDEX_TO_PKG.get(nation_idx.lower(),
+                                              nation_idx)
             if filt and not filt.search(basename):
                 continue
             rows.append((nation, tier, basename, friendly))

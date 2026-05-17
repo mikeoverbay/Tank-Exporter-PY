@@ -11,7 +11,51 @@ porting it.  Public repo: `mikeoverbay/Tank-Exporter-PY` on GitHub
 
 ---
 
-## Where we left off (handoff 2026-05-13, v1.118.117)
+## Where we left off (handoff 2026-05-16, v1.230.5)
+
+**Read `hand_off/SESSION_LOG_2026-05-16_v1.230.5_handoff.md`
+FIRST** -- full per-version table, current open items, and
+the pickup checklist.
+
+Headline: Archer (GB44) drove ~33 versions worth of fixes
+across loaders, physics, chain math, mesh visibility, and
+localization.  Net state of the chain pipeline:
+
+* `wheel_roles` now reclassifies W_-prefixed singular wheels
+  by radius (Archer's W_L0/L5 are now road wheels via
+  loader post-pass).
+* `<teethSyncs>` parsed into chassis info for tooth-phase
+  alignment.
+* Wheel-spin omega = `v / (R + segmentsInnerThickness)` (=
+  pitch circle, matches chain wrap).
+* Terrain-floor lift checks `extra_rotating_hubs` too (rigid
+  idlers on tanks like Archer keep the chassis above
+  terrain).
+* OVER_COMP road wheels dropped from chain loop (state-
+  gated, not geometry-gated -- v1.225.0 geometric attempt
+  broke Archer).
+* `_MAT` rubber bands hidden by default (checks both
+  `mesh.name` and `mesh.identifier`).
+* Visibility panel renamed "Visible" + localised in all 21
+  catalogs (`Mouse` + `Visible` msgids added via
+  `cust_tools/add_locale_entries.py`).
+
+**Open at top of next session:**
+
+1. F3 recorder `wheel_angle_rad` lookup bug -- name-suffix
+   mismatch (`names_road.index('W_L1')` vs
+   `'W_L1_BlendBone'`).  5-line fix; user confirmed it's
+   the lookup, not the physics (`advance_wheel_angles`
+   verified working via direct probe).
+2. Pad-mesh rotation behaviour -- user said "there for sure
+   is a bug in the way the pad rotation is set" after the
+   wheel physics verified correct.  Likely in
+   `track_pads.build_oriented_transforms` or the orientation
+   override at `viewer.py:~6373`.
+
+---
+
+## Earlier handoff (2026-05-13, v1.118.117)
 
 **Track chain pipeline is the active workstream.**  Phase C
 (per-pad mesh + instanced render) landed at v1.118.54 and the

@@ -154,3 +154,11 @@ msgstr "삼각선택"
 
 msgid "Susp"
 msgstr ""
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "마우스"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "표시"

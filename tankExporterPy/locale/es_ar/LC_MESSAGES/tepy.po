@@ -154,3 +154,11 @@ msgstr "Elegir Tri"
 
 msgid "Susp"
 msgstr ""
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "Ratón"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "Visible"

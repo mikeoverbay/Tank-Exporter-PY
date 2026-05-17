@@ -154,3 +154,11 @@ msgstr "三角選択"
 
 msgid "Susp"
 msgstr ""
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "マウス"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "表示"

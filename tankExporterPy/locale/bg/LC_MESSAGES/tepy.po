@@ -154,3 +154,11 @@ msgstr "Избор тр."
 
 msgid "Susp"
 msgstr ""
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "Мишка"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "Видим"

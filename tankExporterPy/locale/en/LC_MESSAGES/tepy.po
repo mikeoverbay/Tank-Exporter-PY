@@ -152,3 +152,11 @@ msgstr "Pick Tri"
 
 msgid "Susp"
 msgstr "Susp"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "Mouse"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "Visible"

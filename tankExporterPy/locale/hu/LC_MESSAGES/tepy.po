@@ -154,3 +154,11 @@ msgstr "Tri valas"
 
 msgid "Susp"
 msgstr ""
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Mouse"
+msgstr "Egér"
+
+# ---- v1.230.5: added by add_locale_entries.py ----
+msgid "Visible"
+msgstr "Látható"
