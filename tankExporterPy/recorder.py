@@ -54,164 +54,51 @@ import numpy as np
 # ---------------------------------------------------------------------
 def build_recorder_frame(viewer, dt, t_accum_s, frame_idx,
                           prev_states=None):
-    """Build one frame's recorder dict from the viewer's current
-    physics state.
+    """Build one frame's recorder dict.
 
-    Captures both target and render pose so offline analysis can
-    tell solver spikes (target jumps, integrator stays smooth)
-    apart from integrator-induced oscillation (target stable,
-    render rings).  The integrator-error fields (`e_pitch_deg`,
-    `e_roll_deg`, `e_y_m`) and the unclamped per-wheel delta
-    (`delta_y`) cover every signal that the second-order spring +
-    classifier hysteresis loop reads, so any oscillation in the
-    visible chassis pose has to show up here.
+    Per Coffee 2026-05-16 ("save only bare min info we need.
+    just tag sections with the wheel ids and be done"): the F3
+    recorder is now scoped to the arc-pad-to-wheel rotation
+    investigation only.  Everything outside the chain-focus
+    payload (chassis pose, integrator state, per-wheel
+    suspension classifier, frame timers, render-vs-target
+    deltas, ...) has been dropped from the per-frame record --
+    the v1.230.5 frame carried 40+ physics fields all unused
+    by the chain analysis.
 
-    Reads (viewer):  tank_physics, terrain, _frame_timers_complete,
-                     _show_track_spline, _track_left, _track_right,
-                     _track_test_dy, _auto_circle, _current_forward.
+    Schema (v2):
+        frame      -- monotonic frame index
+        t_s        -- recording-relative time
+        dt_s       -- frame delta
+        speed_mps  -- tank linear speed (drive context only)
+        chain_focus
+            'L' / 'R':
+              s_offset_m  -- per-side chain arc-length flow
+              wheels: list, one per road wheel, ordered as
+                      `chassis_info_xml.wheel_roles.road_wheels_<side>`
+                {
+                  wheel_name      -- bare bone tag, e.g. `W_L1`
+                  wheel_angle_rad -- accumulated spin (post-fix)
+                  pads: [
+                    {idx, angle_rad, on_arc},
+                    ...
+                  ]
+                }
+
+    `prev_states` is retained in the signature so the F3
+    caller doesn't change, but is no longer consulted (state
+    classifier was the v1 dataset, not v2).
+
+    Reads (viewer):  tank_physics, _frame_timers_complete (unused)
     Writes:          nothing.
     """
     tp = viewer.tank_physics
-    STATE_NAMES = {0: 'NONE', 1: 'CONTACT', 2: 'HANGING', 3: 'OVER_COMP'}
-    wheels_out = []
-    n = len(tp.wheels)
-    chassis_render = np.asarray(tp.chassis_matrix(), dtype=np.float64)
-    if (viewer.terrain is not None
-            and hasattr(viewer.terrain, 'sample_heights')):
-        local_h = np.column_stack([
-            tp.wheels[:, 0], tp.wheels[:, 1], tp.wheels[:, 2],
-            np.ones(len(tp.wheels), dtype=np.float64)])
-        world_render_h = (chassis_render @ local_h.T).T
-        terrain_render_y = np.asarray(viewer.terrain.sample_heights(
-            world_render_h[:, 0], world_render_h[:, 2]),
-            dtype=np.float64)
-    else:
-        terrain_render_y = np.zeros(n, dtype=np.float64)
-    HYST     = 0.020
-    comp_cap = -float(tp.min_offset)
-    ext_cap  = -float(tp.max_offset)
-    delta_arr = (np.asarray(tp.last_delta_y, dtype=np.float64)
-                 if hasattr(tp, 'last_delta_y')
-                 and len(tp.last_delta_y) == n
-                 else np.zeros(n, dtype=np.float64))
-    n_state_changes = 0
-    for i in range(n):
-        name = (tp.wheel_bone_names[i]
-                if i < len(tp.wheel_bone_names) and tp.wheel_bone_names[i]
-                else None)
-        local = tp.wheels[i]
-        wlw   = (tp.last_wheel_world[i]
-                 if i < len(tp.last_wheel_world)
-                 else (0.0, 0.0, 0.0))
-        ty    = (float(tp.last_terrain_y[i])
-                 if i < len(tp.last_terrain_y) else 0.0)
-        tgt   = (float(tp.last_target_y[i])
-                 if i < len(tp.last_target_y) else 0.0)
-        rry   = (float(tp.last_residual_y[i])
-                 if i < len(tp.last_residual_y) else 0.0)
-        sry   = (float(tp.smoothed_residual_y[i])
-                 if hasattr(tp, 'smoothed_residual_y')
-                 and i < len(tp.smoothed_residual_y)
-                 else 0.0)
-        sc    = (int(tp.last_wheel_state[i])
-                 if hasattr(tp, 'last_wheel_state')
-                 and i < len(tp.last_wheel_state)
-                 else 0)
-        local_skinned = np.array(
-            [float(local[0]),
-             float(local[1]) + rry,
-             float(local[2]),
-             1.0], dtype=np.float64)
-        wlw_render = chassis_render @ local_skinned
-        d = float(delta_arr[i])
-        if sc == 1 or sc == 0:
-            dist_to_flip = min(d - (ext_cap - HYST),
-                               (comp_cap + HYST) - d)
-        elif sc == 2:
-            dist_to_flip = (ext_cap + HYST) - d
-        elif sc == 3:
-            dist_to_flip = d - (comp_cap - HYST)
-        else:
-            dist_to_flip = 0.0
-        sc_prev = (int(prev_states[i])
-                   if (prev_states is not None and i < len(prev_states))
-                   else sc)
-        state_changed = (sc != sc_prev) and prev_states is not None
-        if state_changed:
-            n_state_changes += 1
-        wheels_out.append({
-            'idx':             i,
-            'side':            'L' if i < tp.n_left else 'R',
-            'name':            name,
-            'local_xyz':       [float(local[0]), float(local[1]),
-                                float(local[2])],
-            'world_xyz':       [float(wlw[0]), float(wlw[1]),
-                                float(wlw[2])],
-            'world_xyz_render': [float(wlw_render[0]),
-                                 float(wlw_render[1]),
-                                 float(wlw_render[2])],
-            'terrain_y':       ty,
-            'terrain_y_render': float(terrain_render_y[i]),
-            'target_y':        tgt,
-            'residual_y':      rry,
-            'smoothed_residual_y': sry,
-            'delta_y':         float(delta_arr[i]),
-            'state_code':      sc,
-            'state':           STATE_NAMES.get(sc, '?'),
-            'state_prev_code': sc_prev,
-            'state_changed':   bool(state_changed),
-            'hyst_dist_to_flip_m': float(dist_to_flip),
-        })
-
     return {
-        'frame':                 frame_idx,
-        't_s':                   float(t_accum_s),
-        'dt_s':                  float(dt),
-        'yaw_deg':               float(tp.yaw_deg),
-        'pitch_deg':             float(tp.pitch_deg),
-        'roll_deg':              float(tp.roll_deg),
-        'pitch_render':          float(getattr(tp, '_render_pitch_deg', 0.0)),
-        'roll_render':           float(getattr(tp, '_render_roll_deg', 0.0)),
-        'omega_pitch_dps':       float(getattr(tp, 'omega_pitch_dps', 0.0)),
-        'omega_roll_dps':        float(getattr(tp, 'omega_roll_dps', 0.0)),
-        'a_lat_mps2':            float(getattr(tp, '_last_a_lat_mps2', 0.0)),
-        'speed_mps':             float(getattr(tp, '_last_speed_mps', 0.0)),
-        'yaw_rate_dps':          float(getattr(tp, '_last_yaw_rate_dps', 0.0)),
-        'lean_target_deg':       float(getattr(tp, '_target_lat_lean_roll_deg', 0.0)),
-        'a_long_mps2':           float(getattr(tp, '_last_a_long_mps2', 0.0)),
-        'signed_speed_mps':      float(getattr(tp, '_last_signed_speed_mps', 0.0)),
-        'pitch_lean_target_deg': float(getattr(tp, '_target_long_lean_pitch_deg', 0.0)),
-        'a_lat_smoothed_mps2':   float(getattr(tp, '_smoothed_a_lat_mps2', 0.0)),
-        'a_long_smoothed_mps2':  float(getattr(tp, '_smoothed_a_long_mps2', 0.0)),
-        'gate_rear_over_render': bool(getattr(
-            tp, '_gate_any_rear_over_render', False)),
-        'gate_front_over_render': bool(getattr(
-            tp, '_gate_any_front_over_render', False)),
-        'pos_x':                 float(tp.pos[0]),
-        'pos_y':                 float(tp.pos[1]),
-        'pos_y_render':          float(getattr(tp, '_render_pos_y', 0.0)),
-        'pos_z':                 float(tp.pos[2]),
-        'vy_mps':                float(tp.vy),
-        'render_vy_mps':         float(getattr(tp, '_render_vy', 0.0)),
-        'cur_speed_mps_signed':  float(getattr(viewer, '_current_forward', 0.0)),
-        'target_pitch_with_lean_deg': float(getattr(
-            tp, '_last_target_pitch_with_lean', 0.0)),
-        'target_roll_with_lean_deg':  float(getattr(
-            tp, '_last_target_roll_with_lean', 0.0)),
-        'e_pitch_deg':           float(getattr(tp, '_last_e_pitch_deg', 0.0)),
-        'e_roll_deg':            float(getattr(tp, '_last_e_roll_deg', 0.0)),
-        'e_y_m':                 float(getattr(tp, '_last_e_y_m', 0.0)),
-        'lift_needed_m':         float(getattr(tp, '_last_lift_needed_m', 0.0)),
-        'cur_forward_mps_input': float(getattr(tp, 'cur_forward_mps', 0.0)),
-        'auto_circle_active':    bool(getattr(viewer, '_auto_circle', False)),
-        'track_spline_active':   bool(getattr(viewer, '_show_track_spline', False)
-                                       and getattr(viewer, '_track_left', None) is not None
-                                       and getattr(viewer, '_track_right', None) is not None),
-        'track_test_dy_m':       float(getattr(viewer, '_track_test_dy', 0.0)),
-        'state_changes_count':   int(n_state_changes),
-        'frame_timers_ms':       dict(getattr(viewer, '_frame_timers_complete', {})),
-        'wheels':                wheels_out,
-        'chain_focus':           _build_chain_focus_safe(viewer),
+        'frame':       int(frame_idx),
+        't_s':         float(t_accum_s),
+        'dt_s':        float(dt),
+        'speed_mps':   float(getattr(tp, '_last_speed_mps', 0.0)),
+        'chain_focus': _build_chain_focus_safe(viewer),
     }
 
 
@@ -226,6 +113,30 @@ def _build_chain_focus_safe(viewer):
             _tb.print_exc()
             viewer._chain_focus_err_logged = True
         return {}
+
+
+def _round_floats(obj, places=4):
+    """Recursively round every float in `obj` to `places` decimal
+    digits.  Per Coffee 2026-05-16 ("chop off the numbers..
+    truncate 4 places"): F3 payloads were carrying 17-digit
+    float reprs (`-0.9566489999999999`) when 4 is plenty for the
+    chain-pad-vs-wheel-rotation analysis -- and the extra
+    precision blew up file size in indented JSON.
+
+    Touches floats only.  Booleans, ints, strings, None pass
+    through unchanged (`bool` would otherwise sneak through
+    `isinstance(x, float)` on some platforms via the int->float
+    coercion path, hence the explicit bool guard).
+    """
+    if isinstance(obj, bool) or obj is None:
+        return obj
+    if isinstance(obj, float):
+        return round(obj, places)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, places) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_round_floats(v, places) for v in obj]
+    return obj
 
 
 def _json_safe(obj):
@@ -277,38 +188,40 @@ def _json_safe(obj):
 
 
 def _build_chain_focus(viewer):
-    """Per Coffee 2026-05-16 ("F3 is bound to record.  lets
-    record the seg positions that are affected by one of the
-    bottom wheels.  maybe other info?").
+    """Bare-minimum per-frame chain-pad-vs-wheel-rotation payload.
 
-    Captures chain-pad context around ONE bottom wheel per side
-    so offline analysis can correlate pad motion against
-    suspension travel, wheel rotation, and the chain s_offset
-    flow.
+    Per Coffee 2026-05-16 ("save only bare min info we need.
+    just tag sections with the wheel ids and be done").
 
-    Per Coffee 2026-05-16 ("i was on the edge again"): the
-    middle-road-wheel focus missed L-side flips when W_L1 was
-    at the cap and W_L2 was HANGING.  Now each side returns a
-    LIST of focus dicts, one per road wheel, so offline
-    analysis can scan every wheel for chain anomalies.
+    Schema:
+        {'L': {'s_offset_m': float,
+               'wheels': [{wheel_name, wheel_angle_rad,
+                            contact_angle_rad, pads:
+                            [{idx, angle_rad, on_arc}, ...]},
+                          ...]},
+         'R': {... same shape ...}}
 
-    For each road wheel per side records:
-
-      * `wheel_name`         -- bone name (`W_L2`, etc.).
-      * `hub_chassis_yz`     -- wheel hub (Y, Z) in chassis-
-        local renderer frame (post Z-flip).
-      * `hub_R_m`            -- wheel radius from chassis XML
-        `<wheelGroups><groupRadius>` (bare rim).
-      * `wheel_angle_rad`    -- accumulated spin angle.
-      * `s_offset_m`         -- chain arc-length accumulator.
-      * `pads`               -- per-pad list of `(idx, Y, Z,
-        d_hub_m)` for every pad whose centre sits within
-        `1.5 * (R + inner_thickness)` of the hub in YZ.
-
-    Layout:
-
-        {'L': [{...W_L0...}, {...W_L1...}, ..., {...W_Ln...}],
-         'R': [{...W_R0...}, {...W_R1...}, ..., {...W_Rn...}]}
+    * `wheel_name` is the bare bone tag from
+      `chassis_info_xml.wheel_roles.road_wheels_<side>`
+      (e.g. `W_L1`); meta carries `wheel_radii` so the analyser
+      can look up R when needed.
+    * `wheel_angle_rad` is `tp.wheel_angles_rad` with the v1.231
+      three-form name-lookup fix -- bare, `+'_BlendBone'`, then
+      suffix-stripped -- so the spin actually reaches the JSON.
+    * `pads` lists every pad whose centre sits within
+      `1.5 * (R + segmentsInnerThickness)` of the hub in YZ:
+        - `idx`       chain-pad index (matches across frames so
+                       you can track a single pad over time)
+        - `angle_rad` `atan2(pad.y - hub.y, pad.z - hub.z)` in
+                       chassis-renderer YZ.  Same convention as
+                       homie's `_angle_from_hub` -- adjacent
+                       frames' delta IS the pad's true angular
+                       travel around this wheel.
+        - `on_arc`    True only when the renderer's per-pad
+                       anchor stash names THIS wheel (within
+                       1 mm).  Line pads in the band come out
+                       False -- their `angle_rad` is geometric
+                       atan2 only.
     """
     out = {}
     tp = viewer.tank_physics
@@ -322,8 +235,50 @@ def _build_chain_focus(viewer):
                  or getattr(viewer, '_track_chassis_bones_bind', None))
     if not isinstance(bones_now, dict) or not bones_now:
         return out
+    # Per Coffee 2026-05-16 ("F3 wheel_angle_rad reports 0.0 for
+    # every wheel"): the v1.224.0 lookup did a single
+    # `names_road.index(wheel_name)` -- but `wheel_name` comes
+    # in BARE from `roles['road_wheels_<side>']` (e.g. `W_L1`),
+    # while `tp.wheel_bone_names` carries the `_BlendBone`-
+    # suffixed form on most tanks (e.g. `W_L1_BlendBone`).  Every
+    # lookup raised `ValueError`, ri stayed -1, and `spin`
+    # defaulted to 0.0.  The wheel physics is fine (verified
+    # 2026-05-16 via direct `advance_wheel_angles` call); this
+    # is purely a recorder lookup bug.
+    #
+    # Fix: try the name as given, then `+'_BlendBone'`, then
+    # strip a trailing `_BlendBone` and retry.  Covers every
+    # tank naming variant we've encountered so far.
     names_road = list(getattr(tp, 'wheel_bone_names', []))
     wheel_angles = getattr(tp, 'wheel_angles_rad', None)
+
+    def _spin_for(name):
+        if not name:
+            return 0.0
+        candidates = [name, name + '_BlendBone']
+        if name.endswith('_BlendBone'):
+            candidates.append(name[:-len('_BlendBone')])
+        for cand in candidates:
+            try:
+                ri = names_road.index(cand)
+            except ValueError:
+                continue
+            if (wheel_angles is not None
+                    and 0 <= ri < len(wheel_angles)):
+                return float(wheel_angles[ri])
+            return 0.0
+        return 0.0
+
+    # Per Coffee 2026-05-16 ("we need to get that angle to
+    # contact in relation to the chassis angle"): viewer
+    # stashed `_last_chassis_contact_angle_rad` at the end of
+    # `_compute_homie_chain_for_frame` -- the chassis-relative
+    # atan2 of world-down in YZ.  At pitch=0 this is -pi/2;
+    # nose-up pitch shifts it positive.  Same value for every
+    # wheel on the chassis at this point (per-wheel terrain-
+    # slope refinement is a follow-up).
+    contact_angle_chassis = float(getattr(
+        viewer, '_last_chassis_contact_angle_rad', -math.pi * 0.5))
     for side_token in ('L', 'R'):
         pos_attr = f'_last_homie_pos_{side_token}'
         pos = getattr(viewer, pos_attr, None)
@@ -334,6 +289,16 @@ def _build_chain_focus(viewer):
             continue
         s_offset = float(getattr(
             viewer, f'_track_chain_s_offset_{side_token}', 0.0))
+        hubs_stash = getattr(viewer, f'_homie_hubs_{side_token}',
+                              None)
+        onarc_stash = getattr(viewer, f'_homie_onarc_{side_token}',
+                                None)
+        if (hubs_stash is not None
+                and len(hubs_stash) != len(pos)):
+            hubs_stash = None
+        if (onarc_stash is not None
+                and len(onarc_stash) != len(pos)):
+            onarc_stash = None
         per_wheel = []
         for wheel_name in road:
             b = bones_now.get(wheel_name)
@@ -346,39 +311,44 @@ def _build_chain_focus(viewer):
             R = float(radii_xml.get(wheel_name) or 0.0)
             if R <= 0.0:
                 continue
-            spin = 0.0
-            try:
-                ri = names_road.index(wheel_name)
-            except ValueError:
-                ri = -1
-            if (ri >= 0 and wheel_angles is not None
-                    and ri < len(wheel_angles)):
-                spin = float(wheel_angles[ri])
             rng = 1.5 * (R + inner_t)
             pads = []
             for i, p in enumerate(pos):
                 dy = float(p[1]) - hub_y
                 dz = float(p[2]) - hub_z
-                d = math.sqrt(dy * dy + dz * dz)
-                if d <= rng:
-                    pads.append({
-                        'idx':   int(i),
-                        'y':     float(p[1]),
-                        'z':     float(p[2]),
-                        'd_hub': float(d),
-                    })
+                if dy * dy + dz * dz > rng * rng:
+                    continue
+                on_this_arc = False
+                if (hubs_stash is not None
+                        and onarc_stash is not None
+                        and bool(onarc_stash[i])):
+                    ph = hubs_stash[i]
+                    if (abs(float(ph[1]) - hub_y) < 1e-3
+                            and abs(float(ph[2]) - hub_z) < 1e-3):
+                        on_this_arc = True
+                pads.append({
+                    'idx':       int(i),
+                    'angle_rad': float(math.atan2(dy, dz)),
+                    'on_arc':    bool(on_this_arc),
+                })
             per_wheel.append({
-                'wheel_name':      wheel_name,
-                'hub_chassis_yz':  [hub_y, hub_z],
-                'hub_R_m':         R,
-                'inner_t_m':       inner_t,
-                'wheel_angle_rad': spin,
-                's_offset_m':      s_offset,
-                'n_pads_in_band':  len(pads),
-                'pads':            pads,
+                'wheel_name':       wheel_name,
+                'wheel_angle_rad':  _spin_for(wheel_name),
+                'contact_angle_rad': contact_angle_chassis,
+                'pads':             pads,
             })
         if per_wheel:
-            out[side_token] = per_wheel
+            arcs = list(getattr(
+                viewer, f'_last_chain_arcs_{side_token}', None) or ())
+            chords = list(getattr(
+                viewer, f'_last_ground_chords_{side_token}',
+                None) or ())
+            out[side_token] = {
+                's_offset_m':    s_offset,
+                'wheels':        per_wheel,
+                'chain_arcs':    arcs,
+                'ground_chords': chords,
+            }
     return out
 
 
@@ -683,6 +653,46 @@ def manual_record_capture_frame(viewer, dt):
         viewer._manual_record_prev_states = list(tp.last_wheel_state)
 
 
+def _run_plotters(viewer, json_path):
+    """Per Coffee 2026-05-17 ("can you have tepy run the apps
+    to draw the images when we F3 a frame?"): on every
+    successful F3 save, fire the two diagnostic plotters
+    against the recording.  Spawned as a non-blocking child
+    process so the viewer keeps running; output PNGs land in
+    `test_runs/plots/`.
+    """
+    import subprocess
+    import sys
+    root = _project_root()
+    plotters = (
+        os.path.join(root, 'cust_tools',
+                      'plot_chain_arc_directions.py'),
+        os.path.join(root, 'cust_tools',
+                      'plot_chain_ground_chords.py'),
+    )
+    launched = 0
+    for script in plotters:
+        if not os.path.isfile(script):
+            continue
+        try:
+            subprocess.Popen(
+                [sys.executable, script, json_path, '--frame', '0'],
+                cwd=root,
+                creationflags=(getattr(subprocess,
+                                         'CREATE_NO_WINDOW', 0)
+                                if os.name == 'nt' else 0),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            launched += 1
+        except Exception as _ex:
+            print(f'[manual_record] plotter spawn failed: '
+                  f'{os.path.basename(script)}: {_ex}')
+    if launched:
+        viewer.log(f"manual record: spawned {launched} plotter(s) "
+                   f"-> test_runs/plots/",
+                   color=(180, 220, 255))
+
+
 def manual_record_finalize(viewer):
     """Stop the F3 recorder, save JSON, reset state."""
     n_frames = len(viewer._manual_record_frames)
@@ -714,6 +724,13 @@ def manual_record_finalize(viewer):
         viewer.log(f"manual record: STOPPED ({n_frames} frames) "
                    f"-> {out_path}{dt_summary}",
                    color=(180, 220, 255))
+        try:
+            _run_plotters(viewer, out_path)
+        except Exception as _ex_plot:
+            viewer.log(
+                f"manual record: plotter launch failed: "
+                f"{_ex_plot}",
+                color=(255, 160, 160))
     else:
         viewer.log(f"manual record: STOPPED ({n_frames} frames, "
                    f"nothing saved){dt_summary}",
@@ -740,72 +757,34 @@ def manual_record_save_json(viewer):
             print(f"[manual_record] couldn't rotate prev backup: {_ex_roll}")
 
     tp = viewer.tank_physics
-    meta = {
-        'schema_version':              1,
-        'kind':                        'tank_manual_record',
-        'tank':                        tank_name,
-        'timestamp':                   datetime.now().isoformat(timespec='seconds'),
-        'tepy_version':                _tepy_version(),
-        'gravity':                     float(tp.gravity),
-        'radius_m':                    float(tp.radius),
-        'min_offset_m':                float(tp.min_offset),
-        'max_offset_m':                float(tp.max_offset),
-        'track_thickness_m':           float(tp.track_thickness),
-        'mass_kg':                     float(tp.mass_kg),
-        'com_local':                   [float(c) for c in tp.com_local],
-        'lateral_lean_gain':           float(getattr(tp, 'lateral_lean_gain', 0.0)),
-        'longitudinal_lean_gain':      float(getattr(tp, 'longitudinal_lean_gain', 0.0)),
-        'comp_cap_m':                  float(-tp.min_offset),
-        'ext_cap_m':                   float(-tp.max_offset),
-        'envelope_total_m':            float(tp.max_offset - tp.min_offset),
-        'classifier_hyst_m':           0.020,
-        'integrator_omegan_pitch_rad_s': 9.0,
-        'integrator_omegan_roll_rad_s':  11.0,
-        'integrator_omegan_y_rad_s':     14.0,
-        'integrator_zeta':             1.0,
-        'integrator_mass_ref_kg':      30000.0,
-        'n_wheels':                    int(len(tp.wheels)),
-        'n_left':                      int(tp.n_left),
-        'n_right':                     int(tp.n_right),
-        'wheel_bone_names':            list(tp.wheel_bone_names),
-        'wheel_local_positions':       [
-            [float(w[0]), float(w[1]), float(w[2])] for w in tp.wheels],
-        'state_code_legend':           {
-            '0': 'NONE', '1': 'CONTACT', '2': 'HANGING', '3': 'OVER_COMP'},
-        'frame_count':                 int(len(viewer._manual_record_frames)),
-        'duration_s':                  float(viewer._manual_record_t_accum_s),
-        'dt_min_ms':                   (float(viewer._manual_record_dt_min_ms)
-                                        if viewer._manual_record_dt_min_ms != float('inf')
-                                        else 0.0),
-        'dt_max_ms':                   float(viewer._manual_record_dt_max_ms),
-        'tank_physics_enabled':        bool(getattr(viewer, 'tank_physics_enabled', False)),
-        'show_terrain':                bool(getattr(viewer, 'show_terrain', False)),
-        'show_track_spline':           bool(getattr(viewer, '_show_track_spline', False)),
-        'sign_convention':             {
-            'residual_y_positive_means': 'wheel rises into hull (compression)',
-            'residual_y_negative_means': 'wheel droops below neutral (extension)',
-            'pitch_render_positive_means': 'nose up',
-            'roll_render_positive_means':  'left side up (tank leans right)',
-            'delta_y_positive_means': 'wheel must compress (rise) to reach terrain',
-            'delta_y_negative_means': 'wheel must extend (drop) to reach terrain',
-            'hyst_dist_to_flip_m_positive_means': 'safely inside current state band',
-            'hyst_dist_to_flip_m_negative_means': 'past hysteresis edge; will flip next frame',
-        },
-    }
     ci = getattr(viewer, '_pending_chassis_info', None) or {}
-    if ci:
-        # Per Coffee 2026-05-16 ("says nothing saved"): some
-        # entries in `_pending_chassis_info` are tuples of
-        # numpy arrays (e.g. `track_sag_L = (zs_array,
-        # ys_array)`).  `json.dump` can't serialise numpy
-        # arrays and the write truncated mid-meta -- the
-        # recorder silently logged "nothing saved" because the
-        # save exception was caught by
-        # `manual_record_finalize`'s try/except.  Run the dict
-        # through `_json_safe` first.
-        meta['chassis_info_xml'] = _json_safe(ci)
+    roles_all = ci.get('wheel_roles') or {}
+    radii_all = ci.get('wheel_radii') or {}
+    # Only retain the road-wheel radii -- the chain-focus payload
+    # is scoped to road wheels, so sprockets / idlers / rollers
+    # don't need to ride along in meta.
+    road_names = set(roles_all.get('road_wheels_L', []))
+    road_names.update(roles_all.get('road_wheels_R', []))
+    road_radii = {nm: float(radii_all[nm])
+                  for nm in road_names if nm in radii_all}
+    meta = {
+        'schema_version':           2,
+        'kind':                     'tank_manual_record',
+        'tank':                     tank_name,
+        'timestamp':                datetime.now().isoformat(timespec='seconds'),
+        'tepy_version':             _tepy_version(),
+        'frame_count':              int(len(viewer._manual_record_frames)),
+        'duration_s':               float(viewer._manual_record_t_accum_s),
+        'segmentsInnerThickness':   float(ci.get('segmentsInnerThickness', 0.0) or 0.0),
+        'segmentLength':            float(ci.get('segmentLength', 0.0) or 0.0),
+        'segmentsCount':            int(ci.get('segmentsCount', 0) or 0),
+        'road_wheels_L':            list(roles_all.get('road_wheels_L', [])),
+        'road_wheels_R':            list(roles_all.get('road_wheels_R', [])),
+        'wheel_radii':              road_radii,
+    }
 
     payload = {'meta': meta, 'frames': viewer._manual_record_frames}
+    payload = _round_floats(payload, 4)
     with open(out_path, 'w', encoding='utf-8') as fh:
         # `default=_json_safe` is the safety net: anything that
         # slipped past the meta+frame builders (= a stray numpy

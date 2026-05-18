@@ -50,7 +50,10 @@ def _angle_from_hub(point, hub):
     return math.atan2(d[1], d[0])
 
 
-def _short_arc_signed_diff(a_in, a_out, deg_tol=0.5):
+def _short_arc_signed_diff(a_in, a_out, deg_tol=0.0):
+    # Per Coffee 2026-05-18 ("disable all but 1, 2 and 3"):
+    # deg_tol default lowered from 0.5 to 0.0 -- accept
+    # arbitrarily small arcs.  (#5 in SPLINE_CONSTRAINTS.md)
     diff = a_in - a_out
     while diff > math.pi:
         diff -= 2 * math.pi
@@ -380,7 +383,7 @@ def compute_tooth_phase_offset(arcs_3, tooth_syncs, side, n_pads,
     # indices line up.  We don't need the geometric payload --
     # only segment lengths + a flag for "this segment is the arc
     # on wheel X".
-    DEGEN_ARC_RAD = 0.005
+    DEGEN_ARC_RAD = 0.0   # Coffee 2026-05-18 disable #6
     seg_lens   = []
     seg_arc_on = []   # per-segment: wheel name if arc, else None
     seg_a_in   = []   # per-segment: a_in if arc, else None
@@ -537,7 +540,7 @@ def compute_chain_total(arcs_3):
     """
     if not arcs_3:
         return 0.0
-    DEGEN_ARC_RAD = 0.005
+    DEGEN_ARC_RAD = 0.0   # Coffee 2026-05-18 disable #6
     total = 0.0
     for i, entry in enumerate(arcs_3):
         # Line segment from this wheel's exit contact to the next
@@ -601,7 +604,7 @@ def _place_pads(arcs, n_pads, s_offset=0.0):
     # R-correction in `_correct_R` rebalances the loop's total
     # length against active wheels, so dropping a sub-mm arc
     # doesn't measurably shift the chain.
-    DEGEN_ARC_RAD = 0.005
+    DEGEN_ARC_RAD = 0.0   # Coffee 2026-05-18 disable #6
     segments = []
     for i, entry in enumerate(arcs):
         tt = entry.get('tangent_to_next')
