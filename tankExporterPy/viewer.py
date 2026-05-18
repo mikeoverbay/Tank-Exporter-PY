@@ -17920,39 +17920,14 @@ class Viewer:
             elif keys[pygame.K_s]:
                 target_forward = -move_speed
 
-            # ---- Speed integrator: rate-limited toward target -------
-            # Per Coffee 2026-05-18 ("we need more accel decel in
-            # the tank.  more real").
-            #
-            # Real tank longitudinal dynamics: engine-limited
-            # acceleration averages 1-2 m/s^2 (apparent-mass
-            # coeff delta ~= 1.3 inflates effective inertia
-            # beyond pure mass; tank theory tractive-balance
-            # formula `b = g (P - sum R) / G delta`).  Braking
-            # peaks 3-5 m/s^2 because brake force dominates
-            # engine spool-up.
-            #
-            # Constant-rate ramp toward `target_forward`:
-            #   * ACCEL_MPS2 (= magnitude growing)  : 2.0
-            #   * DECEL_MPS2 (= magnitude shrinking): 4.0
-            #
-            # `growing` means |target| > |cur| AND same sign --
-            # commanded speed pulling further from zero.  Any
-            # other delta direction (coast to stop, reverse,
-            # downshift) uses the stronger DECEL rate.
-            ACCEL_MPS2 = 2.0
-            DECEL_MPS2 = 4.0
-            prev_cur = float(getattr(self, '_current_forward', 0.0))
-            tgt      = float(target_forward)
-            growing  = (abs(tgt) > abs(prev_cur)
-                        and tgt * prev_cur >= 0.0)
-            rate     = ACCEL_MPS2 if growing else DECEL_MPS2
-            max_step = rate * max(float(dt), 0.0)
-            delta    = tgt - prev_cur
-            if abs(delta) <= max_step:
-                cur = tgt
-            else:
-                cur = prev_cur + math.copysign(max_step, delta)
+            # ---- Hand the speed straight to physics ----------------
+            # Per Coffee 2026-05-18 (option 1): v1.231.1 accel /
+            # decel ramp reverted.  With the chain now slaved
+            # to the drive-sprocket angle (v1.231.18) and no
+            # longitudinal-accel transient from a ramp,
+            # start / stop should be instant -- no pitch bob,
+            # no chain bounce.
+            cur = float(target_forward)
             self._current_forward = cur
             tp.cur_forward_mps    = -cur
 
