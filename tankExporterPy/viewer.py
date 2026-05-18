@@ -7400,10 +7400,13 @@ class Viewer:
             # first inside-radius pad.
             ci_local = (getattr(self, '_pending_chassis_info',
                                 None) or {})
-            inner_t_pbd = float(
-                ci_local.get('segmentsInnerThickness', 0.0)
+            # Per Coffee 2026-05-18 ("Try applying outer thickness
+            # only to wheels radius"): match the homie chain's
+            # wheel inflation.  Now uses `segmentsOuterThickness`.
+            outer_t_pbd = float(
+                ci_local.get('segmentsOuterThickness', 0.0)
                 or 0.0)
-            rs_inflated = [r + inner_t_pbd for r in rs]
+            rs_inflated = [r + outer_t_pbd for r in rs]
             if need_seed:
                 inst = _pbd.TrackChainPBD(
                     side_x=side_x,
@@ -7798,7 +7801,15 @@ class Viewer:
         # is the chassis-subdict (same handle the chain code
         # reads from above); fall back to 0.0 when the field is
         # missing.
-        ci_inner_t = float(ci.get('segmentsInnerThickness', 0.0)
+        # Per Coffee 2026-05-18 ("Try applying outer thickness
+        # only to wheels radius"): switch the wheel-radius
+        # offset from `segmentsInnerThickness` to
+        # `segmentsOuterThickness`.  The hinge pin lies on the
+        # OUTER side of the pad (between the pad and the ground);
+        # the chain pitch circle (= where the hinge centres ride)
+        # is therefore at R + outer_thickness, not R + inner_t.
+        # T110E4: outer 0.0291 m (was using inner 0.0615 m).
+        ci_outer_t = float(ci.get('segmentsOuterThickness', 0.0)
                             or 0.0)
         # Per Coffee 2026-05-18 ("i dont want the chassis to
         # stay level.  I want the chains to follow the drive
@@ -7836,7 +7847,7 @@ class Viewer:
             try:
                 tp.advance_wheel_angles(
                     v_L, v_R, dt,
-                    inner_thickness=ci_inner_t,
+                    inner_thickness=ci_outer_t,
                     sprocket_pitch_radii=sp_radii)
             except Exception:
                 pass
@@ -7892,7 +7903,7 @@ class Viewer:
                     # between rim surface and chain pads.
                     _Rp = max(
                         float(tp.extra_rotating_radii[
-                            _drive_idx]) + ci_inner_t, 1e-3)
+                            _drive_idx]) + ci_outer_t, 1e-3)
                     _cur_ang = float(ex_angles[_drive_idx])
                     _prev_ang = getattr(self, _attr_prev,
                                           _cur_ang)
@@ -8040,18 +8051,20 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
-                # Per Coffee 2026-05-16 ("add pad inner offset
-                # to R"): shift each wheel's wrap radius by the
-                # chassis XML's `<segmentsInnerThickness>` so
-                # the chain spline rides at the chain inner
-                # face rather than the wheel rim.  Default 0.0
-                # when the field is missing -- old behaviour.
-                inner_t = float(
-                    ci.get('segmentsInnerThickness', 0.0) or 0.0)
+                # Per Coffee 2026-05-18 ("Try applying outer
+                # thickness only to wheels radius"): shift each
+                # wheel's wrap radius by the chassis XML's
+                # `<segmentsOuterThickness>` so the chain pitch
+                # circle rides at the hinge-pin outer face
+                # (= where consecutive pads' pins meet around the
+                # wheel) rather than the wheel rim or the inner
+                # face.  Default 0.0 when the field is missing.
+                outer_t = float(
+                    ci.get('segmentsOuterThickness', 0.0) or 0.0)
                 arcs_3 = _th.build_chain_segments(
                     bones, radii, chain_roles, side,
                     n_pads, float(seg_len),
-                    inner_thickness=inner_t)
+                    inner_thickness=outer_t)
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
