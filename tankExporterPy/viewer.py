@@ -7870,31 +7870,21 @@ class Viewer:
         # missing.
         ci_inner_t = float(ci.get('segmentsInnerThickness', 0.0)
                             or 0.0)
-        # Per Coffee 2026-05-18 ("speed is locked to the W_D
-        # wheels... calculating its circumference with any R
-        # offsets and use that to move the our homie chain"):
-        # build the per-bone polygon-pitch R_p lookup for every
-        # toothed wheel mentioned in chassis_info's tooth_syncs.
-        # `R_p = p / (2 * sin(pi / N))` -- the actual radius the
-        # chain pin centres ride at on a sprocket of N teeth.
-        # tooth_syncs entries are typically L-side only; mirror
-        # them to R so right-side drive sprockets get the same
-        # correction.
+        # Per Coffee 2026-05-18 ("i dont want the chassis to
+        # stay level.  I want the chains to follow the drive
+        # wheels and not move faster or slower"): the chain
+        # WRAPS the drive sprocket at `R + inner_thickness`
+        # (per track_homie.build_chain_segments / SPLINE_CONSTRAINTS
+        # #3), so the drive sprocket must SPIN at the same radius
+        # for the rim surface to match the chain's linear speed.
+        # An earlier v1.231.17 attempt used the polygon-pitch
+        # formula `R_p = p / (2 * sin(pi / N))` for toothed wheels,
+        # which differs from `R + inner_thickness` by ~1-2% and
+        # produced visible chain-on-sprocket slip.  Pass an empty
+        # `sprocket_pitch_radii` so EVERY wheel (toothed or not)
+        # uses `R + inner_thickness` -- chain and rim move at the
+        # exact same surface speed, zero slip.
         sp_radii = {}
-        ts_blob = ci.get('tooth_syncs') or {}
-        if ts_blob and float(seg_len) > 0.0:
-            for bone_name, sync in ts_blob.items():
-                try:
-                    N = int(sync.get('teethCount', 0))
-                except (TypeError, ValueError):
-                    N = 0
-                if N <= 0:
-                    continue
-                R_pitch = (float(seg_len)
-                           / (2.0 * math.sin(math.pi / N)))
-                sp_radii[bone_name] = R_pitch
-                if '_L' in bone_name:
-                    sp_radii[bone_name.replace('_L', '_R', 1)] = R_pitch
         try:
             tp.advance_wheel_angles(
                 v_L, v_R, dt,
@@ -7943,15 +7933,17 @@ class Viewer:
                             break
                     if _drive_idx < 0:
                         continue
-                    _Rp = float(sp_radii.get(_bare) or 0.0)
-                    if _Rp <= 1e-3:
-                        # No polygon-pitch entry -> fall back
-                        # to the toothless formula so the chain
-                        # at least advances on tanks lacking
-                        # tooth_syncs in the chassis XML.
-                        _Rp = max(
-                            float(tp.extra_rotating_radii[
-                                _drive_idx]) + ci_inner_t, 1e-3)
+                    # Use the SAME radius the drive sprocket
+                    # spins at (`R + inner_thickness`).  Since
+                    # `sp_radii` is empty (polygon-pitch override
+                    # dropped at v1.231.22 -- see the
+                    # `advance_wheel_angles` call above), this
+                    # is also the radius `advance_wheel_angles`
+                    # used for the angle integration.  Zero slip
+                    # between rim surface and chain pads.
+                    _Rp = max(
+                        float(tp.extra_rotating_radii[
+                            _drive_idx]) + ci_inner_t, 1e-3)
                     _cur_ang = float(ex_angles[_drive_idx])
                     _prev_ang = getattr(self, _attr_prev,
                                           _cur_ang)

@@ -746,16 +746,12 @@ class TankPhysics:
         # nose dives.  See `_update_lateral_lean` for the actual
         # formula.
         #
-        # Per Coffee 2026-05-18 ("spring is back decouple accel
-        # decel from the track"): longitudinal pitch lean
-        # disabled (gain = 0).  The chassis no longer noses-up
-        # on accel / dives on brake -- the visible "spring"
-        # bob during start / stop is gone.  Chain stays locked
-        # to the wheels (which stay locked to the unchanged
-        # chassis pose), so the entire tank accelerates as one
-        # rigid body without pitch overshoot.
+        # `longitudinal_lean_gain` 0.5 default -- tank suspension is
+        # stiffer in the longitudinal direction than the lateral
+        # (long arm = full tank length; lateral arm = half track
+        # width).  0.5 reads as "weight transfer" without overshoot.
         self.last_signed_speed_mps         = 0.0
-        self.longitudinal_lean_gain        = 0.0
+        self.longitudinal_lean_gain        = 0.5
         self._last_a_long_mps2             = 0.0  # telemetry
         self._last_signed_speed_mps        = 0.0  # telemetry
         self._target_long_lean_pitch_deg   = 0.0  # integrator offset
