@@ -6520,41 +6520,26 @@ class Viewer:
         # the pad mesh is symmetric across its own X plane
         # (typical WoT track-shoe geometry).
         #
-        # Per Coffee 2026-05-10 ("it should be the hinge point on
-        # the tracks.. that's the offset we need"): the gameplay
-        # XML's `<trackPair><segmentOffset>` is where the pad
-        # mesh's HINGE PIN sits in pad-local coordinates -- the
-        # axis the pad rotates about as it travels along the
-        # spline.  The spline samples chain positions at uniform
-        # arc-length; what we WANT is for each pad's hinge pin
-        # to land at the sampled position, not for the pad
-        # mesh's local origin to land there.
+        # Per Coffee 2026-05-18 ("radial offsets"): the chassis
+        # XML's `<trackPair><segmentOffset>` and
+        # `<segment2Offset>` are RADIAL distances along pad-local
+        # +Y (outward from the chain centerline), NOT forward
+        # distances along the chain.  T110E4 ships
+        # `segmentOffset=0.258` and `segment2Offset=0.09` -- the
+        # two halves of the pad shoe sit at different radial
+        # depths and meet at a shared hinge pin radially outward
+        # from the chain anchor.
         #
-        # Mathematically: we need the pad-local point
-        # `(0, 0, seg_offset)` (the hinge) to map to the spline
-        # position `(p)`.  In `world = xform_local @ pad_local`,
-        # that means `xform_local[:, :, 3]` (= world dest of
-        # pad-local origin) must be shifted by
-        # `-seg_offset * z_axis` so that the hinge ends up at
-        # `p` instead.  The pad mesh body then sits offset
-        # FROM the spline by seg_offset along its forward
-        # direction -- exactly how a real track shoe hangs
-        # off its hinge pin.
-        #
-        # Sign flipped vs the v1.118.30 attempt (which placed
-        # the mesh origin at the spline AND additionally
-        # shifted forward by seg_offset, producing the worst
-        # of both worlds -- pads off the spline AND in the
-        # wrong direction).
         # Per Coffee 2026-05-11 ("some tanks have 2 parts but
         # they are both attached to one point.  there are 2
         # offsets to get total pad thickness"): the shoe
         # assembly on tanks like T110E4 is TWO mesh parts
         # rigidly bolted together -- segmentModel + segment2Model
         # share the same chain anchor, but each has its own
-        # forward offset along pad-local +Z (segmentOffset for
+        # radial offset along pad-local +Y (segmentOffset for
         # part 1, segment2Offset for part 2).  The two offsets
-        # together give the total pad thickness.
+        # together give the total pad thickness (radial
+        # extent).
         #
         # We therefore DON'T pre-shift xform_L / xform_R in bulk
         # any more (that would only let us pick a single offset).
@@ -6584,7 +6569,7 @@ class Viewer:
             self.log(
                 f"segmentOffset={seg_offset:+.4f}  "
                 f"segment2Offset={seg2_offset:+.4f}  "
-                f"(per-part hinge offsets along pad +Z)",
+                f"(per-part radial offsets along pad +Y)",
                 color=(180, 220, 255))
             self._segoff_logged = True
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
@@ -6848,34 +6833,30 @@ class Viewer:
 
         # Per Coffee 2026-05-11 ("both of the pad pieces should be
         # considered as one.  they need to both rotate at the
-        # pivot as one part.  could these be the offsets to
-        # center of rotation"):
+        # pivot as one part."), and 2026-05-18 ("radial offsets"):
         #
-        # `segmentOffset` and `segment2Offset` are the LOCATION OF
-        # THE PIVOT (= center of rotation = hinge pin) inside each
-        # mesh part's local coordinate system.  Each pad piece's
-        # mesh-local origin is OFFSET from the pivot by the
-        # respective amount.  To rotate the whole 2-piece shoe
-        # around ONE shared pivot in world space (the chain
-        # anchor), we shift each mesh BACKWARDS along pad-local
-        # +Z by its offset -- so the mesh's pivot-local-point
-        # `(0, 0, offset)` ends up at the chain anchor.
+        # `segmentOffset` and `segment2Offset` are RADIAL offsets
+        # (along pad-local +Y, outward from the chain centerline)
+        # describing where each mesh part's hinge pin sits in its
+        # own local coordinates.  For T110E4: segment1 hinge sits
+        # 0.258 m outward from its mesh origin; segment2 hinge
+        # sits 0.09 m outward from its origin.  To make the
+        # two-piece shoe share ONE hinge in world space (the
+        # natural pivot for chain bending), the segment2 mesh is
+        # shifted by `(seg_offset - seg2_offset) * y_axis` so its
+        # hinge ends up at the same world point as segment1's
+        # (= `chain_anchor + seg_offset * y_axis`).
         #
-        # In world: world_pos_of_pivot
-        #   = xform_world[:, :, 3] - offset * z_axis + offset * z_axis
-        #   = xform_world[:, :, 3]   (= chain anchor, shared by both)
+        # Net visual: segment + segment2 share the SAME hinge pin
+        # in world space.  Both pieces extend outward from the
+        # chain anchor by their own radial offsets, meeting at
+        # one shared pivot that the rigid shoe rotates about.
+        # (Previously the shift was along +Z = forward, which
+        # placed the pivot ahead of the anchor and made the two
+        # pieces visibly separate as the chain bent around a
+        # wheel.)
         #
-        # Net visual: segment + segment2 share the SAME pivot in
-        # world space.  Both pieces extend "behind" the pivot
-        # along their respective lengths, forming one rigid shoe
-        # that rotates around the anchor as the chain bends.
-        # (Previously the sign was inverted: +offset moved the
-        # mesh FORWARD of the anchor, which placed the pivot 2x
-        # the offset ahead of where it should be -- and each
-        # piece's pivot landed at a DIFFERENT spot, so they
-        # rotated independently.)
-        #
-        # Pink pin markers therefore now go at the SHARED chain
+        # Pink pin markers therefore go at the SHARED chain
         # anchor (xform_world's pre-shift translation column),
         # not per-renderer.  One pin per chain anchor regardless
         # of variant count.
@@ -6999,42 +6980,43 @@ class Viewer:
                     and not getattr(self,
                                      '_show_right_track', True)):
                 continue
-            # Per Coffee 2026-05-16 ("2 at pads at center.. see
-            # it?", "spline looks better.. pads not so much"):
-            # for TWO-piece pads, align the segment2 mesh with
-            # the segment mesh so they share the hinge pin in
-            # world space.
+            # Per Coffee 2026-05-16 ("2 at pads at center..", then
+            # 2026-05-18 "radial offsets"):  the chassis XML
+            # `<segmentOffset>` and `<segment2Offset>` values are
+            # RADIAL distances (along pad-local +Y -- outward from
+            # the wheel hub / chain centerline), NOT forward
+            # distances along the chain.  T110E4 has
+            # `segmentOffset=0.258`, `segment2Offset=0.09`: the
+            # two mesh halves sit at different radial distances
+            # from the chain anchor, and their hinge pins meet
+            # at the same radial location.
             #
-            # On two-piece pads the chassis XML carries DISTINCT
-            # `segmentOffset` and `segment2Offset` values
-            # describing where each mesh's hinge pin sits in its
-            # own local coordinate system.  With v1.215.0
-            # dropping the runtime shift, both meshes land at
-            # the SAME chain anchor in world space -- their
-            # bounding boxes coincide and we see "2 pads at
-            # center".
+            # With v1.215.0 dropping the runtime shift, both
+            # meshes land at the SAME chain anchor in world
+            # space -- their bounding boxes coincide and we
+            # see "2 pads at center".  Single-piece pads
+            # (A100_T49, Pudel, etc.) only have ONE renderer per
+            # side; their mesh-local origin is placed at the
+            # chain anchor by v1.215.0's design and that
+            # renders correctly today.
             #
-            # Single-piece pads (Pudel etc.) only have ONE
-            # renderer per side; their mesh-local origin is
-            # placed at the chain anchor by v1.215.0's design
-            # and that renders correctly today.  This fix is
-            # therefore GATED on the two-piece case: shift
-            # ONLY the `segment2*` renderers by
-            # `(seg_offset - seg2_offset) * z_axis` so that the
+            # Fix is GATED on the two-piece case: shift ONLY the
+            # `segment2*` renderers by
+            # `(seg_offset - seg2_offset) * y_axis` so that the
             # segment2 mesh's hinge aligns with the segment
             # mesh's hinge -- both end up at
-            # `chain_anchor + seg_offset * z_axis` in world.
-            # `segment*` (and `link*`) keep the v1.215.0
-            # placement.
+            # `chain_anchor + seg_offset * y_axis` (radially
+            # outward).  `segment*` (and `link*`) keep the
+            # v1.215.0 placement.
             xform_clamped = xform_world.copy()
             is_two_piece = (seg_offset != 0.0
                              and seg2_offset != 0.0)
             if is_two_piece and 'segment2' in key:
                 delta_offset = seg_offset - seg2_offset
-                z_axis = xform_clamped[:, 0:3, 2]
+                y_axis = xform_clamped[:, 0:3, 1]
                 xform_clamped[:, 0:3, 3] = (
                     xform_clamped[:, 0:3, 3]
-                    + delta_offset * z_axis)
+                    + delta_offset * y_axis)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
