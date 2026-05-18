@@ -17920,14 +17920,26 @@ class Viewer:
             elif keys[pygame.K_s]:
                 target_forward = -move_speed
 
-            # ---- Hand the speed straight to physics ----------------
-            # Per Coffee 2026-05-18 (option 1): v1.231.1 accel /
-            # decel ramp reverted.  With the chain now slaved
-            # to the drive-sprocket angle (v1.231.18) and no
-            # longitudinal-accel transient from a ramp,
-            # start / stop should be instant -- no pitch bob,
-            # no chain bounce.
-            cur = float(target_forward)
+            # ---- Speed integrator: rate-limited toward target -------
+            # Per Coffee 2026-05-18 ("you killed accel decel of
+            # entire tank"): the v1.231.1 ramp is back.  Chassis
+            # speed ramps toward target so the tank itself
+            # accels / decels realistically; the chain stays
+            # locked to the drive sprocket (v1.231.18) so the
+            # ramp produces no chain-vs-wheel bounce.
+            ACCEL_MPS2 = 2.0
+            DECEL_MPS2 = 4.0
+            prev_cur = float(getattr(self, '_current_forward', 0.0))
+            tgt      = float(target_forward)
+            growing  = (abs(tgt) > abs(prev_cur)
+                        and tgt * prev_cur >= 0.0)
+            rate     = ACCEL_MPS2 if growing else DECEL_MPS2
+            max_step = rate * max(float(dt), 0.0)
+            delta    = tgt - prev_cur
+            if abs(delta) <= max_step:
+                cur = tgt
+            else:
+                cur = prev_cur + math.copysign(max_step, delta)
             self._current_forward = cur
             tp.cur_forward_mps    = -cur
 
