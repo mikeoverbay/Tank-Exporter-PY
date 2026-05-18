@@ -7847,8 +7847,6 @@ class Viewer:
             v_L = speed_mps - half_omega * half_gauge
             v_R = speed_mps + half_omega * half_gauge
         dt  = float(getattr(self, '_frame_dt', 1.0 / 60.0))
-        self._track_chain_s_offset_L += v_L * dt
-        self._track_chain_s_offset_R += v_R * dt
         # Per Coffee 2026-05-13 ("we are adding wheel rotations"):
         # advance each road wheel's spin angle by (v_track / R) *
         # dt using the SAME side-differentiated speeds we just
@@ -7904,6 +7902,84 @@ class Viewer:
                 sprocket_pitch_radii=sp_radii)
         except Exception:
             pass
+
+        # Per Coffee 2026-05-18 ("[chain] is locked to the
+        # W_D wheels.  it can NOT move on those wheels"):
+        # slave the chain s_offset to the DRIVE SPROCKET's
+        # angular advance, not to v_world directly.  Drive
+        # sprocket teeth engage chain pin slots rigidly --
+        # zero slip is possible.  Whatever angle the
+        # sprocket rotated (per advance_wheel_angles, which
+        # already uses the correct polygon pitch R_p for
+        # toothed bones), the chain advances by `delta_theta
+        # * R_p` along its loop direction.  Any future
+        # chain-vs-ground slip model goes between the chain
+        # and the GROUND (road-wheel-to-terrain friction),
+        # never between the chain and the sprocket.
+        try:
+            extras    = getattr(tp, 'extra_rotating_bones', None)
+            ex_angles = getattr(tp, 'extra_rotating_angles_rad',
+                                  None)
+            if (extras is not None
+                    and ex_angles is not None
+                    and len(extras) == len(ex_angles)):
+                for _side_tok, _attr_off, _attr_prev in (
+                        ('L', '_track_chain_s_offset_L',
+                              '_drive_angle_prev_L'),
+                        ('R', '_track_chain_s_offset_R',
+                              '_drive_angle_prev_R')):
+                    _drives = (roles.get(
+                        f'drive_sprockets_{_side_tok}') or [])
+                    if not _drives:
+                        continue
+                    _bare = _drives[0]
+                    _key = (_bare + '_BlendBone'
+                            if not _bare.endswith('_BlendBone')
+                            else _bare)
+                    _drive_idx = -1
+                    for _i_ex, _ex_nm in enumerate(extras):
+                        if _ex_nm == _key or _ex_nm == _bare:
+                            _drive_idx = _i_ex
+                            break
+                    if _drive_idx < 0:
+                        continue
+                    _Rp = float(sp_radii.get(_bare) or 0.0)
+                    if _Rp <= 1e-3:
+                        # No polygon-pitch entry -> fall back
+                        # to the toothless formula so the chain
+                        # at least advances on tanks lacking
+                        # tooth_syncs in the chassis XML.
+                        _Rp = max(
+                            float(tp.extra_rotating_radii[
+                                _drive_idx]) + ci_inner_t, 1e-3)
+                    _cur_ang = float(ex_angles[_drive_idx])
+                    _prev_ang = getattr(self, _attr_prev,
+                                          _cur_ang)
+                    _d_ang = _cur_ang - _prev_ang
+                    setattr(self, _attr_prev, _cur_ang)
+                    # `advance_wheel_angles` writes
+                    # `angle += -(v / R_p) * dt`, so positive v
+                    # (= forward driving in our sign convention
+                    # via tp.cur_forward_mps = -cur) leaves
+                    # _d_ang positive when going forward.  Chain
+                    # s_offset uses the SAME sign as v_L*dt did:
+                    # `s_offset += v_L * dt` produced the
+                    # rearward-on-bottom flow.  Multiply
+                    # _d_ang by -R_p to get the same sign as
+                    # `v_L * dt`.
+                    _delta_s = -_d_ang * _Rp
+                    setattr(self, _attr_off,
+                             float(getattr(self, _attr_off,
+                                           0.0)) + _delta_s)
+        except Exception as _ex_lock:
+            if TRACK_PHYSICS_VERBOSE:
+                print(f"[chain-lock] drive-slave failed: "
+                      f"{type(_ex_lock).__name__}: {_ex_lock}")
+            # Belt-and-suspenders fallback: if the drive-angle
+            # path failed for any reason, fall back to the old
+            # v_L * dt accumulator so the chain still moves.
+            self._track_chain_s_offset_L += v_L * dt
+            self._track_chain_s_offset_R += v_R * dt
 
         # Per Coffee 2026-05-16 ("now, fix the segment stick as
         # before and it it will be peachy"): build a per-frame
