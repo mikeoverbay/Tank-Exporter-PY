@@ -2464,37 +2464,30 @@ class TankPhysics:
         self._extra_rot_name_to_idx = {
             nm: i for i, nm in enumerate(names) if nm}
 
-    def advance_wheel_angles(self, v_L, v_R, dt, inner_thickness=0.0):
+    def advance_wheel_angles(self, v_L, v_R, dt, inner_thickness=0.0,
+                              sprocket_pitch_radii=None):
         """Advance each rotating wheel's spin angle by
         (v_track / R_pitch) * dt.  Covers BOTH road wheels
         (W_<side><i> bones via `self.wheels`) and any extras
         registered via `set_extra_rotating_wheels` (sprockets /
         idlers / rollers).
 
-        Per Coffee 2026-05-13 ("we are adding wheel rotations" +
-        "rotate all wheels" + "spinning backwards").  Sign on
-        the angle delta is NEGATIVE so the visible spin matches
-        the chain advance direction (Coffee verified after the
-        v1.118.113 first pass).
-
-        Per Coffee 2026-05-16 ("the shader that rotates each
-        wheel isn't obeying our start stop math.  The pads have
-        spring, the wheels should follow"): the chain animation
-        now wraps every wheel at the pitch circle (`R +
-        segmentsInnerThickness`) per v1.215.0, so the angular
-        rate that keeps the wheels visually locked to the pads
-        is
-
-            omega_wheel = v_chain / (R + inner_thickness)
-
-        not the old `v / R`.  Adjacent pads sliding around the
-        wheel arc at chain-flow speed `v` advance angularly at
-        `v / R_pitch` -- the wheel teeth must spin at the SAME
-        rate to keep their phase relationship with the pads.
-        Using bare R was too fast and drifted the wheels off
-        the chain over time (visible as slow rotation of the
-        wheel-vs-pad alignment, even when v_L/v_R were
-        perfectly side-differentiated).
+        Per Coffee 2026-05-18 ("speed is locked to the W_D
+        wheels at the front or back depending on the tank.
+        calculating its circumference with any R offsets and
+        use that to move the our homie chain"): TOOTHED drive
+        sprockets and idlers ride the chain at the POLYGON
+        PITCH CIRCLE -- R_pitch = p / (2 * sin(pi / N)) where
+        N = teeth count and p = chain pitch.  Using bare R +
+        inner_thickness for toothed wheels is off by ~1 % for
+        typical N (~20 teeth) and the sprocket drifts visibly
+        ahead of the chain over time.  Pass
+        `sprocket_pitch_radii` as `{bone_name: R_pitch_m}` to
+        override per-bone (caller builds it from
+        `chassis_info_xml.tooth_syncs`).  Bones missing from
+        the dict fall back to `radii[i] + inner_thickness` --
+        correct for toothless wheels (road wheels, return
+        rollers, plain idlers).
 
         Side derived from each bone's chassis-local X sign:
         X < 0 -> left -> use v_L; X >= 0 -> right -> use v_R.
@@ -2503,33 +2496,54 @@ class TankPhysics:
             v_L, v_R: per-side track speeds in m/s.
             dt:       frame delta-time in seconds.
             inner_thickness: chassis['segmentsInnerThickness']
-                in metres.  Default 0.0 (= old behaviour, used
-                only as a safe fallback for tanks whose chassis
-                XML lacks the field).
+                in metres.  Default 0.0.
+            sprocket_pitch_radii: `{bone_name: float R_pitch_m}`
+                lookup for toothed wheels.  None / empty means
+                every wheel uses `R + inner_thickness`.
         """
         inner_t = float(inner_thickness or 0.0)
+        sp_radii = sprocket_pitch_radii or {}
 
-        # ---- Road wheels --------------------------------------
+        # ---- Road wheels (toothless) --------------------------
         if (self.wheel_angles_rad is None
                 or len(self.wheel_angles_rad) != len(self.wheels)):
             self.wheel_angles_rad = np.zeros(
                 len(self.wheels), dtype=np.float32)
-        R_road = max(float(self.radius) + inner_t, 1e-3)
+        R_road_default = max(float(self.radius) + inner_t, 1e-3)
+        names_road = (list(self.wheel_bone_names)
+                      if self.wheel_bone_names else None)
         for i in range(len(self.wheels)):
             x = float(self.wheels[i, 0])
             v = float(v_L) if x < 0.0 else float(v_R)
-            self.wheel_angles_rad[i] += -(v / R_road) * float(dt)
+            R_i = R_road_default
+            if names_road is not None and i < len(names_road):
+                nm = names_road[i]
+                if nm:
+                    bare = (nm[:-len('_BlendBone')]
+                            if nm.endswith('_BlendBone') else nm)
+                    R_override = sp_radii.get(bare)
+                    if R_override and R_override > 1e-3:
+                        R_i = float(R_override)
+            self.wheel_angles_rad[i] += -(v / R_i) * float(dt)
 
-        # ---- Extra rotating wheels ----------------------------
+        # ---- Extra rotating wheels (sprockets / idlers / rollers)
         if (getattr(self, 'extra_rotating_bones', None)
                 and getattr(self, 'extra_rotating_hubs', None) is not None
                 and getattr(self, 'extra_rotating_radii', None) is not None):
             hubs  = self.extra_rotating_hubs
             radii = self.extra_rotating_radii
-            for i in range(len(self.extra_rotating_bones)):
+            extras = self.extra_rotating_bones
+            for i in range(len(extras)):
                 x = float(hubs[i, 0])
                 v = float(v_L) if x < 0.0 else float(v_R)
-                R_i = max(float(radii[i]) + inner_t, 1e-3)
+                nm = extras[i] or ''
+                bare = (nm[:-len('_BlendBone')]
+                        if nm.endswith('_BlendBone') else nm)
+                R_override = sp_radii.get(bare)
+                if R_override and R_override > 1e-3:
+                    R_i = float(R_override)
+                else:
+                    R_i = max(float(radii[i]) + inner_t, 1e-3)
                 self.extra_rotating_angles_rad[i] += (
                     -(v / R_i) * float(dt))
 

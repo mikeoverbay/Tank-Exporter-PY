@@ -7872,9 +7872,36 @@ class Viewer:
         # missing.
         ci_inner_t = float(ci.get('segmentsInnerThickness', 0.0)
                             or 0.0)
+        # Per Coffee 2026-05-18 ("speed is locked to the W_D
+        # wheels... calculating its circumference with any R
+        # offsets and use that to move the our homie chain"):
+        # build the per-bone polygon-pitch R_p lookup for every
+        # toothed wheel mentioned in chassis_info's tooth_syncs.
+        # `R_p = p / (2 * sin(pi / N))` -- the actual radius the
+        # chain pin centres ride at on a sprocket of N teeth.
+        # tooth_syncs entries are typically L-side only; mirror
+        # them to R so right-side drive sprockets get the same
+        # correction.
+        sp_radii = {}
+        ts_blob = ci.get('tooth_syncs') or {}
+        if ts_blob and float(seg_len) > 0.0:
+            for bone_name, sync in ts_blob.items():
+                try:
+                    N = int(sync.get('teethCount', 0))
+                except (TypeError, ValueError):
+                    N = 0
+                if N <= 0:
+                    continue
+                R_pitch = (float(seg_len)
+                           / (2.0 * math.sin(math.pi / N)))
+                sp_radii[bone_name] = R_pitch
+                if '_L' in bone_name:
+                    sp_radii[bone_name.replace('_L', '_R', 1)] = R_pitch
         try:
-            tp.advance_wheel_angles(v_L, v_R, dt,
-                                     inner_thickness=ci_inner_t)
+            tp.advance_wheel_angles(
+                v_L, v_R, dt,
+                inner_thickness=ci_inner_t,
+                sprocket_pitch_radii=sp_radii)
         except Exception:
             pass
 
