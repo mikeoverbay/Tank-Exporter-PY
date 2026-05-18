@@ -7400,12 +7400,20 @@ class Viewer:
             # first inside-radius pad.
             ci_local = (getattr(self, '_pending_chassis_info',
                                 None) or {})
-            # Per Coffee 2026-05-18 ("Try applying outer thickness
-            # only to wheels radius"): match the homie chain's
-            # wheel inflation.  Now uses `segmentsOuterThickness`.
-            outer_t_pbd = float(
+            # Per Coffee 2026-05-18: match the homie chain's
+            # wheel inflation = `segmentsOuterThickness +
+            # segmentOffset`, both radial offsets on R.
+            _ot_pbd = float(
                 ci_local.get('segmentsOuterThickness', 0.0)
                 or 0.0)
+            _tsm_pbd = (ci_local.get('track_segment_models')
+                          or {})
+            try:
+                _so_pbd = float(
+                    _tsm_pbd.get('segmentOffset', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                _so_pbd = 0.0
+            outer_t_pbd = _ot_pbd + _so_pbd
             rs_inflated = [r + outer_t_pbd for r in rs]
             if need_seed:
                 inst = _pbd.TrackChainPBD(
@@ -7802,15 +7810,25 @@ class Viewer:
         # reads from above); fall back to 0.0 when the field is
         # missing.
         # Per Coffee 2026-05-18 ("Try applying outer thickness
-        # only to wheels radius"): switch the wheel-radius
-        # offset from `segmentsInnerThickness` to
-        # `segmentsOuterThickness`.  The hinge pin lies on the
-        # OUTER side of the pad (between the pad and the ground);
-        # the chain pitch circle (= where the hinge centres ride)
-        # is therefore at R + outer_thickness, not R + inner_t.
-        # T110E4: outer 0.0291 m (was using inner 0.0615 m).
-        ci_outer_t = float(ci.get('segmentsOuterThickness', 0.0)
-                            or 0.0)
+        # only to wheels radius", then "add this only to the
+        # wheel dia.  segmentOffset = 0.258"): the chain pitch
+        # circle (= radius where hinge-pin centres ride around
+        # each wheel) is `R + segmentsOuterThickness +
+        # segmentOffset`.  Both XML values are radial inflations
+        # applied ONLY to the wheel radius -- nowhere else in
+        # the pipeline.  T110E4:
+        #   outer 0.0291 m
+        # + segOff  0.258 m
+        # = 0.2871 m total inflation above wheel rim
+        # so the chain wraps at R + 0.287 m for every wheel.
+        _ot = float(ci.get('segmentsOuterThickness', 0.0)
+                     or 0.0)
+        _tsm = ci.get('track_segment_models') or {}
+        try:
+            _so = float(_tsm.get('segmentOffset', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            _so = 0.0
+        ci_outer_t = _ot + _so
         # Per Coffee 2026-05-18 ("i dont want the chassis to
         # stay level.  I want the chains to follow the drive
         # wheels and not move faster or slower"): the chain
@@ -8052,19 +8070,25 @@ class Viewer:
                 arcs_3 = cached[1]
             else:
                 # Per Coffee 2026-05-18 ("Try applying outer
-                # thickness only to wheels radius"): shift each
-                # wheel's wrap radius by the chassis XML's
-                # `<segmentsOuterThickness>` so the chain pitch
-                # circle rides at the hinge-pin outer face
-                # (= where consecutive pads' pins meet around the
-                # wheel) rather than the wheel rim or the inner
-                # face.  Default 0.0 when the field is missing.
-                outer_t = float(
+                # thickness only to wheels radius", then "add
+                # this only to the wheel dia.  segmentOffset =
+                # 0.258"): chain pitch circle inflation =
+                # `segmentsOuterThickness + segmentOffset`.
+                # Both radial, additive, applied ONLY to wheel R.
+                # T110E4: 0.0291 + 0.258 = 0.2871 m.
+                _outer_t = float(
                     ci.get('segmentsOuterThickness', 0.0) or 0.0)
+                _tsm_cs = ci.get('track_segment_models') or {}
+                try:
+                    _so_cs = float(
+                        _tsm_cs.get('segmentOffset', 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    _so_cs = 0.0
+                wheel_R_inflation = _outer_t + _so_cs
                 arcs_3 = _th.build_chain_segments(
                     bones, radii, chain_roles, side,
                     n_pads, float(seg_len),
-                    inner_thickness=outer_t)
+                    inner_thickness=wheel_R_inflation)
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
