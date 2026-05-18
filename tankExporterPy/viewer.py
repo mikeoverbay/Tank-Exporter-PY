@@ -4143,7 +4143,11 @@ class Viewer:
         """
         self.camera.center   = np.array(
             [0.0, 0.0, 0.0], dtype=np.float32)
-        self.camera.yaw      = 0.0
+        # Per Coffee 2026-05-18 ("rotated 50% in Y axis"):
+        # the default orbit yaw is offset 50 deg so the tank
+        # is seen from a three-quarter angle on startup and
+        # R-reset, not dead-on.
+        self.camera.yaw      = 50.0
         self.camera.pitch    = math.degrees(math.atan2(5.0, 8.0))
         self.camera.distance = math.sqrt(5.0 * 5.0 + 8.0 * 8.0)
 
@@ -7896,11 +7900,15 @@ class Viewer:
         # comp_cap +0.150 -> state stays CONTACT -> NOT dropped.
         # Single-bump OVER_COMP scenarios (T49 etc.) drop the
         # one capped wheel -> chain bridges over.
+        # Per Coffee 2026-05-18 ("disable all but 1, 2 and 3"):
+        # OVER_COMP wheel drop (#8) DISABLED -- every wheel in
+        # the chassis XML role lists stays in the chain loop
+        # regardless of suspension state.
         chain_roles = roles
         try:
             wheel_states = getattr(tp, 'last_wheel_state', None)
             wheel_names  = getattr(tp, 'wheel_bone_names', None)
-            if (wheel_states is not None and wheel_names is not None
+            if False and (wheel_states is not None and wheel_names is not None
                     and len(wheel_states) == len(wheel_names)):
                 over_comp_set = set()
                 for i, st in enumerate(wheel_states):
@@ -7949,14 +7957,19 @@ class Viewer:
                 #   - hub Y, Z (= the per-frame deflection
                 #     signal; X is fixed per side and doesn't
                 #     drive the chain shape).
-                # Y / Z rounded to 0.1 mm so float jitter
-                # under the noise floor doesn't bust the
-                # cache.
+                # Per Coffee 2026-05-18 (chain s_offset
+                # oscillation at rest): widen the cache key
+                # tolerance from 0.1 mm to 1 mm so the chassis-
+                # pose integrator's sub-mm damping noise no
+                # longer busts the cache every frame.  Real
+                # wheel deflections of >= 1 mm still rebuild
+                # the chain; smaller motions reuse the cached
+                # arcs_3 and keep s_offset stable.
                 out.append((
                     nm,
                     round(float(radii.get(nm) or 0.0), 6),
-                    round(float(b[1]), 4),
-                    round(float(b[2]), 4)))
+                    round(float(b[1]), 3),
+                    round(float(b[2]), 3)))
             return tuple(out)
 
         def _chain_for_side(side, side_letter, s_offset_attr,
@@ -8001,14 +8014,14 @@ class Viewer:
             # when last_total is zero (first frame after tank
             # load) or when totals are within 1 um of each other
             # (no rebuild / float noise).
+            # Per Coffee 2026-05-18 ("disable all but 1, 2 and
+            # 3"): s_offset cache-rebuild rescale (#16) DISABLED
+            # -- s_offset accumulates v*dt cleanly without any
+            # length-change correction.
             new_total  = _th.compute_chain_total(arcs_3)
-            last_total = float(getattr(self, last_total_attr, 0.0))
-            if (last_total > 1e-6
-                    and new_total > 1e-6
-                    and abs(new_total - last_total) > 1e-6):
-                cur = float(getattr(self, s_offset_attr, 0.0))
-                setattr(self, s_offset_attr,
-                         cur * (new_total / last_total))
+            if False and (last_total := float(getattr(
+                    self, last_total_attr, 0.0))) > 1e-6:
+                pass
             setattr(self, last_total_attr, float(new_total))
             s_offset = float(getattr(self, s_offset_attr, 0.0))
             # Per Coffee 2026-05-16 ("Is there any value in the
@@ -8029,17 +8042,15 @@ class Viewer:
             # placement call -- the stored cumulative
             # `_track_chain_s_offset_<side>` keeps accumulating
             # `v * dt` cleanly without the bias baked in.
-            tooth_syncs = ci.get('tooth_syncs') or {}
-            if tooth_syncs:
-                # Per Coffee 2026-05-16 ("try other direction"):
-                # subtracting the phase walks the chain backward
-                # by the same amount, landing the pad on the
-                # OTHER side of tooth k=0.  Either direction puts
-                # a pad on the lattice -- this sign matches the
-                # `cur_forward_mps * dt` accumulation sense so the
-                # animated chain stays aligned over time.
-                s_offset -= _th.compute_tooth_phase_offset(
-                    arcs_3, tooth_syncs, side, n_pads)
+            # Per Coffee 2026-05-18 ("disable all but 1, 2 and
+            # 3"): tooth-phase offset (#15) DISABLED -- s_offset
+            # is used as-is, no per-side phase shift to land a
+            # pad on sprocket tooth k=0.
+            if False:
+                tooth_syncs = ci.get('tooth_syncs') or {}
+                if tooth_syncs:
+                    s_offset -= _th.compute_tooth_phase_offset(
+                        arcs_3, tooth_syncs, side, n_pads)
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
@@ -8090,15 +8101,18 @@ class Viewer:
         # directions from centre" Coffee asked for.  Pads on
         # the road-wheel arcs now match the rotation rate of
         # pads on the drive / idler wrap.
-        # Sag, central-chord re-run, and PBD stay gated below.
-        for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
-            if pos is None or tan is None or len(pos) < 2:
-                continue
-            chord = (np.roll(pos, -1, axis=0)
-                     - np.roll(pos, +1, axis=0))
-            nrm = np.linalg.norm(chord, axis=1, keepdims=True)
-            chord = chord / np.maximum(nrm, 1e-9)
-            tan[:] = chord.astype(tan.dtype)
+        # Per Coffee 2026-05-18 ("disable all but 1, 2 and 3"):
+        # central-chord tangent rebuild (#11) DISABLED -- pads
+        # keep their `_place_pads` forward-chord tangents.
+        if False:
+            for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
+                if pos is None or tan is None or len(pos) < 2:
+                    continue
+                chord = (np.roll(pos, -1, axis=0)
+                         - np.roll(pos, +1, axis=0))
+                nrm = np.linalg.norm(chord, axis=1, keepdims=True)
+                chord = chord / np.maximum(nrm, 1e-9)
+                tan[:] = chord.astype(tan.dtype)
 
         # Per Coffee 2026-05-11 ("we have breaks in our chain?
         # are we sure we are in order?"): apply the authored
@@ -14015,10 +14029,23 @@ class Viewer:
         # Closure binding the local_path so the dialog callback can call
         # load_vehicle with the chosen overrides.
         def _on_load(skin, chassis_tag, turret_tag, gun_tag, damaged):
-            # Status callback flushes one frame per update so the user
-            # sees the dialog's bottom strip change while the load runs.
+            # Per Coffee 2026-05-18 ("i want the load screen
+            # hidden after a load start.. any messages that
+            # window reported put in the console window"):
+            # close the dialog at the start of the load and
+            # route every status message to the on-screen
+            # console via `self.log(...)` instead of the
+            # dialog's bottom strip.
+            try:
+                self.ui.load_dialog.hide()
+            except Exception:
+                pass
+
             def _status(msg):
-                self.ui.load_dialog.set_status(msg, make_tex=self.ui._make_tex)
+                try:
+                    self.log(str(msg), color=(180, 220, 255))
+                except Exception:
+                    print(f"[load] {msg}")
                 try:
                     self.render()
                 except Exception:
@@ -14978,19 +15005,12 @@ class Viewer:
                      status_callback=None,
                      prefer_res_mods=True):
         """Load a complete tank from a WoT vehicle XML definition file."""
-        # Per Coffee 2026-05-15 ("when a tank loads the camera
-        # should be set to the back the tank looking ahead and
-        # down. I want the chase cam to be active after the tank
-        # is loaded"): activate chase cam (mode 1) on tank load
-        # with the eye DIRECTLY BEHIND the chassis (yaw=0), lifted
-        # slightly so the view looks ahead + down at the tank
-        # (pitch=+20 deg), at the default zoom distance.
-        # The C key still cycles through orbit / chase / commander
-        # as before.
-        self.camera_mode      = 1
-        self._chase_yaw_deg   = 0.0
-        self._chase_pitch_deg = 20.0
-        self._chase_distance  = 15.0
+        # Per Coffee 2026-05-18 ("remove camera reset at end of
+        # load"): camera state (mode + orbit yaw/pitch/distance
+        # + chase params) carries over from before the load.
+        # `__init__` still applies the v1.231.5 cam-0 / yaw-50
+        # default at startup; loads now leave the user's last
+        # camera alone.
         return self._load_vehicle_impl(
             xml_path, damaged=damaged, skin=skin,
             chassis_tag=chassis_tag, turret_tag=turret_tag,
@@ -15933,6 +15953,94 @@ class Viewer:
                                         print(f"[track-sag] load skipped: "
                                               f"{type(_ex_sag).__name__}: "
                                               f"{_ex_sag}")
+                                # Per Coffee 2026-05-18 ("spline
+                                # is not created by the wheels at
+                                # load correctly"): seed the chain
+                                # build NOW so the spline exists
+                                # at load time, not on first
+                                # render frame.  Uses bind-pose
+                                # bones via `_track_current_bone_
+                                # positions`; per-side pad / tan /
+                                # hub arrays stash for the first
+                                # render call.
+                                # Per Coffee 2026-05-18 ("the
+                                # chassis looped until all wheels
+                                # had their weight load
+                                # distributed... that is why it is
+                                # broken"): iterative load-time
+                                # settle.  Drive tp.update() in a
+                                # fixed-step loop until pos / pitch
+                                # / roll converge (delta below
+                                # 0.5 mm + 0.05 deg + 0.05 deg)
+                                # or a 240-iter cap (= 4 simulated
+                                # seconds at 60 Hz).  The chassis
+                                # has all wheels in their settled
+                                # classifier state BEFORE the
+                                # first render frame, so visual
+                                # CONTACT / HANGING isn't
+                                # mid-converge when the user
+                                # first sees the tank.
+                                try:
+                                    if (self.tank_physics is not None
+                                            and self.terrain is not None):
+                                        _tp_s = self.tank_physics
+                                        _DT_S = 1.0 / 60.0
+                                        _EPS_Y     = 5e-4   # 0.5 mm
+                                        _EPS_DEG   = 5e-2   # 0.05 deg
+                                        _prev_y    = float(_tp_s.pos[1])
+                                        _prev_pit  = float(_tp_s.pitch_deg)
+                                        _prev_roll = float(_tp_s.roll_deg)
+                                        _settled   = False
+                                        for _iter in range(240):
+                                            _tp_s.update(
+                                                self.terrain, _DT_S)
+                                            _y    = float(_tp_s.pos[1])
+                                            _pit  = float(_tp_s.pitch_deg)
+                                            _roll = float(_tp_s.roll_deg)
+                                            _d_y  = abs(_y - _prev_y)
+                                            _d_p  = abs(_pit - _prev_pit)
+                                            _d_r  = abs(_roll - _prev_roll)
+                                            _prev_y    = _y
+                                            _prev_pit  = _pit
+                                            _prev_roll = _roll
+                                            if (_d_y < _EPS_Y
+                                                    and _d_p < _EPS_DEG
+                                                    and _d_r < _EPS_DEG
+                                                    and _iter > 4):
+                                                _settled = True
+                                                break
+                                        if TRACK_PHYSICS_VERBOSE:
+                                            print(
+                                                f"[load-settle] "
+                                                f"{'converged' if _settled else 'capped'} "
+                                                f"after {_iter + 1} iters  "
+                                                f"y={_prev_y:+.4f} "
+                                                f"pit={_prev_pit:+.3f} "
+                                                f"roll={_prev_roll:+.3f}")
+                                except Exception as _ex_settle:
+                                    if TRACK_PHYSICS_VERBOSE:
+                                        print(
+                                            f"[load-settle] iterative "
+                                            f"settle skipped: "
+                                            f"{type(_ex_settle).__name__}: "
+                                            f"{_ex_settle}")
+                                # After the chassis is settled,
+                                # seed the chain with the final
+                                # bone positions (= bind + per-
+                                # wheel residuals from the settle
+                                # loop above).  First render frame
+                                # already has chain at rest.
+                                try:
+                                    if self.tank_physics is not None:
+                                        self._compute_homie_chain_for_frame(
+                                            self.tank_physics)
+                                except Exception as _ex_seed:
+                                    if TRACK_PHYSICS_VERBOSE:
+                                        print(
+                                            f"[homie] initial chain "
+                                            f"seed failed: "
+                                            f"{type(_ex_seed).__name__}: "
+                                            f"{_ex_seed}")
                 except Exception as exc:
                     if TRACK_PHYSICS_VERBOSE:
                         import traceback
@@ -17709,29 +17817,39 @@ class Viewer:
             elif keys[pygame.K_s]:
                 target_forward = -move_speed
 
-            # ---- Hand the speed straight to physics ------------------
-            # Per Coffee 2026-05-16 ("Tracks cant spring if the
-            # drive wheel is stopped.  slip should only be on the
-            # non drive wheels", "just remove the pad spring for
-            # accel and decel.  not real for a 100 ton tank"):
-            # the previous ACCEL / DECEL ramp on
-            # `self._current_forward` (5 m/s^2 spool-up, 10 m/s^2
-            # brake) imparted spring-like motion to the chain pads
-            # during velocity changes -- the chassis kept moving
-            # for ~1 s after a brake input as the ramp wound down,
-            # and the pads visibly drifted past where the drive
-            # sprocket said they should be.  Real 100-ton tank
-            # drivetrain has effectively zero compliance between
-            # the engine output shaft and the sprocket; once the
-            # driver lifts off the throttle the chain stops with
-            # the sprocket.  Drop the ramp and feed `target_forward`
-            # straight through.
+            # ---- Speed integrator: rate-limited toward target -------
+            # Per Coffee 2026-05-18 ("we need more accel decel in
+            # the tank.  more real").
             #
-            # If we later model wheel slip, the SLIP should live on
-            # the road wheels (which only ROLL on the chain's inner
-            # face -- they CAN slip relative to it) rather than on
-            # the drive coupling itself.
-            cur = float(target_forward)
+            # Real tank longitudinal dynamics: engine-limited
+            # acceleration averages 1-2 m/s^2 (apparent-mass
+            # coeff delta ~= 1.3 inflates effective inertia
+            # beyond pure mass; tank theory tractive-balance
+            # formula `b = g (P - sum R) / G delta`).  Braking
+            # peaks 3-5 m/s^2 because brake force dominates
+            # engine spool-up.
+            #
+            # Constant-rate ramp toward `target_forward`:
+            #   * ACCEL_MPS2 (= magnitude growing)  : 2.0
+            #   * DECEL_MPS2 (= magnitude shrinking): 4.0
+            #
+            # `growing` means |target| > |cur| AND same sign --
+            # commanded speed pulling further from zero.  Any
+            # other delta direction (coast to stop, reverse,
+            # downshift) uses the stronger DECEL rate.
+            ACCEL_MPS2 = 2.0
+            DECEL_MPS2 = 4.0
+            prev_cur = float(getattr(self, '_current_forward', 0.0))
+            tgt      = float(target_forward)
+            growing  = (abs(tgt) > abs(prev_cur)
+                        and tgt * prev_cur >= 0.0)
+            rate     = ACCEL_MPS2 if growing else DECEL_MPS2
+            max_step = rate * max(float(dt), 0.0)
+            delta    = tgt - prev_cur
+            if abs(delta) <= max_step:
+                cur = tgt
+            else:
+                cur = prev_cur + math.copysign(max_step, delta)
             self._current_forward = cur
             tp.cur_forward_mps    = -cur
 
@@ -19603,6 +19721,32 @@ class Viewer:
         # to be physically BEHIND the additive layer.  Result:
         # impact dust drew over the muzzle flash and dimmed it.
         #
+        # Per Coffee 2026-05-18 ("Shell explosion need to be
+        # before the gun firing explosion"): swap the alpha
+        # order so the impact dust draws BEFORE the muzzle
+        # smoke.  Additive half stays in the same global
+        # alpha-first / additive-last sequence below; ordering
+        # WITHIN the additive pass swaps too so impact fire is
+        # before muzzle flash (additive is commutative, no
+        # visual change, but keeps the source order tidy).
+
+        # ---- Impact explosions: ALPHA dust pass --------------------------
+        if (self.impacts.has_alive
+                and self.impact_dust_billboards is not None):
+            active = self.impacts.active_impacts
+            if active:
+                try:
+                    self.impact_dust_billboards.render(
+                        active, self.particle_shader, view, proj,
+                        y_offset=0.5)
+                except Exception as _ex_dust:
+                    if not getattr(self, '_dust_err_logged', False):
+                        print(f"[impact-dust] render failed: "
+                              f"{type(_ex_dust).__name__}: "
+                              f"{_ex_dust}")
+                        self._dust_err_logged = True
+
+        # ---- Muzzle smoke: ALPHA pass ------------------------------------
         # Here we run just the smoke pass; the flash pass runs
         # later in the frame after all other alpha layers.
         try:
@@ -19642,53 +19786,12 @@ class Viewer:
             self.fire_billboards.update(self._frame_dt)
             self.fire_billboards.render(self.particle_shader, view, proj)
 
-        # ---- Impact explosions: ALPHA dust pass --------------------------
-        # Per Coffee 2026-05-14 ("now we need explosions where the
-        # round hits an object" + "gun fire overlapping ground
-        # explosions looks bad"): the explosion is split into a
-        # dust pass (alpha) drawn HERE, before the muzzle flash
-        # additive pass, and a fire pass (additive) drawn AFTER
-        # the muzzle flash so all additives end up on top of all
-        # alphas globally.
-        #
-        # Within the impact pair, dust is still drawn under fire
-        # for the same reason: alpha-then-additive ordering keeps
-        # the fireball from being dimmed by its own dust cloud.
-        if (self.impacts.has_alive
-                and self.impact_dust_billboards is not None):
-            active = self.impacts.active_impacts
-            if active:
-                try:
-                    self.impact_dust_billboards.render(
-                        active, self.particle_shader, view, proj,
-                        y_offset=0.5)
-                except Exception as _ex_dust:
-                    if not getattr(self, '_dust_err_logged', False):
-                        print(f"[impact-dust] render failed: "
-                              f"{type(_ex_dust).__name__}: "
-                              f"{_ex_dust}")
-                        self._dust_err_logged = True
-
-        # ---- Muzzle flash: ADDITIVE burst pass ---------------------------
-        # All ALPHA passes have now run (shot_trail smoke, muzzle
-        # smoke, fire_billboards, impact dust).  Anything that's
-        # additive goes from here down so the bright bursts pile
-        # ON TOP of the alpha layers instead of being darkened by
-        # later-drawn alpha that happens to cover them on screen.
-        try:
-            self._render_muzzle_flash(view, proj, phase='flash')
-        except Exception as _ex_flash2:
-            if not getattr(self, '_flash2_err_logged', False):
-                print(f"[muzzle-flash] flash pass failed: "
-                      f"{type(_ex_flash2).__name__}: {_ex_flash2}")
-                self._flash2_err_logged = True
-
         # ---- Impact explosions: ADDITIVE fire pass -----------------------
-        # Fire sits +1 m above the dust quad's centroid so the
-        # fireball + ground spray read as two separated layers,
-        # not one composite blob.  Additive blending here means
-        # order vs. the muzzle-flash additive pass above doesn't
-        # matter -- additive is commutative.
+        # Per Coffee 2026-05-18 ("Shell explosion need to be
+        # before the gun firing explosion"): impact fire
+        # additive runs BEFORE muzzle flash additive.  Additive
+        # is commutative so this is purely source-order tidy --
+        # the visible blend is identical either way.
         if (self.impacts.has_alive
                 and self.impact_fire_billboards is not None):
             active = self.impacts.active_impacts
@@ -19703,6 +19806,17 @@ class Viewer:
                               f"{type(_ex_fire).__name__}: "
                               f"{_ex_fire}")
                         self._efire_err_logged = True
+
+        # ---- Muzzle flash: ADDITIVE burst pass ---------------------------
+        # All ALPHA passes have now run.  Additive layers pile
+        # ON TOP of the alpha layers.
+        try:
+            self._render_muzzle_flash(view, proj, phase='flash')
+        except Exception as _ex_flash2:
+            if not getattr(self, '_flash2_err_logged', False):
+                print(f"[muzzle-flash] flash pass failed: "
+                      f"{type(_ex_flash2).__name__}: {_ex_flash2}")
+                self._flash2_err_logged = True
 
         # ---- Fire-card outlines (debug) ----------------------------------
         # Gated on the master Debug flag (set above).  Same convention
