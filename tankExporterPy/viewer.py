@@ -6520,58 +6520,24 @@ class Viewer:
         # the pad mesh is symmetric across its own X plane
         # (typical WoT track-shoe geometry).
         #
-        # Per Coffee 2026-05-18 ("radial offsets"): the chassis
-        # XML's `<trackPair><segmentOffset>` and
-        # `<segment2Offset>` are RADIAL distances along pad-local
-        # +Y (outward from the chain centerline), NOT forward
-        # distances along the chain.  T110E4 ships
-        # `segmentOffset=0.258` and `segment2Offset=0.09` -- the
-        # two halves of the pad shoe sit at different radial
-        # depths and meet at a shared hinge pin radially outward
-        # from the chain anchor.
+        # Per Coffee 2026-05-18 ("remove these from radial
+        # offset.  segmentOffset = 0.258, segment2Offset =
+        # 0.09"): the chassis XML's `<segmentOffset>` and
+        # `<segment2Offset>` are NOT radial placement offsets --
+        # they're per-mesh modeler-internal values that the
+        # runtime should NOT apply as a shift.  The pad halves'
+        # actual radial extent is encoded in the mesh geometry
+        # itself (and is described separately by
+        # `segmentsInnerThickness` + `segmentsOuterThickness` in
+        # the chassis XML, which together total ~0.09 m on T110E4
+        # vs the bogus 0.348 m sum of segOffset + segment2Offset).
         #
-        # Per Coffee 2026-05-11 ("some tanks have 2 parts but
-        # they are both attached to one point.  there are 2
-        # offsets to get total pad thickness"): the shoe
-        # assembly on tanks like T110E4 is TWO mesh parts
-        # rigidly bolted together -- segmentModel + segment2Model
-        # share the same chain anchor, but each has its own
-        # radial offset along pad-local +Y (segmentOffset for
-        # part 1, segment2Offset for part 2).  The two offsets
-        # together give the total pad thickness (radial
-        # extent).
-        #
-        # We therefore DON'T pre-shift xform_L / xform_R in bulk
-        # any more (that would only let us pick a single offset).
-        # Instead the offset is applied per-renderer in the
-        # dispatch loop below, picked from the XML field whose
-        # name matches the renderer's source mesh.  Tiger I only
-        # has segmentModel -> single renderer per side -> one
-        # offset, same behaviour as before.  T110E4 has both
-        # -> two renderers per side, each at its own offset.
-        ci_local = (getattr(self, '_pending_chassis_info',
-                            None) or {})
-        tsm = ci_local.get('track_segment_models') or {}
-        seg_offset = 0.0
-        seg2_offset = 0.0
-        try:
-            seg_offset = float(
-                tsm.get('segmentOffset', 0.0) or 0.0)
-        except Exception:
-            seg_offset = 0.0
-        try:
-            seg2_offset = float(
-                tsm.get('segment2Offset', 0.0) or 0.0)
-        except Exception:
-            seg2_offset = 0.0
-        if not getattr(self, '_segoff_logged', False) and (
-                seg_offset != 0.0 or seg2_offset != 0.0):
-            self.log(
-                f"segmentOffset={seg_offset:+.4f}  "
-                f"segment2Offset={seg2_offset:+.4f}  "
-                f"(per-part radial offsets along pad +Y)",
-                color=(180, 220, 255))
-            self._segoff_logged = True
+        # Every renderer (segment, segment2, link, on each side)
+        # therefore places its mesh-local origin at the chain
+        # anchor with no per-part offset shift.  Two-piece pads'
+        # halves overlap naturally at the anchor.  Single-piece
+        # pads (A100_T49 etc.) already worked this way since
+        # v1.215.0.
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
         # compose chassis_pose @ pad_xform on the CPU to get a
         # world-space mat4 per pad, sample terrain at each pad's
@@ -6833,33 +6799,17 @@ class Viewer:
 
         # Per Coffee 2026-05-11 ("both of the pad pieces should be
         # considered as one.  they need to both rotate at the
-        # pivot as one part."), and 2026-05-18 ("radial offsets"):
+        # pivot as one part."), and 2026-05-18 ("remove these
+        # from radial offset"):
         #
-        # `segmentOffset` and `segment2Offset` are RADIAL offsets
-        # (along pad-local +Y, outward from the chain centerline)
-        # describing where each mesh part's hinge pin sits in its
-        # own local coordinates.  For T110E4: segment1 hinge sits
-        # 0.258 m outward from its mesh origin; segment2 hinge
-        # sits 0.09 m outward from its origin.  To make the
-        # two-piece shoe share ONE hinge in world space (the
-        # natural pivot for chain bending), the segment2 mesh is
-        # shifted by `(seg_offset - seg2_offset) * y_axis` so its
-        # hinge ends up at the same world point as segment1's
-        # (= `chain_anchor + seg_offset * y_axis`).
-        #
-        # Net visual: segment + segment2 share the SAME hinge pin
-        # in world space.  Both pieces extend outward from the
-        # chain anchor by their own radial offsets, meeting at
-        # one shared pivot that the rigid shoe rotates about.
-        # (Previously the shift was along +Z = forward, which
-        # placed the pivot ahead of the anchor and made the two
-        # pieces visibly separate as the chain bent around a
-        # wheel.)
-        #
-        # Pink pin markers therefore go at the SHARED chain
-        # anchor (xform_world's pre-shift translation column),
-        # not per-renderer.  One pin per chain anchor regardless
-        # of variant count.
+        # Two-piece pads (T110E4 etc.) place BOTH `segmentModel`
+        # and `segment2Model` renderers at the same chain anchor
+        # with no per-part offset shift.  The mesh geometry
+        # itself encodes the relative position of the two
+        # halves, so they overlap naturally as one rigid shoe
+        # rotating around the anchor.  Pink pin markers go at
+        # the chain anchor (xform_world's translation column),
+        # one per anchor regardless of variant count.
         pin_segments = []
         PIN_COLOR = (1.0, 0.40, 0.78)
         pin_anchors_done = {'L': False, 'R': False}
@@ -7000,23 +6950,21 @@ class Viewer:
             # chain anchor by v1.215.0's design and that
             # renders correctly today.
             #
-            # Fix is GATED on the two-piece case: shift ONLY the
-            # `segment2*` renderers by
-            # `(seg_offset - seg2_offset) * y_axis` so that the
-            # segment2 mesh's hinge aligns with the segment
-            # mesh's hinge -- both end up at
-            # `chain_anchor + seg_offset * y_axis` (radially
-            # outward).  `segment*` (and `link*`) keep the
-            # v1.215.0 placement.
+            # Per Coffee 2026-05-18 ("remove these from radial
+            # offset.  segmentOffset = 0.258, segment2Offset =
+            # 0.09"): the `segmentOffset` / `segment2Offset` XML
+            # values are NOT radial offsets either -- they
+            # describe something else (probably per-mesh pivot
+            # internals that the modeler used and the engine
+            # doesn't need at placement time).  Drop the runtime
+            # shift entirely.  Every renderer (segment, segment2,
+            # link, all sides) places its mesh-local origin at
+            # the chain anchor and rotates with the rest of the
+            # per-pad mat4.  Two-piece pads' halves overlap
+            # naturally at the anchor; the actual radial spread
+            # is encoded in the mesh geometry itself, not in a
+            # runtime shift.
             xform_clamped = xform_world.copy()
-            is_two_piece = (seg_offset != 0.0
-                             and seg2_offset != 0.0)
-            if is_two_piece and 'segment2' in key:
-                delta_offset = seg_offset - seg2_offset
-                y_axis = xform_clamped[:, 0:3, 1]
-                xform_clamped[:, 0:3, 3] = (
-                    xform_clamped[:, 0:3, 3]
-                    + delta_offset * y_axis)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
