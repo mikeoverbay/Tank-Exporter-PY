@@ -7885,13 +7885,31 @@ class Viewer:
         # uses `R + inner_thickness` -- chain and rim move at the
         # exact same surface speed, zero slip.
         sp_radii = {}
-        try:
-            tp.advance_wheel_angles(
-                v_L, v_R, dt,
-                inner_thickness=ci_inner_t,
-                sprocket_pitch_radii=sp_radii)
-        except Exception:
-            pass
+        # Per Coffee 2026-05-18 (F3 manual_A100_T49_latest.json
+        # showed chain_ds = 2 * chassis_dx): this function is
+        # called TWICE per render frame -- once from the pad
+        # render dispatch (~ line 6260) and once from the
+        # spline overlay (~ line 20107) -- so without a guard
+        # both `advance_wheel_angles` and the chain-s_offset
+        # slave below fire twice, doubling wheel spin AND
+        # chain advance.  Gate per `self.frame_count`.  First
+        # call this frame integrates; subsequent calls skip
+        # and just rebuild geometry from the already-current
+        # angle / s_offset state.
+        _f_now = int(getattr(self, 'frame_count', 0))
+        _f_last_int = int(getattr(self,
+                                  '_chain_last_integrated_frame',
+                                  -1))
+        _integrate_this_call = (_f_now != _f_last_int)
+        if _integrate_this_call:
+            self._chain_last_integrated_frame = _f_now
+            try:
+                tp.advance_wheel_angles(
+                    v_L, v_R, dt,
+                    inner_thickness=ci_inner_t,
+                    sprocket_pitch_radii=sp_radii)
+            except Exception:
+                pass
 
         # Per Coffee 2026-05-18 ("[chain] is locked to the
         # W_D wheels.  it can NOT move on those wheels"):
@@ -7910,7 +7928,8 @@ class Viewer:
             extras    = getattr(tp, 'extra_rotating_bones', None)
             ex_angles = getattr(tp, 'extra_rotating_angles_rad',
                                   None)
-            if (extras is not None
+            if (_integrate_this_call
+                    and extras is not None
                     and ex_angles is not None
                     and len(extras) == len(ex_angles)):
                 for _side_tok, _attr_off, _attr_prev in (
@@ -7970,8 +7989,12 @@ class Viewer:
             # Belt-and-suspenders fallback: if the drive-angle
             # path failed for any reason, fall back to the old
             # v_L * dt accumulator so the chain still moves.
-            self._track_chain_s_offset_L += v_L * dt
-            self._track_chain_s_offset_R += v_R * dt
+            # Same once-per-frame gate as the angle integration
+            # above (function is called twice per render frame
+            # for pad + spline overlay).
+            if _integrate_this_call:
+                self._track_chain_s_offset_L += v_L * dt
+                self._track_chain_s_offset_R += v_R * dt
 
         # Per Coffee 2026-05-16 ("now, fix the segment stick as
         # before and it it will be peachy"): build a per-frame
