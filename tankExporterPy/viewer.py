@@ -7412,12 +7412,25 @@ class Viewer:
                 ci_local.get('segmentsInnerThickness', 0.0)
                 or 0.0)
             rs_inflated = []
+            # Pre-pass to find the end idler (largest-R wheel
+            # among the idlers, if any).  That one stays bare;
+            # the rest of the idler entries get +inner+outer.
+            _end_idl_idx = -1
+            _end_idl_R = -1.0
+            for _i_chk, _k_chk in enumerate(kinds):
+                if _k_chk == 'idler' and rs[_i_chk] > _end_idl_R:
+                    _end_idl_R = rs[_i_chk]
+                    _end_idl_idx = _i_chk
             for _i_pbd, _r_pbd in enumerate(rs):
                 _kind = (kinds[_i_pbd]
                          if _i_pbd < len(kinds) else 'unknown')
                 if _kind == 'sprocket':
                     rs_inflated.append(_r_pbd + _it_pbd)
                 elif _kind == 'road':
+                    rs_inflated.append(
+                        _r_pbd + _it_pbd + _ot_pbd)
+                elif (_kind == 'idler'
+                      and _i_pbd != _end_idl_idx):
                     rs_inflated.append(
                         _r_pbd + _it_pbd + _ot_pbd)
                 else:
@@ -7818,41 +7831,69 @@ class Viewer:
         # missing.
         # Per Coffee 2026-05-18 ("apply inner to w_d wheels.
         # add outer to W_L wheels.  leave other wheels as is..
-        # no offset", then 2026-05-18 "add inner and outer to
-        # the W_L wheels"): the chain pitch circle inflation
-        # depends on the wheel's role.  Each wheel's effective
-        # wrap radius:
-        #     drive sprocket (W_D): R + segmentsInnerThickness
-        #     road wheel (W_L):     R + inner + outer
-        #     idler / roller:       R                  (bare)
-        # The chain wraps each wheel at its own effective
-        # radius; spin rate per wheel = v / R_eff so rim
-        # surface and chain pads stay locked with zero slip.
+        # no offset", "add inner and outer to the W_L wheels",
+        # "add inner and outer to to idler wheels except end
+        # idler"): the chain pitch circle inflation depends on
+        # the wheel's role and -- for idlers -- on whether the
+        # wheel is the END idler (chain loop endpoint, opposite
+        # the drive sprocket).  Each wheel's effective wrap
+        # radius:
+        #     drive sprocket (W_D):   R + inner
+        #     road wheel    (W_L):    R + inner + outer
+        #     idler (non-end):        R + inner + outer
+        #     end idler (largest-R):  R                (bare)
+        #     return roller:          R                (bare)
+        # End idler = the largest-R wheel in `idlers_{side}`
+        # (chain wraps that one like a drive sprocket; the
+        # smaller ones in `idlers_{side}` are tensioners /
+        # aux wheels that contact the chain like road wheels).
         _ot = float(ci.get('segmentsOuterThickness', 0.0) or 0.0)
         _it = float(ci.get('segmentsInnerThickness', 0.0) or 0.0)
-        # Build per-wheel R-override dict.  Drive sprockets get
-        # +inner_t, road wheels get +(inner + outer), idlers /
-        # rollers stay bare.  Bones absent from sp_radii fall
-        # through to bare R when called with
-        # `inner_thickness=0.0`.
         sp_radii = {}
         _wheel_radii_xml = ci.get('wheel_radii') or {}
+
+        def _R_for(_bare_nm):
+            _v = _wheel_radii_xml.get(_bare_nm)
+            if _v is None:
+                _v = _wheel_radii_xml.get(_bare_nm + '_BlendBone')
+            try:
+                return float(_v) if _v is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
         for _side_tok in ('L', 'R'):
+            # Drive sprockets: + inner_t.
             for _bare in (roles.get(
                     f'drive_sprockets_{_side_tok}') or []):
-                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+                _R = _R_for(_bare)
                 if _R > 0.0:
                     sp_radii[_bare] = _R + _it
+            # Road wheels: + inner_t + outer_t.
             for _bare in (roles.get(
                     f'road_wheels_{_side_tok}') or []):
-                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+                _R = _R_for(_bare)
                 if _R > 0.0:
                     sp_radii[_bare] = _R + _it + _ot
-            for _bare in ((roles.get(f'idlers_{_side_tok}') or [])
-                          + (roles.get(
-                                  f'return_rollers_{_side_tok}')
-                              or [])):
-                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+            # Idlers: identify the end idler (largest R).
+            # End idler stays bare; the rest (tensioners, etc.)
+            # get +inner+outer like road wheels.
+            _idler_list = roles.get(f'idlers_{_side_tok}') or []
+            if _idler_list:
+                _idler_Rs = [(nm, _R_for(nm))
+                             for nm in _idler_list]
+                _end_idler_nm = max(_idler_Rs,
+                                     key=lambda t: t[1])[0]
+                for _bare, _R in _idler_Rs:
+                    if _R <= 0.0:
+                        continue
+                    if _bare == _end_idler_nm:
+                        sp_radii[_bare] = _R         # bare
+                    else:
+                        sp_radii[_bare] = _R + _it + _ot
+            # Return rollers: bare.
+            for _bare in (roles.get(
+                    f'return_rollers_{_side_tok}') or []):
+                _R = _R_for(_bare)
                 if _R > 0.0:
                     sp_radii[_bare] = _R    # bare, no offset
         # Per Coffee 2026-05-18 (F3 manual_A100_T49_latest.json
@@ -8108,7 +8149,24 @@ class Viewer:
                         radii_inflated[_nm] = (
                             float(radii_inflated[_nm])
                             + _inner_t + _outer_t)
-                # Idlers + return rollers keep their bare R.
+                # Idlers: end idler (largest R) stays bare;
+                # smaller "idler" entries are tensioners and
+                # get +inner+outer like road wheels.
+                _idl_list = (chain_roles.get(
+                        f'idlers_{_side_tok}') or [])
+                if _idl_list:
+                    _pairs = [(nm, float(radii_inflated.get(nm)
+                                          or 0.0))
+                              for nm in _idl_list
+                              if nm in radii_inflated]
+                    if _pairs:
+                        _end_idl_nm = max(
+                            _pairs, key=lambda t: t[1])[0]
+                        for _nm, _R_orig in _pairs:
+                            if _nm != _end_idl_nm:
+                                radii_inflated[_nm] = (
+                                    _R_orig + _inner_t + _outer_t)
+                # Return rollers + end idler keep their bare R.
                 arcs_3 = _th.build_chain_segments(
                     bones, radii_inflated, chain_roles, side,
                     n_pads, float(seg_len),
