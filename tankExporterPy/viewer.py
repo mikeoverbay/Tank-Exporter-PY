@@ -6401,22 +6401,20 @@ class Viewer:
             side_tag = ('L' if xform is xform_L
                         else 'R' if xform is xform_R
                         else None)
-            # Per Coffee 2026-05-19 ("our pads faces are not
-            # rotated to the W_L wheels center"): use the
-            # ROAD-WHEEL-AUGMENTED hub/on_arc arrays so line
-            # pads on the bottom run (which track_homie marks
-            # on_arc=False because the geometric chord-arc is
-            # 0° on flat ground) get their nearest road-wheel
-            # hub assigned and become "treat as arc" for the
-            # up-vector and polygon-correction overrides.
-            hubs_arr   = (getattr(self, '_poly_hubs_L', None)
+            # Revert v1.231.61 augmentation (Coffee 2026-05-19
+            # "this is so broken... lost the math"): read the
+            # original `_homie_*` stashes again so only true
+            # arc pads (drive sprocket, idler) get the radial-
+            # from-hub up vector and polygon-correction tilt.
+            # Bottom-run line pads keep the centroid-up from
+            # `build_oriented_transforms`.
+            hubs_arr   = (self._homie_hubs_L
                           if side_tag == 'L'
-                          else getattr(self, '_poly_hubs_R', None)
+                          else self._homie_hubs_R
                           if side_tag == 'R' else None)
-            on_arc_arr = (getattr(self, '_poly_onarc_L', None)
+            on_arc_arr = (self._homie_onarc_L
                           if side_tag == 'L'
-                          else getattr(self, '_poly_onarc_R',
-                                        None)
+                          else self._homie_onarc_R
                           if side_tag == 'R' else None)
             if (hubs_arr is None or on_arc_arr is None
                     or len(hubs_arr) != N
@@ -6547,19 +6545,14 @@ class Viewer:
                         or len(xform) != len(pos)
                         or len(xform) == 0):
                     continue
-                # Per Coffee 2026-05-19 ("our pads faces are
-                # not rotated to the W_L wheels center"): use
-                # the augmented `_poly_*` arrays so road-wheel
-                # line pads get the polygon-correction rotation
-                # too.
-                hubs_arr2 = (
-                    getattr(self, '_poly_hubs_L', None)
-                    if side_tag2 == 'L'
-                    else getattr(self, '_poly_hubs_R', None))
-                on_arc_arr2 = (
-                    getattr(self, '_poly_onarc_L', None)
-                    if side_tag2 == 'L'
-                    else getattr(self, '_poly_onarc_R', None))
+                # Revert v1.231.61 augmentation: original
+                # `_homie_*` stashes only.  True arc pads only.
+                hubs_arr2 = (self._homie_hubs_L
+                             if side_tag2 == 'L'
+                             else self._homie_hubs_R)
+                on_arc_arr2 = (self._homie_onarc_L
+                               if side_tag2 == 'L'
+                               else self._homie_onarc_R)
                 if (hubs_arr2 is None or on_arc_arr2 is None
                         or len(hubs_arr2) != len(xform)
                         or len(on_arc_arr2) != len(xform)):
