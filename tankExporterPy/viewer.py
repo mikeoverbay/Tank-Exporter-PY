@@ -7123,10 +7123,32 @@ class Viewer:
                     _ss2 = np.sin(_thetas_x2)[:, None]
                     _Y_old2 = xform_clamped[:, 0:3, 1].copy()
                     _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                    # Step 2: rotate segment2 about the WHEEL
+                    # CENTRE (not the pad's hinge-pin axis) per
+                    # Coffee 2026-05-18 ("this is a 2 step
+                    # process.  we need its tangent placement
+                    # first.  after, we rotate about wheel
+                    # center").  Equivalent to
+                    #     T(0, -R, 0) @ Rx(β) @ T(0, +R, 0)
+                    # in pad-local coords, where R = pad-mesh-
+                    # origin → wheel-centre distance (≈ R_eff
+                    # for small δ).  Net effect on the mat4:
+                    #   col1, col2: rotated by Rx(-thetas)
+                    #   col3:       shifted by
+                    #               R · ((cos β - 1) · col1
+                    #                  +  sin β       · col2)
+                    # so the mesh both reorients AND slides
+                    # along the arc by R · β (arc length).
                     xform_clamped[:, 0:3, 1] = (
                         _cs2 * _Y_old2 + _ss2 * _Z_old2)
                     xform_clamped[:, 0:3, 2] = (
                         -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    _R_arr = _R_eff_disp.astype(
+                        np.float32)[:, None]
+                    xform_clamped[:, 0:3, 3] += (
+                        _R_arr * (_cs2 - 1.0) * _Y_old2
+                        + _R_arr * _ss2 * _Z_old2
+                    ).astype(np.float32)
                     if _do_dump and _idx_first_arc >= 0:
                         _i = _idx_first_arc
                         self.log(
