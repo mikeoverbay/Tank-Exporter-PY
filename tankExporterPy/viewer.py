@@ -7418,7 +7418,8 @@ class Viewer:
                 if _kind == 'sprocket':
                     rs_inflated.append(_r_pbd + _it_pbd)
                 elif _kind == 'road':
-                    rs_inflated.append(_r_pbd + _ot_pbd)
+                    rs_inflated.append(
+                        _r_pbd + _it_pbd + _ot_pbd)
                 else:
                     rs_inflated.append(_r_pbd)
             if need_seed:
@@ -7817,11 +7818,12 @@ class Viewer:
         # missing.
         # Per Coffee 2026-05-18 ("apply inner to w_d wheels.
         # add outer to W_L wheels.  leave other wheels as is..
-        # no offset"): the chain pitch circle inflation
+        # no offset", then 2026-05-18 "add inner and outer to
+        # the W_L wheels"): the chain pitch circle inflation
         # depends on the wheel's role.  Each wheel's effective
         # wrap radius:
         #     drive sprocket (W_D): R + segmentsInnerThickness
-        #     road wheel (W_L):     R + segmentsOuterThickness
+        #     road wheel (W_L):     R + inner + outer
         #     idler / roller:       R                  (bare)
         # The chain wraps each wheel at its own effective
         # radius; spin rate per wheel = v / R_eff so rim
@@ -7829,9 +7831,10 @@ class Viewer:
         _ot = float(ci.get('segmentsOuterThickness', 0.0) or 0.0)
         _it = float(ci.get('segmentsInnerThickness', 0.0) or 0.0)
         # Build per-wheel R-override dict.  Drive sprockets get
-        # +inner_t, road wheels get +outer_t, idlers / rollers
-        # are absent (advance_wheel_angles default = bare R when
-        # `inner_thickness=0.0` and the bone isn't in sp_radii).
+        # +inner_t, road wheels get +(inner + outer), idlers /
+        # rollers stay bare.  Bones absent from sp_radii fall
+        # through to bare R when called with
+        # `inner_thickness=0.0`.
         sp_radii = {}
         _wheel_radii_xml = ci.get('wheel_radii') or {}
         for _side_tok in ('L', 'R'):
@@ -7844,7 +7847,7 @@ class Viewer:
                     f'road_wheels_{_side_tok}') or []):
                 _R = float(_wheel_radii_xml.get(_bare) or 0.0)
                 if _R > 0.0:
-                    sp_radii[_bare] = _R + _ot
+                    sp_radii[_bare] = _R + _it + _ot
             for _bare in ((roles.get(f'idlers_{_side_tok}') or [])
                           + (roles.get(
                                   f'return_rollers_{_side_tok}')
@@ -8103,7 +8106,8 @@ class Viewer:
                         f'road_wheels_{_side_tok}') or []):
                     if _nm in radii_inflated:
                         radii_inflated[_nm] = (
-                            float(radii_inflated[_nm]) + _outer_t)
+                            float(radii_inflated[_nm])
+                            + _inner_t + _outer_t)
                 # Idlers + return rollers keep their bare R.
                 arcs_3 = _th.build_chain_segments(
                     bones, radii_inflated, chain_roles, side,
