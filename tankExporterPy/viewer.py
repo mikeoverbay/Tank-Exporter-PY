@@ -7078,7 +7078,7 @@ class Viewer:
                     # carries the first δ/2 in xform_world.
                     _thetas_x2 = np.where(
                         _on_arc_disp & (_R_eff_disp > 1e-6),
-                        -0.5 * np.arctan2(
+                        +0.5 * np.arctan2(
                             _half_seg_seg2,
                             np.maximum(_R_eff_disp, 1e-6)),
                         0.0).astype(np.float32)
