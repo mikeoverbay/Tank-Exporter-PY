@@ -7084,58 +7084,111 @@ class Viewer:
             # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
             if 'segment2' in key:
-                # Per Coffee 2026-05-19 ("we still have to rotate
-                # them unfortunately.  not on wheel center thou.
-                # we saved some math"): segment2 gets BOTH a
-                # forward chain-slide of L/2 AND a pure Rx
-                # rotation about the (shifted) hinge-pin axis.
-                # NO wheel-centre / off-centre-axis math.
+                # Per Coffee 2026-05-19 ("those guys don't care
+                # about the other pads rotation.  not linked
+                # anymore.  just find the face to center and be
+                # done"): build segment2's orientation FROM
+                # SCRATCH at its shifted position.  No reuse of
+                # segment1's rotation columns.
+                #
+                # Steps (all in world space, since xform_world
+                # has the chassis pose already baked in):
+                #   1. New position = segment1 position +
+                #      L/2 along world-forward (= chord
+                #      midpoint shifted half a chord ahead).
+                #   2. Wheel hub in world = chassis @ hub_local.
+                #   3. Radial direction = (new_pos - hub_world)
+                #      projected onto chassis YZ plane and
+                #      normalised.  This is the direction the
+                #      pad's outward (+Y) face should point.
+                #   4. Build a fresh right-handed basis with:
+                #         col0 = chassis +X (hinge-pin axis)
+                #         col1 = radial          (pad +Y out)
+                #         col2 = col0 × col1     (pad +Z back)
+                #      = pad face perpendicular to radial, =
+                #      pad face pointing AT the wheel centre.
+                #   5. Replace xform_clamped's cols 0-3 with
+                #      the new basis + shifted position.
+                # Line pads (no augmented hub) skip the rebuild.
                 _ci_seg2 = (getattr(self,
                                      '_pending_chassis_info',
                                      None) or {})
                 _seg_len_seg2 = float(
                     _ci_seg2.get('segmentLength', 0.0) or 0.0)
-                if _seg_len_seg2 > 1e-6:
-                    # Step 1: shift col3 by L/2 along the chain
-                    # forward direction (= -col2 since
-                    # pad_forward_axis='-Z').  Use the ORIGINAL
-                    # rotated forward (= xform_world's col2)
-                    # before the Rx in step 2.
+                _hubs_local = (getattr(self,
+                                        f'_poly_hubs_{side_letter}',
+                                        None))
+                _on_arc_local = (getattr(self,
+                                          f'_poly_onarc_{side_letter}',
+                                          None))
+                if (_seg_len_seg2 > 1e-6
+                        and _hubs_local is not None
+                        and _on_arc_local is not None
+                        and len(_hubs_local)
+                            == len(xform_clamped)):
                     _shift_seg2 = 0.5 * _seg_len_seg2
-                    _fwd_seg2 = -xform_clamped[:, 0:3, 2]
-                    xform_clamped[:, 0:3, 3] += (
-                        _shift_seg2 * _fwd_seg2
+                    # Step 1: shifted world position.
+                    _fwd_world = -xform_clamped[:, 0:3, 2]
+                    _new_pos_world = (
+                        xform_clamped[:, 0:3, 3]
+                        + _shift_seg2 * _fwd_world)
+                    # Step 2: transform local hubs into world.
+                    # chassis is (4,4) row-major; col0..2 is the
+                    # rotation, col3 is the translation.
+                    _R_chassis = chassis[0:3, 0:3]   # (3,3)
+                    _t_chassis = chassis[0:3, 3]     # (3,)
+                    _hubs_world = (
+                        np.einsum('ij,nj->ni', _R_chassis,
+                                   _hubs_local.astype(np.float32))
+                        + _t_chassis[None, :]
                     ).astype(np.float32)
-                    # Step 2: pure Rx post-multiplication about
-                    # the (shifted) pad-local +X axis.  Magnitude
-                    # = full chord-face angle = atan(L/2 / R_eff)
-                    # per arc pad, sign positive (= AWAY from
-                    # the polygon-correction direction).  Line
-                    # pads (R_eff stash missing or theta=0) are
-                    # left as the pure shift, no rotation.
-                    _R_eff_disp = getattr(
-                        self, f'_poly_R_eff_{side_letter}', None)
-                    _on_arc_disp = getattr(
-                        self, f'_poly_on_arc_{side_letter}', None)
-                    if (_R_eff_disp is not None
-                            and _on_arc_disp is not None
-                            and len(_R_eff_disp)
-                                == len(xform_clamped)):
-                        _half_seg_seg2 = 0.5 * _seg_len_seg2
-                        _thetas_x2 = np.where(
-                            _on_arc_disp & (_R_eff_disp > 1e-6),
-                            +np.arctan2(
-                                _half_seg_seg2,
-                                np.maximum(_R_eff_disp, 1e-6)),
-                            0.0).astype(np.float32)
-                        _cs2 = np.cos(_thetas_x2)[:, None]
-                        _ss2 = np.sin(_thetas_x2)[:, None]
-                        _Y_old2 = xform_clamped[:, 0:3, 1].copy()
-                        _Z_old2 = xform_clamped[:, 0:3, 2].copy()
-                        xform_clamped[:, 0:3, 1] = (
-                            _cs2 * _Y_old2 + _ss2 * _Z_old2)
-                        xform_clamped[:, 0:3, 2] = (
-                            -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    # Step 3: radial direction in world,
+                    # perpendicular to chassis +X axis.
+                    _chx_world = _R_chassis[:, 0]    # (3,)
+                    _radial = _new_pos_world - _hubs_world
+                    _proj = np.einsum(
+                        'ni,i->n', _radial, _chx_world)
+                    _radial_yz = (
+                        _radial
+                        - _proj[:, None] * _chx_world[None, :])
+                    _rnrm = np.linalg.norm(
+                        _radial_yz, axis=1, keepdims=True)
+                    _good = (_rnrm.squeeze() > 1e-6)
+                    _radial_yz = (
+                        _radial_yz
+                        / np.maximum(_rnrm, 1e-9)
+                    ).astype(np.float32)
+                    # Step 4: build basis for arc pads only.
+                    _on_arc_b = np.asarray(_on_arc_local, dtype=bool)
+                    _apply = _on_arc_b & _good
+                    if _apply.any():
+                        _col0_arr = (_chx_world[None, :]
+                                     .repeat(len(_apply), axis=0)
+                                     .astype(np.float32))
+                        _col2_arr = np.cross(
+                            _col0_arr, _radial_yz, axis=1)
+                        _c2nrm = np.linalg.norm(
+                            _col2_arr, axis=1, keepdims=True)
+                        _col2_arr = (
+                            _col2_arr
+                            / np.maximum(_c2nrm, 1e-9)
+                        ).astype(np.float32)
+                        # Re-orthogonalise col1 = col2 × col0
+                        _col1_arr = np.cross(
+                            _col2_arr, _col0_arr, axis=1
+                        ).astype(np.float32)
+                        # Step 5: install for arc pads only.
+                        xform_clamped[_apply, 0:3, 0] = (
+                            _col0_arr[_apply])
+                        xform_clamped[_apply, 0:3, 1] = (
+                            _col1_arr[_apply])
+                        xform_clamped[_apply, 0:3, 2] = (
+                            _col2_arr[_apply])
+                    # Always shift col3 for ALL pads in the
+                    # 'segment2' key (line pads inherit just
+                    # the shift; their orientation stays as
+                    # segment1's).
+                    xform_clamped[:, 0:3, 3] = _new_pos_world
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
