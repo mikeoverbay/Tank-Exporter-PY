@@ -7057,83 +7057,14 @@ class Viewer:
             # same hinge-pin axis.  Pure rotation post-mult
             # leaves col3 unchanged -> segment2 still rotates
             # around the chord-midpoint pivot, same as segment1.
+            # Per Coffee 2026-05-18 ("the pad 1's are good for
+            # now.. pad 2s just make them follow the pad 1
+            # angles again"): segment2 uses the SAME per-pad
+            # mat4 as segment1 -- both halves share the
+            # orientation and chord-midpoint pivot baked into
+            # `xform_world`.  No extra per-pad rotation for
+            # segment2 here.
             xform_clamped = xform_world.copy()
-            if 'segment2' in key:
-                _R_eff_disp = getattr(
-                    self, f'_poly_R_eff_{side_letter}', None)
-                _on_arc_disp = getattr(
-                    self, f'_poly_on_arc_{side_letter}', None)
-                if (_R_eff_disp is not None
-                        and _on_arc_disp is not None
-                        and len(_R_eff_disp)
-                            == len(xform_clamped)):
-                    _ci_seg2 = (getattr(self,
-                                         '_pending_chassis_info',
-                                         None) or {})
-                    _seg_len_seg2 = float(
-                        _ci_seg2.get('segmentLength', 0.0) or 0.0)
-                    _half_seg_seg2 = 0.5 * _seg_len_seg2
-                    # Per Coffee 2026-05-18 ("rotate it to the
-                    # wheels center by 1/2 of the pad pie
-                    # slice"): segment2 gets an extra δ/2
-                    # rotation toward wheel center on top of
-                    # segment1's δ/2 already baked into
-                    # xform_world.  Total seg2 rotation = δ
-                    # (= full pad pie slice).  Same sign
-                    # convention as the per-pad polygon
-                    # correction: negative thetas in this code
-                    # produces Rx(+|theta|) = toward wheel
-                    # centre.
-                    _thetas_x2 = np.where(
-                        _on_arc_disp & (_R_eff_disp > 1e-6),
-                        -np.arctan2(
-                            _half_seg_seg2,
-                            np.maximum(_R_eff_disp, 1e-6)),
-                        0.0).astype(np.float32)
-                    _cs2 = np.cos(_thetas_x2)[:, None]
-                    _ss2 = np.sin(_thetas_x2)[:, None]
-                    _Y_old2 = xform_clamped[:, 0:3, 1].copy()
-                    _Z_old2 = xform_clamped[:, 0:3, 2].copy()
-                    xform_clamped[:, 0:3, 1] = (
-                        _cs2 * _Y_old2 + _ss2 * _Z_old2)
-                    xform_clamped[:, 0:3, 2] = (
-                        -_ss2 * _Y_old2 + _cs2 * _Z_old2)
-                    # One-shot diagnostic: confirm the segment2
-                    # extra rotation is actually firing and how
-                    # many arc pads are getting non-zero theta.
-                    if not getattr(self,
-                                    '_seg2_rot_logged', False):
-                        _n_arc = int(np.sum(_on_arc_disp))
-                        _n_nonzero = int(np.sum(
-                            np.abs(_thetas_x2) > 1e-6))
-                        _max_deg = float(np.degrees(
-                            np.max(np.abs(_thetas_x2))))
-                        self.log(
-                            f"[seg2] key={key!r}  side={side_letter}"
-                            f"  arc_pads={_n_arc}/"
-                            f"{len(_thetas_x2)}  nonzero_thetas="
-                            f"{_n_nonzero}  max_extra_rot="
-                            f"{_max_deg:.2f}°",
-                            color=(180, 220, 255))
-                        if _n_nonzero == 0:
-                            self.log(
-                                f"[seg2] WARNING: no arc pads --"
-                                f" extra rotation is a no-op",
-                                color=(255, 200, 80))
-                        self._seg2_rot_logged = True
-                elif not getattr(self,
-                                  '_seg2_rot_logged', False):
-                    self.log(
-                        f"[seg2] SKIP for key={key!r}: "
-                        f"R_eff_disp={_R_eff_disp is not None} "
-                        f"on_arc_disp={_on_arc_disp is not None} "
-                        f"len_match=" + (
-                            str(len(_R_eff_disp)
-                                == len(xform_clamped))
-                            if _R_eff_disp is not None
-                            else 'n/a'),
-                        color=(255, 120, 120))
-                    self._seg2_rot_logged = True
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
