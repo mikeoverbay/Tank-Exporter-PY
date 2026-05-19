@@ -7057,14 +7057,49 @@ class Viewer:
             # same hinge-pin axis.  Pure rotation post-mult
             # leaves col3 unchanged -> segment2 still rotates
             # around the chord-midpoint pivot, same as segment1.
-            # Per Coffee 2026-05-18 ("the pad 1's are good for
-            # now.. pad 2s just make them follow the pad 1
-            # angles again"): segment2 uses the SAME per-pad
-            # mat4 as segment1 -- both halves share the
-            # orientation and chord-midpoint pivot baked into
-            # `xform_world`.  No extra per-pad rotation for
-            # segment2 here.
+            # Per Coffee 2026-05-18 ("we need to continue to
+            # rotate seg 2 to 1/2 of our seg length angle"):
+            # segment1 is already at δ/2 polygon-correction
+            # (= atan(L/2 / R_eff)).  segment2 CONTINUES that
+            # rotation by HALF the same angle -- another δ/4
+            # in the SAME direction (toward wheel centre).
+            # Net seg2 rotation = δ/2 + δ/4 = 3δ/4.
+            # Pure rotation post-mult so col3 (chord midpoint)
+            # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
+            if 'segment2' in key:
+                _R_eff_disp = getattr(
+                    self, f'_poly_R_eff_{side_letter}', None)
+                _on_arc_disp = getattr(
+                    self, f'_poly_on_arc_{side_letter}', None)
+                if (_R_eff_disp is not None
+                        and _on_arc_disp is not None
+                        and len(_R_eff_disp)
+                            == len(xform_clamped)):
+                    _ci_seg2 = (getattr(self,
+                                         '_pending_chassis_info',
+                                         None) or {})
+                    _seg_len_seg2 = float(
+                        _ci_seg2.get('segmentLength', 0.0) or 0.0)
+                    _half_seg_seg2 = 0.5 * _seg_len_seg2
+                    # `0.5 * atan(half_seg / R_eff)` of magnitude
+                    # = δ/4.  Negative for same-direction
+                    # continuation of the polygon correction
+                    # (= toward wheel centre, matching segment1).
+                    _thetas_x2 = np.where(
+                        _on_arc_disp & (_R_eff_disp > 1e-6),
+                        -0.5 * np.arctan2(
+                            _half_seg_seg2,
+                            np.maximum(_R_eff_disp, 1e-6)),
+                        0.0).astype(np.float32)
+                    _cs2 = np.cos(_thetas_x2)[:, None]
+                    _ss2 = np.sin(_thetas_x2)[:, None]
+                    _Y_old2 = xform_clamped[:, 0:3, 1].copy()
+                    _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                    xform_clamped[:, 0:3, 1] = (
+                        _cs2 * _Y_old2 + _ss2 * _Z_old2)
+                    xform_clamped[:, 0:3, 2] = (
+                        -_ss2 * _Y_old2 + _cs2 * _Z_old2)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
