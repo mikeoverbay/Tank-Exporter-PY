@@ -6553,6 +6553,17 @@ class Viewer:
                 radial2[:, 0] = 0.0
                 R_eff = np.linalg.norm(radial2, axis=1)
                 on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
+                # Stash R_eff + on_arc so the segment2 dispatch
+                # loop (much later in this function) can apply
+                # its own extra rotation = 1.5x the chord-face
+                # angle of segment1.  Per Coffee 2026-05-18
+                # ("rotate pad 2 150% of cord face angle").
+                setattr(self,
+                        f'_poly_R_eff_{side_tag2}',
+                        R_eff.copy())
+                setattr(self,
+                        f'_poly_on_arc_{side_tag2}',
+                        on_arc_b2.copy())
                 # Per-pad theta: -atan(half_seg / R_eff) on arc
                 # pads with valid R, else 0.  Per Coffee
                 # 2026-05-18 ("each cord middle point is the
@@ -7035,19 +7046,50 @@ class Viewer:
             # chain anchor by v1.215.0's design and that
             # renders correctly today.
             #
-            # Per Coffee 2026-05-18 ("we need the same pivot
-            # location as the main pad.  the wheel to rotation
-            # point distance"): both segment1 and segment2 share
-            # the SAME per-pad mat4 -- col3 sits on the chain
-            # pitch circle (= R + inner_thickness from the
-            # wheel center, = the spline sample point), and the
-            # rotation columns carry the polygon-correction
-            # rotation applied uniformly to both halves.  The
-            # rotation pivots around col3 because col3 IS the
-            # rotation centre in instanced rendering.  Any
-            # visible offset between the two mesh pieces must
-            # live in the segment2 mesh's authored vertex data.
+            # Per Coffee 2026-05-18 ("rotate pad 2 150% of cord
+            # face angle"): segment2 gets an ADDITIONAL rotation
+            # on top of the per-pad mat4 so its total chord-face
+            # angle is 1.5x of segment1's.
+            # segment1 already has Rx(+δ/2) baked into the
+            # per-pad mat4 (where δ/2 = atan(L/2/R_eff)).
+            # segment2 total = 1.5 * (δ/2) = δ/2 + δ/4, so the
+            # extra rotation for segment2 is Rx(+δ/4) about the
+            # same hinge-pin axis.  Pure rotation post-mult
+            # leaves col3 unchanged -> segment2 still rotates
+            # around the chord-midpoint pivot, same as segment1.
             xform_clamped = xform_world.copy()
+            if 'segment2' in key:
+                _R_eff_disp = getattr(
+                    self, f'_poly_R_eff_{side_letter}', None)
+                _on_arc_disp = getattr(
+                    self, f'_poly_on_arc_{side_letter}', None)
+                if (_R_eff_disp is not None
+                        and _on_arc_disp is not None
+                        and len(_R_eff_disp)
+                            == len(xform_clamped)):
+                    _ci_seg2 = (getattr(self,
+                                         '_pending_chassis_info',
+                                         None) or {})
+                    _seg_len_seg2 = float(
+                        _ci_seg2.get('segmentLength', 0.0) or 0.0)
+                    _half_seg_seg2 = 0.5 * _seg_len_seg2
+                    # 50% of cord-face angle (= 1/2 of δ/2 = δ/4)
+                    # is the EXTRA rotation; segment1 already
+                    # carries the first δ/2 in xform_world.
+                    _thetas_x2 = np.where(
+                        _on_arc_disp & (_R_eff_disp > 1e-6),
+                        -0.5 * np.arctan2(
+                            _half_seg_seg2,
+                            np.maximum(_R_eff_disp, 1e-6)),
+                        0.0).astype(np.float32)
+                    _cs2 = np.cos(_thetas_x2)[:, None]
+                    _ss2 = np.sin(_thetas_x2)[:, None]
+                    _Y_old2 = xform_clamped[:, 0:3, 1].copy()
+                    _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                    xform_clamped[:, 0:3, 1] = (
+                        _cs2 * _Y_old2 + _ss2 * _Z_old2)
+                    xform_clamped[:, 0:3, 2] = (
+                        -_ss2 * _Y_old2 + _cs2 * _Z_old2)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
