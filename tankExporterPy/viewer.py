@@ -6553,36 +6553,45 @@ class Viewer:
                 radial2[:, 0] = 0.0
                 R_eff = np.linalg.norm(radial2, axis=1)
                 on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
-                # Per-pad theta: +0.5 * atan(half_seg / R_eff) on
-                # arc pads with valid R, else 0.  Per Coffee
-                # 2026-05-18 ("split that tangent angle in
-                # half") -- the previous theta was the full
-                # half-pie-slice (= δ/2 = asin(L/(2R))); now use
-                # δ/4 so the pad's tilt is half what the polygon
-                # geometry suggested.  Visually: pads are tilted
-                # halfway between "spline tangent at the sample"
-                # and "chord direction between consecutive
-                # samples".
+                # Per-pad theta: -atan(half_seg / R_eff) on arc
+                # pads with valid R, else 0.  Per Coffee
+                # 2026-05-18 ("each cord middle point is the
+                # rotation point?") -- restore the FULL half-
+                # pie-slice angle (δ/2 = asin(L/(2R))) so the
+                # pad's forward axis lands on the chord
+                # direction between consecutive hinges.
+                # Combined with the L/2 forward shift below
+                # (= pivot at chord midpoint), this makes the
+                # pad face perpendicular to the radial at the
+                # chord midpoint -- i.e. facing the wheel
+                # centre.
                 thetas = np.where(
                     on_arc_b2 & (R_eff > 1e-6),
-                    -0.5 * np.arctan2(_half_seg,
-                                       np.maximum(R_eff, 1e-6)),
+                    -np.arctan2(_half_seg,
+                                 np.maximum(R_eff, 1e-6)),
                     0.0).astype(np.float32)
                 cs = np.cos(thetas)[:, None]    # (N, 1)
                 ss = np.sin(thetas)[:, None]
-                # Post-multiply Rx(theta) per pad.  Same matrix
-                # math as the global `_seg_rotation_deg` block
-                # above, applied per-row.  Pure rotation: col3
-                # is unchanged, so the pivot stays at the
-                # spline sample point on the pitch circle
-                # (= R + inner_thickness from the wheel center,
-                # per Coffee 2026-05-18 "we need the same pivot
-                # location as the main pad.  the wheel to
-                # rotation point distance").
+                # Post-multiply Rx(theta) per pad -- pure
+                # rotation, so col3 unchanged here.
                 Y_old = xform[:, 0:3, 1].copy()
                 Z_old = xform[:, 0:3, 2].copy()
                 xform[:, 0:3, 1] = cs * Y_old + ss * Z_old
                 xform[:, 0:3, 2] = -ss * Y_old + cs * Z_old
+                # Per Coffee 2026-05-18 ("each cord middle point
+                # is the rotation point?"): shift col3 by L/2
+                # along the rotated forward direction so the
+                # pivot lands at the chord midpoint (= midway
+                # between two consecutive chain pins) instead
+                # of at the sample point.  Combined with the
+                # full δ/2 rotation above, the pad face is
+                # perpendicular to the radial at the chord
+                # midpoint -- = facing the wheel centre.
+                # pad_forward_axis='-Z', so world-forward
+                # = -col2 of the rotated mat4.
+                fwd_axes = -xform[:, 0:3, 2]
+                xform[:, 0:3, 3] += (
+                    _half_seg * fwd_axes).astype(np.float32)
 
         # Per Coffee 2026-05-10 ("don't flip x on the left
         # side"): the v1.118.10 X-mirror on L's pad transforms
