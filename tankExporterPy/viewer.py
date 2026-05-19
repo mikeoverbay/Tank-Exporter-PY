@@ -15694,8 +15694,33 @@ class Viewer:
                     _chassis_kwargs['min_offset'] = float(_ci['minOffset'])
                 if 'maxOffset' in _ci:
                     _chassis_kwargs['max_offset'] = float(_ci['maxOffset'])
-                if 'renderModelOffset' in _ci:
-                    _chassis_kwargs['track_thickness'] = float(_ci['renderModelOffset'])
+                # Per Coffee 2026-05-18 ("tank setting to low?..
+                # W_L wheels are inside of the bottom segments..
+                # settling"): the wheel-CENTRE settles at
+                # `R + track_thickness` above terrain.  For pad
+                # outer face to sit ON the terrain (so the wheel
+                # rim sits at +pad_thickness above the ground),
+                # `track_thickness` must equal the pad's TOTAL
+                # radial thickness = segmentsInnerThickness +
+                # segmentsOuterThickness.  T110E4: 0.091 m.
+                # `renderModelOffset` (~0.016 m) is a separate
+                # modeler field and is NOT pad thickness -- the
+                # old override silently capped the chassis below
+                # the chain.  Prefer the explicit pad totals;
+                # fall back to renderModelOffset for tanks
+                # missing the segments-thickness fields.
+                _it_xml = float(
+                    _ci.get('segmentsInnerThickness', 0.0)
+                    or 0.0)
+                _ot_xml = float(
+                    _ci.get('segmentsOuterThickness', 0.0)
+                    or 0.0)
+                _pad_total = _it_xml + _ot_xml
+                if _pad_total > 1e-6:
+                    _chassis_kwargs['track_thickness'] = _pad_total
+                elif 'renderModelOffset' in _ci:
+                    _chassis_kwargs['track_thickness'] = (
+                        float(_ci['renderModelOffset']))
                 # Total tank mass from the gameplay XML's per-component
                 # <weight> sum.  Drives the inertia-damped pose
                 # integrator: heavier tank -> slower pitch / roll
