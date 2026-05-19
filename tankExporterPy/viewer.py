@@ -7084,62 +7084,30 @@ class Viewer:
             # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
             if 'segment2' in key:
-                _R_eff_disp = getattr(
-                    self, f'_poly_R_eff_{side_letter}', None)
-                _on_arc_disp = getattr(
-                    self, f'_poly_on_arc_{side_letter}', None)
-                if (_R_eff_disp is not None
-                        and _on_arc_disp is not None
-                        and len(_R_eff_disp)
-                            == len(xform_clamped)):
-                    _ci_seg2 = (getattr(self,
-                                         '_pending_chassis_info',
-                                         None) or {})
-                    _seg_len_seg2 = float(
-                        _ci_seg2.get('segmentLength', 0.0) or 0.0)
-                    _half_seg_seg2 = 0.5 * _seg_len_seg2
-                    # `0.5 * atan(half_seg / R_eff)` of magnitude
-                    # = δ/4.  Sign flipped to POSITIVE per Coffee
-                    # 2026-05-19 ("flip the wheel center rotation
-                    # on the 2nd segs") -- segment2 now rotates
-                    # AWAY from the per-pad polygon-correction
-                    # direction about the wheel centre, sliding
-                    # back along the arc instead of forward.
-                    _thetas_x2 = np.where(
-                        _on_arc_disp & (_R_eff_disp > 1e-6),
-                        +np.arctan2(
-                            _half_seg_seg2,
-                            np.maximum(_R_eff_disp, 1e-6)),
-                        0.0).astype(np.float32)
-                    _cs2 = np.cos(_thetas_x2)[:, None]
-                    _ss2 = np.sin(_thetas_x2)[:, None]
-                    _Y_old2 = xform_clamped[:, 0:3, 1].copy()
-                    _Z_old2 = xform_clamped[:, 0:3, 2].copy()
-                    # Step 2: rotate segment2 about the WHEEL
-                    # CENTRE (not the pad's hinge-pin axis) per
-                    # Coffee 2026-05-18 ("this is a 2 step
-                    # process.  we need its tangent placement
-                    # first.  after, we rotate about wheel
-                    # center").  Equivalent to
-                    #     T(0, -R, 0) @ Rx(β) @ T(0, +R, 0)
-                    # in pad-local coords, where R = pad-mesh-
-                    # origin → wheel-centre distance (≈ R_eff
-                    # for small δ).  Net effect on the mat4:
-                    #   col1, col2: rotated by Rx(-thetas)
-                    #   col3:       shifted by
-                    #               R · ((cos β - 1) · col1
-                    #                  +  sin β       · col2)
-                    # so the mesh both reorients AND slides
-                    # along the arc by R · β (arc length).
-                    xform_clamped[:, 0:3, 1] = (
-                        _cs2 * _Y_old2 + _ss2 * _Z_old2)
-                    xform_clamped[:, 0:3, 2] = (
-                        -_ss2 * _Y_old2 + _cs2 * _Z_old2)
-                    _R_arr = _R_eff_disp.astype(
-                        np.float32)[:, None]
+                # Per Coffee 2026-05-19 ("we are dumping the 2nd
+                # seg fix in fav of a better fix... slide them
+                # down the chain.  1/2 seg length to start"):
+                # replaced the v1.231.56-60 wheel-centre
+                # rotation with a pure forward shift along the
+                # chain direction.  segment2 slides by
+                # `0.5 * segmentLength` along the post-rotation
+                # forward axis (= -col2 in pad-local frame,
+                # since pad_forward_axis='-Z').  Same orientation
+                # as segment1 (no extra rotation, both halves
+                # share the polygon-correction Rx(+δ/2) baked
+                # into xform_world).  Easy to revert -- the old
+                # rotation code lives in git history at
+                # v1.231.56-60.
+                _ci_seg2 = (getattr(self,
+                                     '_pending_chassis_info',
+                                     None) or {})
+                _seg_len_seg2 = float(
+                    _ci_seg2.get('segmentLength', 0.0) or 0.0)
+                if _seg_len_seg2 > 1e-6:
+                    _shift_seg2 = 0.5 * _seg_len_seg2
+                    _fwd_seg2 = -xform_clamped[:, 0:3, 2]
                     xform_clamped[:, 0:3, 3] += (
-                        _R_arr * (_cs2 - 1.0) * _Y_old2
-                        + _R_arr * _ss2 * _Z_old2
+                        _shift_seg2 * _fwd_seg2
                     ).astype(np.float32)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
