@@ -7084,26 +7084,49 @@ class Viewer:
             # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
             if 'segment2' in key:
-                # Per Coffee 2026-05-19 ("we are dumping the 2nd
-                # seg fix in fav of a better fix... slide them
-                # down the chain.  1/2 seg length to start"):
-                # replaced the v1.231.56-60 wheel-centre
-                # rotation with a pure forward shift along the
-                # chain direction.  segment2 slides by
-                # `0.5 * segmentLength` along the post-rotation
-                # forward axis (= -col2 in pad-local frame,
-                # since pad_forward_axis='-Z').  Same orientation
-                # as segment1 (no extra rotation, both halves
-                # share the polygon-correction Rx(+δ/2) baked
-                # into xform_world).  Easy to revert -- the old
-                # rotation code lives in git history at
-                # v1.231.56-60.
+                # Per Coffee 2026-05-19 ("rotate the other way
+                # by 1/2"): segment2 gets an EXTRA Rx(+δ/4) on
+                # top of segment1's Rx(+δ/2), pushing its total
+                # rotation to +3δ/4 (opposite-sign half-step
+                # from v1.231.66's δ/4).  Then the L/2 forward
+                # shift along the new post-rotation chord
+                # direction.
                 _ci_seg2 = (getattr(self,
                                      '_pending_chassis_info',
                                      None) or {})
                 _seg_len_seg2 = float(
                     _ci_seg2.get('segmentLength', 0.0) or 0.0)
+                _R_eff_disp = getattr(
+                    self, f'_poly_R_eff_{side_letter}', None)
+                _on_arc_disp = getattr(
+                    self, f'_poly_on_arc_{side_letter}', None)
                 if _seg_len_seg2 > 1e-6:
+                    # Step 1: extra Rx(+δ/4) about hinge-pin
+                    # axis.  `thetas = -0.5 * atan(L/2/R_eff)`
+                    # with the Rx(-thetas) matrix layout gives
+                    # an effective Rx(+δ/4).
+                    if (_R_eff_disp is not None
+                            and _on_arc_disp is not None
+                            and len(_R_eff_disp)
+                                == len(xform_clamped)):
+                        _half_seg_seg2 = 0.5 * _seg_len_seg2
+                        _thetas_x2 = np.where(
+                            _on_arc_disp & (_R_eff_disp > 1e-6),
+                            -0.5 * np.arctan2(
+                                _half_seg_seg2,
+                                np.maximum(_R_eff_disp, 1e-6)),
+                            0.0).astype(np.float32)
+                        _cs2 = np.cos(_thetas_x2)[:, None]
+                        _ss2 = np.sin(_thetas_x2)[:, None]
+                        _Y_old2 = xform_clamped[:, 0:3, 1].copy()
+                        _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                        xform_clamped[:, 0:3, 1] = (
+                            _cs2 * _Y_old2 + _ss2 * _Z_old2)
+                        xform_clamped[:, 0:3, 2] = (
+                            -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    # Step 2: shift col3 by L/2 along the
+                    # POST-rotation forward direction (= -col2,
+                    # since pad_forward_axis='-Z').
                     _shift_seg2 = 0.5 * _seg_len_seg2
                     _fwd_seg2 = -xform_clamped[:, 0:3, 2]
                     xform_clamped[:, 0:3, 3] += (
