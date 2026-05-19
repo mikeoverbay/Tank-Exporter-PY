@@ -6553,12 +6553,17 @@ class Viewer:
                 radial2[:, 0] = 0.0
                 R_eff = np.linalg.norm(radial2, axis=1)
                 on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
-                # Per-pad theta: atan(half_seg / R_eff) on arc
-                # pads with valid R, else 0.
+                # Per-pad theta: -atan(half_seg / R_eff) on arc
+                # pads with valid R, else 0.  Sign per Coffee
+                # 2026-05-18 ("angle flipped") -- v1.231.36
+                # rotated the wrong way; flip the sign so the
+                # pad face tilts toward the chord MIDPOINT
+                # (= away from the wheel rim) instead of into
+                # the wheel.
                 thetas = np.where(
                     on_arc_b2 & (R_eff > 1e-6),
-                    np.arctan2(_half_seg,
-                               np.maximum(R_eff, 1e-6)),
+                    -np.arctan2(_half_seg,
+                                np.maximum(R_eff, 1e-6)),
                     0.0).astype(np.float32)
                 cs = np.cos(thetas)[:, None]    # (N, 1)
                 ss = np.sin(thetas)[:, None]
@@ -6615,6 +6620,20 @@ class Viewer:
         # halves overlap naturally at the anchor.  Single-piece
         # pads (A100_T49 etc.) already worked this way since
         # v1.215.0.
+        # Per Coffee 2026-05-18 ("offset just seg 2 by its
+        # offset in xml"): pull the segment2 mesh's XML offset
+        # for the dispatch loop below.  Single-piece pads (no
+        # segment2 in track_segment_models) get 0.0 and the
+        # shift is a no-op for them.
+        _ci_disp = (getattr(self, '_pending_chassis_info', None)
+                     or {})
+        _tsm_disp = _ci_disp.get('track_segment_models') or {}
+        try:
+            seg2_offset = float(
+                _tsm_disp.get('segment2Offset', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            seg2_offset = 0.0
+
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
         # compose chassis_pose @ pad_xform on the CPU to get a
         # world-space mat4 per pad, sample terrain at each pad's
@@ -7027,21 +7046,26 @@ class Viewer:
             # chain anchor by v1.215.0's design and that
             # renders correctly today.
             #
-            # Per Coffee 2026-05-18 ("remove these from radial
-            # offset.  segmentOffset = 0.258, segment2Offset =
-            # 0.09"): the `segmentOffset` / `segment2Offset` XML
-            # values are NOT radial offsets either -- they
-            # describe something else (probably per-mesh pivot
-            # internals that the modeler used and the engine
-            # doesn't need at placement time).  Drop the runtime
-            # shift entirely.  Every renderer (segment, segment2,
-            # link, all sides) places its mesh-local origin at
-            # the chain anchor and rotates with the rest of the
-            # per-pad mat4.  Two-piece pads' halves overlap
-            # naturally at the anchor; the actual radial spread
-            # is encoded in the mesh geometry itself, not in a
-            # runtime shift.
+            # Per Coffee 2026-05-18 ("offset just seg 2 by its
+            # offset in xml"): segment1 / link renderers keep the
+            # shared chord-midpoint placement.  segment2 mesh
+            # gets shifted by `segment2Offset` along the pad's
+            # forward direction (= the chord direction after the
+            # polygon-correction rotation in the per-pad mat4).
+            # Single-piece pads have segment2_offset == 0.0, so
+            # this is a no-op for them.
             xform_clamped = xform_world.copy()
+            if seg2_offset != 0.0 and 'segment2' in key:
+                # Pad's world-forward axis = -col2 of the per-pad
+                # mat4 (pad_forward_axis='-Z').  Apply the shift
+                # in world space here on `xform_clamped` -- the
+                # column already comes from
+                # `chassis_pose @ xform_local`, so its `col2`
+                # is the world-space pad-forward direction.
+                _fwd_axes_disp = -xform_clamped[:, 0:3, 2]
+                xform_clamped[:, 0:3, 3] += (
+                    seg2_offset * _fwd_axes_disp).astype(
+                        np.float32)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
