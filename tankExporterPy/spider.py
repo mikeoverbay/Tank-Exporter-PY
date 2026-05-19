@@ -241,9 +241,17 @@ class Spider:
         # at +Y, a hip at angle phi off the pole sits at:
         #     y = R cos(phi)
         #     out_radius = R sin(phi)   (radial in XZ plane)
+        # Per Coffee 2026-05-19 ("spider legs don't stretch.
+        # spring in the joints"): segments are RIGID.  Store
+        # per-leg segment lengths and a bend-plane outward
+        # direction once at init; `step()` recomputes knee and
+        # mid via 2-link IK each frame so the joints flex but
+        # the cylinder lengths stay constant.
         phi = math.radians(self.HIP_POLE_OFFSET_DEG)
         hip_y   = self.BODY_RADIUS * math.cos(phi)
         hip_xz  = self.BODY_RADIUS * math.sin(phi)
+        self._leg_seg_lens = []   # (L1, L2, L3) per leg
+        self._leg_out_dir  = []   # unit XZ outward direction per leg
         for i in range(self.LEG_COUNT):
             theta = 2.0 * math.pi * i / self.LEG_COUNT + math.pi / 4.0
             cx = math.cos(theta)
@@ -271,6 +279,17 @@ class Spider:
             self._legs_rest.append((hip, knee, mid, foot))
             self._legs.append((hip.copy(), knee.copy(),
                                 mid.copy(), foot.copy()))
+            # Segment lengths and the per-leg outward XZ
+            # direction (+ stays the same regardless of pose --
+            # serves as the bend-plane reference so IK keeps the
+            # knee sticking OUT from the body, not collapsed
+            # inward).
+            L1 = float(np.linalg.norm(knee - hip))
+            L2 = float(np.linalg.norm(mid  - knee))
+            L3 = float(np.linalg.norm(foot - mid))
+            self._leg_seg_lens.append((L1, L2, L3))
+            self._leg_out_dir.append(
+                np.asarray([cx, 0.0, cz], dtype=np.float32))
 
     # ---- accessors ---------------------------------------------------------
 
@@ -320,12 +339,13 @@ class Spider:
     def step(self, dt):
         """Advance jump animation by `dt` seconds.
 
-        Cycle phases (fraction of `JUMP_CYCLE_SEC`):
-            crouch  -- body lowers, knees flex outward
-            launch  -- body shoots up, knees extend
-            air     -- body follows a ballistic arc apex
-            land    -- body settles back to rest height
-            rest    -- standing pose until next cycle
+        Per Coffee 2026-05-19 ("spider legs don't stretch.
+        spring in the joints"): segment lengths are RIGID; only
+        the joint angles flex.  Feet stay anchored at their
+        spider-local rest position as the body Y bobs up and
+        down, and 2-link IK in the per-leg bend plane re-solves
+        the knee position so the leg compresses by FLEXING
+        instead of stretching.
         """
         try:
             self._t += float(dt)
@@ -337,58 +357,125 @@ class Spider:
         f_la  = f_cr + self.JUMP_LAUNCH_FRAC
         f_ai  = f_la + self.JUMP_AIR_FRAC
         f_ln  = f_ai + self.JUMP_LAND_FRAC
-        # `f_rest` is implicit -- whatever's left.
 
         if phase < f_cr:
-            # Crouch: ease-down toward -JUMP_CROUCH_DROP.
             p = phase / f_cr
             y_off = -self.JUMP_CROUCH_DROP * (
                 0.5 - 0.5 * math.cos(p * math.pi))
-            knee_scale = 1.0 + self.JUMP_KNEE_FLEX * p
         elif phase < f_la:
-            # Launch: rapid rise from crouch to apex-bound start.
-            p = (phase - f_cr) / max(
-                f_la - f_cr, 1e-6)
+            p = (phase - f_cr) / max(f_la - f_cr, 1e-6)
             y_off = (-self.JUMP_CROUCH_DROP
                      + (self.JUMP_CROUCH_DROP
                         + 0.4 * self.JUMP_PEAK_HEIGHT) * p)
-            knee_scale = 1.0 + self.JUMP_KNEE_FLEX * (1.0 - p)
         elif phase < f_ai:
-            # Ballistic arc: 0.4 * peak -> peak -> 0 over this span.
-            p = (phase - f_la) / max(
-                f_ai - f_la, 1e-6)
-            # Parabola y_off(p) with y(0)=0.4*peak, y(0.5)=peak, y(1)=0.
-            # Fit: y = peak * (1 - (2p - 0.x)^2) ... simpler:
-            #   y = peak * (1 - 4*(p - 0.5)^2)    apex at p=0.5
-            # Then offset so y(0) lines up with launch end.
+            p = (phase - f_la) / max(f_ai - f_la, 1e-6)
             y_off = self.JUMP_PEAK_HEIGHT * (
                 1.0 - 4.0 * (p - 0.5) * (p - 0.5))
-            knee_scale = 1.0          # legs hang relaxed midair
         elif phase < f_ln:
-            # Landing: dip slightly past rest, then settle.
-            p = (phase - f_ai) / max(
-                f_ln - f_ai, 1e-6)
+            p = (phase - f_ai) / max(f_ln - f_ai, 1e-6)
             y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
                 p * math.pi)
-            knee_scale = 1.0 + 0.5 * self.JUMP_KNEE_FLEX * math.sin(
-                p * math.pi)
         else:
-            # Rest: standing.
             y_off = 0.0
-            knee_scale = 1.0
 
         self.world_pos[1] = self._rest_y + float(y_off)
-        # Apply knee flex by adjusting each leg's knee point
-        # vertically.  Mid + foot stay at rest positions so the
-        # knee bends outward (= the leg looks like it springs).
+        self._update_leg_ik(float(y_off))
+
+    def _update_leg_ik(self, body_y_off):
+        """Re-solve each leg with rigid segments.
+
+        Treats each leg as a 2-link chain: bone-A (hip->knee, len
+        L1) and bone-B (knee->foot, len L2 + L3).  The `mid`
+        point is then interpolated along the knee->foot vector
+        so segment 2 has its rest length L2.
+
+        Foot is ANCHORED at the rest spider-local position so
+        when the body lowers (y_off < 0) the foot's distance
+        from the hip drops and the knee folds outward.  When
+        the body rises (y_off > 0) and the leg would
+        overstretch past L1+L2+L3, the foot lifts toward the
+        hip along the leg's outward XZ direction (= leg fully
+        extended pointing down at the spawn ground point but
+        the foot rides up with the body).
+        """
         for i, (hip_r, knee_r, mid_r, foot_r) in enumerate(
                 self._legs_rest):
-            hip_now  = hip_r
-            knee_now = knee_r.copy()
-            knee_now[1] = knee_r[1] * float(knee_scale)
-            mid_now  = mid_r
-            foot_now = foot_r
-            self._legs[i] = (hip_now, knee_now, mid_now, foot_now)
+            L1, L2, L3 = self._leg_seg_lens[i]
+            Lreach = L1 + L2 + L3
+            # Hip moves with the body in spider-local coords?  No
+            # -- hips are fixed in spider-local, body translates
+            # via the world matrix.  In SPIDER-LOCAL coords the
+            # hip stays at `hip_r` and the foot at `foot_r` --
+            # but the FOOT was anchored in WORLD by the body's
+            # rest position.  Now that the body has moved by
+            # `body_y_off` in world, the foot's spider-local
+            # Y appears at `foot_r.y - body_y_off` (foot stays
+            # in world but body moved up).
+            hip  = hip_r
+            foot = foot_r.copy()
+            foot[1] = foot_r[1] - body_y_off
+            # Vector hip -> foot.
+            delta   = foot - hip
+            d_len   = float(np.linalg.norm(delta))
+            if d_len < 1e-6:
+                self._legs[i] = (hip, knee_r.copy(),
+                                  mid_r.copy(), foot)
+                continue
+            # If we'd overstretch, lift the foot back along the
+            # hip->foot ray to exactly Lreach.  This keeps the
+            # leg straight + fully extended pointing in the rest
+            # direction; the foot effectively rides up with the
+            # body in midair.
+            if d_len > Lreach:
+                foot = hip + (Lreach / d_len) * delta
+                delta = foot - hip
+                d_len = Lreach
+            L_bend = L2 + L3
+            # 2-link IK: cosine rule for angle at hip between
+            # bone-A and the hip-foot line.
+            #   d^2 = L1^2 + L_bend^2 - 2*L1*L_bend*cos(angle_at_knee)
+            #   d^2 = L1^2 - 2*L1*proj  +  proj^2 + h^2
+            #     where (proj, h) is knee relative to hip in
+            #     (along-foot, perpendicular) basis.
+            #   => proj = (L1^2 + d^2 - L_bend^2) / (2*d)
+            #   => h    = sqrt(max(L1^2 - proj^2, 0))
+            proj = (L1 * L1 + d_len * d_len - L_bend * L_bend) / (
+                2.0 * d_len)
+            proj = max(min(proj, L1), -L1)
+            h_sq = L1 * L1 - proj * proj
+            h    = math.sqrt(max(h_sq, 0.0))
+            # Build the bend-plane basis: `along` = hip->foot
+            # direction; `perp` = the unit XZ outward direction
+            # projected to be perpendicular to `along`, then
+            # normalised.  Falls back to world +Y when degenerate.
+            along = delta / d_len
+            out   = self._leg_out_dir[i]
+            perp  = out - float(np.dot(out, along)) * along
+            pn    = float(np.linalg.norm(perp))
+            if pn < 1e-6:
+                perp = np.asarray([0.0, 1.0, 0.0],
+                                   dtype=np.float32)
+            else:
+                perp = perp / pn
+            # Knee = hip + proj * along + h * perp_out.  The +h
+            # bias is chosen so the knee always sticks OUTWARD
+            # (= away from the body) -- characteristic Quest
+            # spider pose with the knee high above the body.
+            knee = (hip
+                     + proj * along
+                     + h * perp).astype(np.float32)
+            # Mid sits on the line from knee to foot at length
+            # L2 from the knee (= the natural bend point of the
+            # lower segments).  This keeps the segment 2 length
+            # exact and lets segment 3 absorb the remainder.
+            kf      = foot - knee
+            kf_len  = float(np.linalg.norm(kf))
+            if kf_len > 1e-6:
+                mid = (knee + (L2 / kf_len) * kf
+                       ).astype(np.float32)
+            else:
+                mid = knee.copy()
+            self._legs[i] = (hip, knee, mid, foot)
 
     # ---- render ------------------------------------------------------------
 
