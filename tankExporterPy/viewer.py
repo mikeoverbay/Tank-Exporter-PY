@@ -6401,13 +6401,22 @@ class Viewer:
             side_tag = ('L' if xform is xform_L
                         else 'R' if xform is xform_R
                         else None)
-            hubs_arr   = (self._homie_hubs_L
+            # Per Coffee 2026-05-19 ("our pads faces are not
+            # rotated to the W_L wheels center"): use the
+            # ROAD-WHEEL-AUGMENTED hub/on_arc arrays so line
+            # pads on the bottom run (which track_homie marks
+            # on_arc=False because the geometric chord-arc is
+            # 0° on flat ground) get their nearest road-wheel
+            # hub assigned and become "treat as arc" for the
+            # up-vector and polygon-correction overrides.
+            hubs_arr   = (getattr(self, '_poly_hubs_L', None)
                           if side_tag == 'L'
-                          else self._homie_hubs_R
+                          else getattr(self, '_poly_hubs_R', None)
                           if side_tag == 'R' else None)
-            on_arc_arr = (self._homie_onarc_L
+            on_arc_arr = (getattr(self, '_poly_onarc_L', None)
                           if side_tag == 'L'
-                          else self._homie_onarc_R
+                          else getattr(self, '_poly_onarc_R',
+                                        None)
                           if side_tag == 'R' else None)
             if (hubs_arr is None or on_arc_arr is None
                     or len(hubs_arr) != N
@@ -6538,12 +6547,19 @@ class Viewer:
                         or len(xform) != len(pos)
                         or len(xform) == 0):
                     continue
-                hubs_arr2 = (self._homie_hubs_L
-                             if side_tag2 == 'L'
-                             else self._homie_hubs_R)
-                on_arc_arr2 = (self._homie_onarc_L
-                               if side_tag2 == 'L'
-                               else self._homie_onarc_R)
+                # Per Coffee 2026-05-19 ("our pads faces are
+                # not rotated to the W_L wheels center"): use
+                # the augmented `_poly_*` arrays so road-wheel
+                # line pads get the polygon-correction rotation
+                # too.
+                hubs_arr2 = (
+                    getattr(self, '_poly_hubs_L', None)
+                    if side_tag2 == 'L'
+                    else getattr(self, '_poly_hubs_R', None))
+                on_arc_arr2 = (
+                    getattr(self, '_poly_onarc_L', None)
+                    if side_tag2 == 'L'
+                    else getattr(self, '_poly_onarc_R', None))
                 if (hubs_arr2 is None or on_arc_arr2 is None
                         or len(hubs_arr2) != len(xform)
                         or len(on_arc_arr2) != len(xform)):
@@ -8460,6 +8476,74 @@ class Viewer:
         self._homie_onarc_L  = la_L
         self._homie_hubs_R   = lh_R
         self._homie_onarc_R  = la_R
+        # Per Coffee 2026-05-19 ("our pads faces are not rotated
+        # to the W_L wheels center.  no tangent.  investigate"):
+        # for equal-R road wheels on flat ground, the geometric
+        # arc subtended per chord is 0° -- track_homie marks
+        # those pads as `on_arc=False` and the polygon-correction
+        # loop in _render_track_pad_body skips them.  Result:
+        # bottom-run pad faces sit flat against the chord with
+        # no tilt toward any road-wheel centre.
+        #
+        # Fix: build AUGMENTED hub + on_arc arrays where every
+        # line pad is assigned its NEAREST road-wheel hub (by
+        # chassis-local YZ distance) and re-flagged as "treat
+        # as arc".  Saved to separate `_poly_*` stashes so the
+        # original `_homie_*` arrays stay clean for the recorder
+        # and other consumers that need true arc/line semantics.
+        def _augment_with_road_wheels(side_token, pos_arr,
+                                       hubs_arr, onarc_arr):
+            if (pos_arr is None or hubs_arr is None
+                    or onarc_arr is None):
+                return hubs_arr, onarc_arr
+            road_names = (chain_roles.get(
+                f'road_wheels_{side_token}') or [])
+            if not road_names:
+                return hubs_arr, onarc_arr
+            road_yz = []
+            for nm in road_names:
+                b = bones.get(nm)
+                if b is None:
+                    b = bones.get(nm + '_BlendBone')
+                if b is not None:
+                    # bones stored as (X, Y, Z) chassis-local.
+                    # Note: assemble_chain_arrays stores hub Z
+                    # as `hub[0]` (= 2D X) and Y as `hub[1]`,
+                    # then flips Z when packing to (side_x, Y, Z).
+                    # Here we use chassis-local (Y, Z) directly.
+                    road_yz.append((float(b[1]), float(b[2])))
+            if not road_yz:
+                return hubs_arr, onarc_arr
+            rh = np.asarray(road_yz, dtype=np.float32)
+            hubs_aug  = np.asarray(hubs_arr, dtype=np.float32).copy()
+            onarc_aug = np.asarray(onarc_arr, dtype=bool).copy()
+            line_mask = ~onarc_aug
+            if not line_mask.any():
+                return hubs_aug, onarc_aug
+            pos_f = np.asarray(pos_arr, dtype=np.float32)
+            pad_yz = pos_f[line_mask, 1:3]            # (M, 2)
+            dists = np.linalg.norm(
+                pad_yz[:, None, :] - rh[None, :, :],
+                axis=2)                                # (M, K)
+            nearest = np.argmin(dists, axis=1)         # (M,)
+            line_idx = np.where(line_mask)[0]
+            # Side X gauge for the augmented hubs uses the pad's
+            # own X (= side_x as set by assemble_chain_arrays).
+            hubs_aug[line_idx, 0] = pos_f[line_idx, 0]
+            hubs_aug[line_idx, 1] = rh[nearest, 0]
+            # NB: assemble_chain_arrays stored hub Z as
+            # `float(hub_or_none[0])` (= the 2D X coord from
+            # _collect_wheels, which is chassis-local Z).
+            # That value matches the raw chassis-local Z, so
+            # we can pass it through directly.
+            hubs_aug[line_idx, 2] = rh[nearest, 1]
+            onarc_aug[line_idx] = True
+            return hubs_aug, onarc_aug
+
+        self._poly_hubs_L,  self._poly_onarc_L = (
+            _augment_with_road_wheels('L', lp_L, lh_L, la_L))
+        self._poly_hubs_R,  self._poly_onarc_R = (
+            _augment_with_road_wheels('R', lp_R, lh_R, la_R))
         # Per Coffee 2026-05-16 ("F3 is bound to record.  lets
         # record the seg positions that are affected by one of
         # the bottom wheels"): stash the per-frame chain pad
