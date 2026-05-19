@@ -6553,15 +6553,6 @@ class Viewer:
                 radial2[:, 0] = 0.0
                 R_eff = np.linalg.norm(radial2, axis=1)
                 on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
-                # Stash R_eff + on_arc so the segment2 dispatch
-                # loop (much later in this function) can compute
-                # its own independent per-pad rotation.
-                setattr(self,
-                        f'_poly_R_eff_{side_tag2}',
-                        R_eff.copy())
-                setattr(self,
-                        f'_poly_on_arc_{side_tag2}',
-                        on_arc_b2.copy())
                 # Per-pad theta: -atan(half_seg / R_eff) on arc
                 # pads with valid R, else 0.  Sign per Coffee
                 # 2026-05-18 ("angle flipped") -- v1.231.36
@@ -6578,27 +6569,17 @@ class Viewer:
                 ss = np.sin(thetas)[:, None]
                 # Post-multiply Rx(theta) per pad.  Same matrix
                 # math as the global `_seg_rotation_deg` block
-                # above, applied per-row.
+                # above, applied per-row.  Pure rotation: col3
+                # is unchanged, so the pivot stays at the
+                # spline sample point on the pitch circle
+                # (= R + inner_thickness from the wheel center,
+                # per Coffee 2026-05-18 "we need the same pivot
+                # location as the main pad.  the wheel to
+                # rotation point distance").
                 Y_old = xform[:, 0:3, 1].copy()
                 Z_old = xform[:, 0:3, 2].copy()
                 xform[:, 0:3, 1] = cs * Y_old + ss * Z_old
                 xform[:, 0:3, 2] = -ss * Y_old + cs * Z_old
-                # Per Coffee 2026-05-18 ("offset by 1/2 seg
-                # length.  we want to have the pad perpendicular
-                # to the arc angle"): shift each pad along its
-                # forward direction by half a segment length so
-                # the pad-mesh ORIGIN lands at the chord midpoint
-                # (= midway between consecutive hinge pins),
-                # not at the hinge.  Combined with the rotation
-                # above, the pad's flat face is perpendicular to
-                # the radial bisector at the chord midpoint --
-                # exactly how a physical track shoe sits between
-                # two hinge pins.  pad_forward_axis is '-Z' so
-                # the world-space forward direction is
-                # `-col2` of the mat4.
-                fwd_axes = -xform[:, 0:3, 2]   # (N, 3)
-                xform[:, 0:3, 3] += (_half_seg * fwd_axes).astype(
-                    np.float32)
 
         # Per Coffee 2026-05-10 ("don't flip x on the left
         # side"): the v1.118.10 X-mirror on L's pad transforms
@@ -6629,23 +6610,6 @@ class Viewer:
         # halves overlap naturally at the anchor.  Single-piece
         # pads (A100_T49 etc.) already worked this way since
         # v1.215.0.
-
-        # Per Coffee 2026-05-18 ("we lost the seg 2 offset.  and
-        # rotate same as seg 1"): pull segment2's XML offset.
-        # Applied as a translation-only shift to segment2's
-        # per-pad mat4 in the dispatch loop below; the rotation
-        # columns are unchanged, so segment1 and segment2 share
-        # the same orientation R (= rotate as one rigid unit).
-        # Single-piece pads (no segment2 in track_segment_models)
-        # get 0.0 and the shift is a no-op.
-        _ci_disp = (getattr(self, '_pending_chassis_info', None)
-                     or {})
-        _tsm_disp = _ci_disp.get('track_segment_models') or {}
-        try:
-            seg2_offset = float(
-                _tsm_disp.get('segment2Offset', 0.0) or 0.0)
-        except (TypeError, ValueError):
-            seg2_offset = 0.0
 
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
         # compose chassis_pose @ pad_xform on the CPU to get a
@@ -7059,62 +7023,19 @@ class Viewer:
             # chain anchor by v1.215.0's design and that
             # renders correctly today.
             #
-            # Per Coffee 2026-05-18 ("the offset gets us to the
-            # actual hinge pin for seg2.  we need to offset and
-            # then rotate the seg 2 indipendent"): for the
-            # segment2 renderer, two-step transform on the
-            # per-pad mat4:
-            #   1. Shift col3 by `segment2Offset` along pad-local
-            #      forward (= -col2 in world).  Puts seg2's
-            #      mesh-local origin at its OWN hinge pin (which
-            #      sits seg2_offset ahead of seg1's hinge along
-            #      the chord).
-            #   2. Post-multiply by Rx(theta_seg2) -- an
-            #      independent per-pad rotation = -atan(seg2_offset
-            #      / R_eff).  This pivots around seg2's hinge
-            #      pin (= the new col3) so seg2's flat face
-            #      aligns with the next chord segment.
-            # Pure rotation post-multiplication leaves col3
-            # unchanged, so the rotation happens AROUND the
-            # already-shifted hinge pin -- exactly what we want
-            # for "rotate seg 2 independent" around its own
-            # hinge.
-            # Single-piece pads (seg2_offset == 0.0) skip both
-            # steps.
+            # Per Coffee 2026-05-18 ("we need the same pivot
+            # location as the main pad.  the wheel to rotation
+            # point distance"): both segment1 and segment2 share
+            # the SAME per-pad mat4 -- col3 sits on the chain
+            # pitch circle (= R + inner_thickness from the
+            # wheel center, = the spline sample point), and the
+            # rotation columns carry the polygon-correction
+            # rotation applied uniformly to both halves.  The
+            # rotation pivots around col3 because col3 IS the
+            # rotation centre in instanced rendering.  Any
+            # visible offset between the two mesh pieces must
+            # live in the segment2 mesh's authored vertex data.
             xform_clamped = xform_world.copy()
-            if seg2_offset != 0.0 and 'segment2' in key:
-                # Step 1: shift col3 to seg2's hinge pin.
-                _fwd_axes_disp = -xform_clamped[:, 0:3, 2]
-                xform_clamped[:, 0:3, 3] += (
-                    seg2_offset * _fwd_axes_disp).astype(
-                        np.float32)
-                # Step 2: independent per-pad rotation.  R_eff
-                # was stashed in `_poly_R_eff_<side>` during the
-                # polygon-correction pass above.  theta_seg2 has
-                # the same sign convention as seg1's polygon
-                # correction (negative, flipped per v1.231.38).
-                _R_eff_disp = getattr(
-                    self, f'_poly_R_eff_{side_letter}', None)
-                _on_arc_disp = getattr(
-                    self, f'_poly_on_arc_{side_letter}', None)
-                if (_R_eff_disp is not None
-                        and _on_arc_disp is not None
-                        and len(_R_eff_disp)
-                            == len(xform_clamped)):
-                    _seg2_thetas = np.where(
-                        _on_arc_disp & (_R_eff_disp > 1e-6),
-                        -np.arctan2(seg2_offset,
-                                     np.maximum(_R_eff_disp,
-                                                 1e-6)),
-                        0.0).astype(np.float32)
-                    _cs2 = np.cos(_seg2_thetas)[:, None]
-                    _ss2 = np.sin(_seg2_thetas)[:, None]
-                    _Y_old = xform_clamped[:, 0:3, 1].copy()
-                    _Z_old = xform_clamped[:, 0:3, 2].copy()
-                    xform_clamped[:, 0:3, 1] = (
-                        _cs2 * _Y_old + _ss2 * _Z_old)
-                    xform_clamped[:, 0:3, 2] = (
-                        -_ss2 * _Y_old + _cs2 * _Z_old)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
