@@ -8163,15 +8163,23 @@ class Viewer:
             # placement call -- the stored cumulative
             # `_track_chain_s_offset_<side>` keeps accumulating
             # `v * dt` cleanly without the bias baked in.
-            # Per Coffee 2026-05-18 ("disable all but 1, 2 and
-            # 3"): tooth-phase offset (#15) DISABLED -- s_offset
-            # is used as-is, no per-side phase shift to land a
-            # pad on sprocket tooth k=0.
-            if False:
-                tooth_syncs = ci.get('tooth_syncs') or {}
-                if tooth_syncs:
-                    s_offset -= _th.compute_tooth_phase_offset(
-                        arcs_3, tooth_syncs, side, n_pads)
+            # Per Coffee 2026-05-18 ("lets adopt center pad
+            # rotation at tangent and use the nudge to align
+            # the teeth to the chain"): re-enable the tooth-
+            # phase offset (#15 in SPLINE_CONSTRAINTS).  The
+            # per-pad polygon-correction rotation (v1.231.36 /
+            # v1.231.38) handles the geometric "center pad at
+            # tangent" placement.  This block applies the small
+            # `<startAngle>` nudge from chassis XML's
+            # `<teethSyncs>` -- converted to along-chain arc-
+            # length via `compute_tooth_phase_offset` -- so a
+            # chain pad lands exactly on tooth k=0 of the first
+            # drive sprocket on this side.  Tanks without
+            # `<teethSyncs>` fall through to the zero offset.
+            tooth_syncs = ci.get('tooth_syncs') or {}
+            if tooth_syncs:
+                s_offset -= _th.compute_tooth_phase_offset(
+                    arcs_3, tooth_syncs, side, n_pads)
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
