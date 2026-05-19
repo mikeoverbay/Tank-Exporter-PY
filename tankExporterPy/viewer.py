@@ -8319,18 +8319,23 @@ class Viewer:
         # directions from centre" Coffee asked for.  Pads on
         # the road-wheel arcs now match the rotation rate of
         # pads on the drive / idler wrap.
-        # Per Coffee 2026-05-18 ("disable all but 1, 2 and 3"):
-        # central-chord tangent rebuild (#11) DISABLED -- pads
-        # keep their `_place_pads` forward-chord tangents.
-        if False:
-            for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
-                if pos is None or tan is None or len(pos) < 2:
-                    continue
-                chord = (np.roll(pos, -1, axis=0)
-                         - np.roll(pos, +1, axis=0))
-                nrm = np.linalg.norm(chord, axis=1, keepdims=True)
-                chord = chord / np.maximum(nrm, 1e-9)
-                tan[:] = chord.astype(tan.dtype)
+        # Per Coffee 2026-05-19 ("segments should follow the
+        # spline angle if they are on the ground"): re-enable
+        # the central-chord tangent rebuild (#11 in
+        # SPLINE_CONSTRAINTS) so each pad's forward axis
+        # samples `pos[i+1] - pos[i-1]` instead of the forward
+        # chord `pos[i+1] - pos[i]`.  Bottom-run pads (and all
+        # other pads) now follow the SMOOTHED spline tangent,
+        # changing by Δ/2 between consecutive pads instead of
+        # the full Δ.
+        for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
+            if pos is None or tan is None or len(pos) < 2:
+                continue
+            chord = (np.roll(pos, -1, axis=0)
+                     - np.roll(pos, +1, axis=0))
+            nrm = np.linalg.norm(chord, axis=1, keepdims=True)
+            chord = chord / np.maximum(nrm, 1e-9)
+            tan[:] = chord.astype(tan.dtype)
 
         # Per Coffee 2026-05-11 ("we have breaks in our chain?
         # are we sure we are in order?"): apply the authored
