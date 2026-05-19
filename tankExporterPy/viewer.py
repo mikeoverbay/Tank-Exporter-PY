@@ -6553,16 +6553,17 @@ class Viewer:
                 radial2[:, 0] = 0.0
                 R_eff = np.linalg.norm(radial2, axis=1)
                 on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
-                # Per-pad theta: -atan(half_seg / R_eff) on arc
-                # pads with valid R, else 0.  Sign per Coffee
-                # 2026-05-18 ("angle flipped") -- v1.231.36
-                # rotated the wrong way; flip the sign so the
-                # pad face tilts toward the chord MIDPOINT
-                # (= away from the wheel rim) instead of into
-                # the wheel.
+                # Per-pad theta: +atan(half_seg / R_eff) on arc
+                # pads with valid R, else 0.  Sign flipped at
+                # Coffee 2026-05-18 ("flip the rotation angle in
+                # X axis") -- the previous v1.231.38 negative
+                # sign tilted pads away from the wheel; positive
+                # tilts them INTO the wheel toward the centre,
+                # matching the polygon-inscribed-in-pitch-circle
+                # geometry.
                 thetas = np.where(
                     on_arc_b2 & (R_eff > 1e-6),
-                    -np.arctan2(_half_seg,
+                    np.arctan2(_half_seg,
                                 np.maximum(R_eff, 1e-6)),
                     0.0).astype(np.float32)
                 cs = np.cos(thetas)[:, None]    # (N, 1)
