@@ -7084,31 +7084,58 @@ class Viewer:
             # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
             if 'segment2' in key:
-                # Per Coffee 2026-05-19 ("we are dumping the 2nd
-                # seg fix in fav of a better fix... slide them
-                # down the chain.  1/2 seg length to start"):
-                # replaced the v1.231.56-60 wheel-centre
-                # rotation with a pure forward shift along the
-                # chain direction.  segment2 slides by
-                # `0.5 * segmentLength` along the post-rotation
-                # forward axis (= -col2 in pad-local frame,
-                # since pad_forward_axis='-Z').  Same orientation
-                # as segment1 (no extra rotation, both halves
-                # share the polygon-correction Rx(+δ/2) baked
-                # into xform_world).  Easy to revert -- the old
-                # rotation code lives in git history at
-                # v1.231.56-60.
+                # Per Coffee 2026-05-19 ("we still have to rotate
+                # them unfortunately.  not on wheel center thou.
+                # we saved some math"): segment2 gets BOTH a
+                # forward chain-slide of L/2 AND a pure Rx
+                # rotation about the (shifted) hinge-pin axis.
+                # NO wheel-centre / off-centre-axis math.
                 _ci_seg2 = (getattr(self,
                                      '_pending_chassis_info',
                                      None) or {})
                 _seg_len_seg2 = float(
                     _ci_seg2.get('segmentLength', 0.0) or 0.0)
                 if _seg_len_seg2 > 1e-6:
+                    # Step 1: shift col3 by L/2 along the chain
+                    # forward direction (= -col2 since
+                    # pad_forward_axis='-Z').  Use the ORIGINAL
+                    # rotated forward (= xform_world's col2)
+                    # before the Rx in step 2.
                     _shift_seg2 = 0.5 * _seg_len_seg2
                     _fwd_seg2 = -xform_clamped[:, 0:3, 2]
                     xform_clamped[:, 0:3, 3] += (
                         _shift_seg2 * _fwd_seg2
                     ).astype(np.float32)
+                    # Step 2: pure Rx post-multiplication about
+                    # the (shifted) pad-local +X axis.  Magnitude
+                    # = full chord-face angle = atan(L/2 / R_eff)
+                    # per arc pad, sign positive (= AWAY from
+                    # the polygon-correction direction).  Line
+                    # pads (R_eff stash missing or theta=0) are
+                    # left as the pure shift, no rotation.
+                    _R_eff_disp = getattr(
+                        self, f'_poly_R_eff_{side_letter}', None)
+                    _on_arc_disp = getattr(
+                        self, f'_poly_on_arc_{side_letter}', None)
+                    if (_R_eff_disp is not None
+                            and _on_arc_disp is not None
+                            and len(_R_eff_disp)
+                                == len(xform_clamped)):
+                        _half_seg_seg2 = 0.5 * _seg_len_seg2
+                        _thetas_x2 = np.where(
+                            _on_arc_disp & (_R_eff_disp > 1e-6),
+                            +np.arctan2(
+                                _half_seg_seg2,
+                                np.maximum(_R_eff_disp, 1e-6)),
+                            0.0).astype(np.float32)
+                        _cs2 = np.cos(_thetas_x2)[:, None]
+                        _ss2 = np.sin(_thetas_x2)[:, None]
+                        _Y_old2 = xform_clamped[:, 0:3, 1].copy()
+                        _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                        xform_clamped[:, 0:3, 1] = (
+                            _cs2 * _Y_old2 + _ss2 * _Z_old2)
+                        xform_clamped[:, 0:3, 2] = (
+                            -_ss2 * _Y_old2 + _cs2 * _Z_old2)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
