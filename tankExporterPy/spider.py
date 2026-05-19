@@ -178,7 +178,11 @@ class Spider:
     BODY_RADIUS         = 0.40
     LEG_BASE_RADIUS     = 0.04
     LEG_TIP_RADIUS      = 0.025
-    LEG_HIP_HEIGHT      = 0.0   # hips at body equator
+    # Hips clustered near the NORTH POLE of the body sphere
+    # (Quest spider design: legs come out of the top).  Each
+    # leg sits at angle HIP_POLE_OFFSET_DEG off the +Y pole
+    # so the four anchors are almost-but-not-quite touching.
+    HIP_POLE_OFFSET_DEG = 18.0
     LEG_OUT_DIST        = 0.8   # how far OUT the first joint sits
     LEG_KNEE_HEIGHT     = 1.6   # how HIGH above body the knee is
     LEG_MID_OUT         = 2.0   # mid-joint outward distance
@@ -209,16 +213,24 @@ class Spider:
 
         # Per-leg joint positions in spider-local coords.  Each leg
         # has 4 points (hip, knee, mid, foot) -- 3 segments between
-        # consecutive points.
+        # consecutive points.  Hips cluster near the NORTH POLE
+        # of the body sphere (Quest design: legs come out the
+        # TOP, not the equator).  In sphere coords with the pole
+        # at +Y, a hip at angle phi off the pole sits at:
+        #     y = R cos(phi)
+        #     out_radius = R sin(phi)   (radial in XZ plane)
         self._legs = []
+        phi = math.radians(self.HIP_POLE_OFFSET_DEG)
+        hip_y   = self.BODY_RADIUS * math.cos(phi)
+        hip_xz  = self.BODY_RADIUS * math.sin(phi)
         for i in range(self.LEG_COUNT):
             theta = 2.0 * math.pi * i / self.LEG_COUNT + math.pi / 4.0
             cx = math.cos(theta)
             cz = math.sin(theta)
             hip  = np.asarray([
-                self.BODY_RADIUS * cx,
-                self.LEG_HIP_HEIGHT,
-                self.BODY_RADIUS * cz,
+                hip_xz * cx,
+                hip_y,
+                hip_xz * cz,
             ], dtype=np.float32)
             knee = np.asarray([
                 self.LEG_OUT_DIST * cx,
