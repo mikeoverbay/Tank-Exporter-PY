@@ -6569,6 +6569,22 @@ class Viewer:
                 Z_old = xform[:, 0:3, 2].copy()
                 xform[:, 0:3, 1] = cs * Y_old + ss * Z_old
                 xform[:, 0:3, 2] = -ss * Y_old + cs * Z_old
+                # Per Coffee 2026-05-18 ("offset by 1/2 seg
+                # length.  we want to have the pad perpendicular
+                # to the arc angle"): shift each pad along its
+                # forward direction by half a segment length so
+                # the pad-mesh ORIGIN lands at the chord midpoint
+                # (= midway between consecutive hinge pins),
+                # not at the hinge.  Combined with the rotation
+                # above, the pad's flat face is perpendicular to
+                # the radial bisector at the chord midpoint --
+                # exactly how a physical track shoe sits between
+                # two hinge pins.  pad_forward_axis is '-Z' so
+                # the world-space forward direction is
+                # `-col2` of the mat4.
+                fwd_axes = -xform[:, 0:3, 2]   # (N, 3)
+                xform[:, 0:3, 3] += (_half_seg * fwd_axes).astype(
+                    np.float32)
 
         # Per Coffee 2026-05-10 ("don't flip x on the left
         # side"): the v1.118.10 X-mirror on L's pad transforms
