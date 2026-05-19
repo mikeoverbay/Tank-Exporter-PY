@@ -6565,8 +6565,8 @@ class Viewer:
                 # samples".
                 thetas = np.where(
                     on_arc_b2 & (R_eff > 1e-6),
-                    0.5 * np.arctan2(_half_seg,
-                                      np.maximum(R_eff, 1e-6)),
+                    -0.5 * np.arctan2(_half_seg,
+                                       np.maximum(R_eff, 1e-6)),
                     0.0).astype(np.float32)
                 cs = np.cos(thetas)[:, None]    # (N, 1)
                 ss = np.sin(thetas)[:, None]
