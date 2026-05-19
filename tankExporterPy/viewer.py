@@ -7073,12 +7073,20 @@ class Viewer:
                     _seg_len_seg2 = float(
                         _ci_seg2.get('segmentLength', 0.0) or 0.0)
                     _half_seg_seg2 = 0.5 * _seg_len_seg2
-                    # 50% of cord-face angle (= 1/2 of δ/2 = δ/4)
-                    # is the EXTRA rotation; segment1 already
-                    # carries the first δ/2 in xform_world.
+                    # Per Coffee 2026-05-18 ("rotate it to the
+                    # wheels center by 1/2 of the pad pie
+                    # slice"): segment2 gets an extra δ/2
+                    # rotation toward wheel center on top of
+                    # segment1's δ/2 already baked into
+                    # xform_world.  Total seg2 rotation = δ
+                    # (= full pad pie slice).  Same sign
+                    # convention as the per-pad polygon
+                    # correction: negative thetas in this code
+                    # produces Rx(+|theta|) = toward wheel
+                    # centre.
                     _thetas_x2 = np.where(
                         _on_arc_disp & (_R_eff_disp > 1e-6),
-                        +0.5 * np.arctan2(
+                        -np.arctan2(
                             _half_seg_seg2,
                             np.maximum(_R_eff_disp, 1e-6)),
                         0.0).astype(np.float32)
