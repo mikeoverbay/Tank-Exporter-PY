@@ -6590,6 +6590,33 @@ class Viewer:
                     -np.arctan2(_half_seg,
                                  np.maximum(R_eff, 1e-6)),
                     0.0).astype(np.float32)
+                # Per Coffee 2026-05-19 ("now if we can get them
+                # to follow their neighbors angle"): line pads
+                # between two arc segments inherit a LERP of
+                # the neighbouring arc-pad thetas instead of
+                # snapping back to 0.  Circular interpolation
+                # around the closed chain loop -- a line pad
+                # halfway between two arc pads with theta = -θ
+                # gets ~-θ; a line pad far from any arc gets
+                # the nearest arc's theta along the loop.
+                N_thetas = len(thetas)
+                _arc_idxs = np.where(on_arc_b2 & (R_eff > 1e-6))[0]
+                if len(_arc_idxs) >= 2 and N_thetas > 2:
+                    # Circular extension: copy arc indices with
+                    # +/-N offsets so np.interp handles wraparound.
+                    _ext_idx = np.concatenate(
+                        [_arc_idxs - N_thetas,
+                         _arc_idxs,
+                         _arc_idxs + N_thetas]).astype(np.float64)
+                    _ext_th  = np.concatenate(
+                        [thetas[_arc_idxs],
+                         thetas[_arc_idxs],
+                         thetas[_arc_idxs]]).astype(np.float64)
+                    _all_idx = np.arange(
+                        N_thetas, dtype=np.float64)
+                    thetas = np.interp(
+                        _all_idx, _ext_idx, _ext_th
+                    ).astype(np.float32)
                 cs = np.cos(thetas)[:, None]    # (N, 1)
                 ss = np.sin(thetas)[:, None]
                 # Post-multiply Rx(theta) per pad -- pure
