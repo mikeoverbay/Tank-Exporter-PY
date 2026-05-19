@@ -6509,6 +6509,67 @@ class Viewer:
             xform[apply_mask, 0:3, 1] = (
                 new_up_os[apply_mask].astype(np.float32))
 
+        # Per Coffee 2026-05-18 ("the bend point is 1/2 of the
+        # seg length.  we want to calc the angle of r and 1/2
+        # of seg length and rotate the pads by that amount"):
+        # polygon-effect correction.  An arc pad sampled on the
+        # chain spline sits at a hinge point on the pitch
+        # circle; the pad CHORD (between consecutive hinges)
+        # is rotated by half the per-segment subtended angle
+        # away from the spline tangent at the sample point.
+        # Apply Rx(theta_i) about pad-local +X (hinge pin axis)
+        # so each arc pad's forward axis lines up with the
+        # chord direction instead of the tangent.
+        #   theta_i = atan( (segmentLength / 2) / R_eff_i )
+        # R_eff_i = current distance from pad position to its
+        # wheel hub (= effective pitch radius the chain is
+        # wrapping at this pad).  Line pads (`on_arc[i] ==
+        # False`) get theta = 0.
+        _ci_poly = (getattr(self, '_pending_chassis_info', None)
+                     or {})
+        _seg_len_poly = float(
+            _ci_poly.get('segmentLength', 0.0) or 0.0)
+        if _seg_len_poly > 1e-6:
+            _half_seg = 0.5 * _seg_len_poly
+            for xform, pos, side_tag2 in (
+                    (xform_L, left_pos, 'L'),
+                    (xform_R, right_pos, 'R')):
+                if (xform is None or pos is None
+                        or len(xform) != len(pos)
+                        or len(xform) == 0):
+                    continue
+                hubs_arr2 = (self._homie_hubs_L
+                             if side_tag2 == 'L'
+                             else self._homie_hubs_R)
+                on_arc_arr2 = (self._homie_onarc_L
+                               if side_tag2 == 'L'
+                               else self._homie_onarc_R)
+                if (hubs_arr2 is None or on_arc_arr2 is None
+                        or len(hubs_arr2) != len(xform)
+                        or len(on_arc_arr2) != len(xform)):
+                    continue
+                pos_f2 = np.asarray(pos, dtype=np.float32)
+                radial2 = pos_f2 - hubs_arr2
+                radial2[:, 0] = 0.0
+                R_eff = np.linalg.norm(radial2, axis=1)
+                on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
+                # Per-pad theta: atan(half_seg / R_eff) on arc
+                # pads with valid R, else 0.
+                thetas = np.where(
+                    on_arc_b2 & (R_eff > 1e-6),
+                    np.arctan2(_half_seg,
+                               np.maximum(R_eff, 1e-6)),
+                    0.0).astype(np.float32)
+                cs = np.cos(thetas)[:, None]    # (N, 1)
+                ss = np.sin(thetas)[:, None]
+                # Post-multiply Rx(theta) per pad.  Same matrix
+                # math as the global `_seg_rotation_deg` block
+                # above, applied per-row.
+                Y_old = xform[:, 0:3, 1].copy()
+                Z_old = xform[:, 0:3, 2].copy()
+                xform[:, 0:3, 1] = cs * Y_old + ss * Z_old
+                xform[:, 0:3, 2] = -ss * Y_old + cs * Z_old
+
         # Per Coffee 2026-05-10 ("don't flip x on the left
         # side"): the v1.118.10 X-mirror on L's pad transforms
         # has been removed.  L and R now both render with the
