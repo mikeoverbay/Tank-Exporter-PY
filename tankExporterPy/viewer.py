@@ -7400,18 +7400,27 @@ class Viewer:
             # first inside-radius pad.
             ci_local = (getattr(self, '_pending_chassis_info',
                                 None) or {})
-            # Per Coffee 2026-05-18 ("wheel + outer + inner"):
-            # match the homie chain's wheel inflation = pad
-            # total thickness (`segmentsOuterThickness +
-            # segmentsInnerThickness`).
+            # Per Coffee 2026-05-18 ("apply inner to w_d wheels.
+            # add outer to W_L wheels.  leave other wheels as
+            # is.. no offset"): per-role inflation matching the
+            # homie chain.  `kinds[i]` was already filled above
+            # from the role lists.
             _ot_pbd = float(
                 ci_local.get('segmentsOuterThickness', 0.0)
                 or 0.0)
             _it_pbd = float(
                 ci_local.get('segmentsInnerThickness', 0.0)
                 or 0.0)
-            outer_t_pbd = _ot_pbd + _it_pbd
-            rs_inflated = [r + outer_t_pbd for r in rs]
+            rs_inflated = []
+            for _i_pbd, _r_pbd in enumerate(rs):
+                _kind = (kinds[_i_pbd]
+                         if _i_pbd < len(kinds) else 'unknown')
+                if _kind == 'sprocket':
+                    rs_inflated.append(_r_pbd + _it_pbd)
+                elif _kind == 'road':
+                    rs_inflated.append(_r_pbd + _ot_pbd)
+                else:
+                    rs_inflated.append(_r_pbd)
             if need_seed:
                 inst = _pbd.TrackChainPBD(
                     side_x=side_x,
@@ -7806,34 +7815,43 @@ class Viewer:
         # is the chassis-subdict (same handle the chain code
         # reads from above); fall back to 0.0 when the field is
         # missing.
-        # Per Coffee 2026-05-18 ("wheel + outer + inner.
-        # remove all other radial offset"): the chain pitch
-        # circle (= radius where hinge-pin centres ride around
-        # each wheel) is `R + segmentsOuterThickness +
-        # segmentsInnerThickness` -- the pad's TOTAL radial
-        # thickness above the wheel rim.  No other XML value
-        # contributes to the wheel-R inflation.  T110E4:
-        #   outer 0.0291 m
-        # + inner 0.0615 m
-        # = 0.0906 m total inflation above wheel rim.
+        # Per Coffee 2026-05-18 ("apply inner to w_d wheels.
+        # add outer to W_L wheels.  leave other wheels as is..
+        # no offset"): the chain pitch circle inflation
+        # depends on the wheel's role.  Each wheel's effective
+        # wrap radius:
+        #     drive sprocket (W_D): R + segmentsInnerThickness
+        #     road wheel (W_L):     R + segmentsOuterThickness
+        #     idler / roller:       R                  (bare)
+        # The chain wraps each wheel at its own effective
+        # radius; spin rate per wheel = v / R_eff so rim
+        # surface and chain pads stay locked with zero slip.
         _ot = float(ci.get('segmentsOuterThickness', 0.0) or 0.0)
         _it = float(ci.get('segmentsInnerThickness', 0.0) or 0.0)
-        ci_outer_t = _ot + _it
-        # Per Coffee 2026-05-18 ("i dont want the chassis to
-        # stay level.  I want the chains to follow the drive
-        # wheels and not move faster or slower"): the chain
-        # WRAPS the drive sprocket at `R + inner_thickness`
-        # (per track_homie.build_chain_segments / SPLINE_CONSTRAINTS
-        # #3), so the drive sprocket must SPIN at the same radius
-        # for the rim surface to match the chain's linear speed.
-        # An earlier v1.231.17 attempt used the polygon-pitch
-        # formula `R_p = p / (2 * sin(pi / N))` for toothed wheels,
-        # which differs from `R + inner_thickness` by ~1-2% and
-        # produced visible chain-on-sprocket slip.  Pass an empty
-        # `sprocket_pitch_radii` so EVERY wheel (toothed or not)
-        # uses `R + inner_thickness` -- chain and rim move at the
-        # exact same surface speed, zero slip.
+        # Build per-wheel R-override dict.  Drive sprockets get
+        # +inner_t, road wheels get +outer_t, idlers / rollers
+        # are absent (advance_wheel_angles default = bare R when
+        # `inner_thickness=0.0` and the bone isn't in sp_radii).
         sp_radii = {}
+        _wheel_radii_xml = ci.get('wheel_radii') or {}
+        for _side_tok in ('L', 'R'):
+            for _bare in (roles.get(
+                    f'drive_sprockets_{_side_tok}') or []):
+                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+                if _R > 0.0:
+                    sp_radii[_bare] = _R + _it
+            for _bare in (roles.get(
+                    f'road_wheels_{_side_tok}') or []):
+                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+                if _R > 0.0:
+                    sp_radii[_bare] = _R + _ot
+            for _bare in ((roles.get(f'idlers_{_side_tok}') or [])
+                          + (roles.get(
+                                  f'return_rollers_{_side_tok}')
+                              or [])):
+                _R = float(_wheel_radii_xml.get(_bare) or 0.0)
+                if _R > 0.0:
+                    sp_radii[_bare] = _R    # bare, no offset
         # Per Coffee 2026-05-18 (F3 manual_A100_T49_latest.json
         # showed chain_ds = 2 * chassis_dx): this function is
         # called TWICE per render frame -- once from the pad
@@ -7853,9 +7871,13 @@ class Viewer:
         if _integrate_this_call:
             self._chain_last_integrated_frame = _f_now
             try:
+                # Per-wheel R lives in `sp_radii` now (W_D gets
+                # +inner_t, W_L gets +outer_t, others bare).
+                # `inner_thickness=0.0` so wheels NOT listed in
+                # sp_radii fall through to bare R.
                 tp.advance_wheel_angles(
                     v_L, v_R, dt,
-                    inner_thickness=ci_outer_t,
+                    inner_thickness=0.0,
                     sprocket_pitch_radii=sp_radii)
             except Exception:
                 pass
@@ -7902,16 +7924,13 @@ class Viewer:
                     if _drive_idx < 0:
                         continue
                     # Use the SAME radius the drive sprocket
-                    # spins at (`R + inner_thickness`).  Since
-                    # `sp_radii` is empty (polygon-pitch override
-                    # dropped at v1.231.22 -- see the
-                    # `advance_wheel_angles` call above), this
-                    # is also the radius `advance_wheel_angles`
-                    # used for the angle integration.  Zero slip
-                    # between rim surface and chain pads.
+                    # spins at: `R + segmentsInnerThickness`
+                    # per Coffee 2026-05-18 ("apply inner to
+                    # w_d wheels").  `_it` is the inner
+                    # thickness pulled from chassis info above.
                     _Rp = max(
                         float(tp.extra_rotating_radii[
-                            _drive_idx]) + ci_outer_t, 1e-3)
+                            _drive_idx]) + _it, 1e-3)
                     _cur_ang = float(ex_angles[_drive_idx])
                     _prev_ang = getattr(self, _attr_prev,
                                           _cur_ang)
@@ -8059,21 +8078,37 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
-                # Per Coffee 2026-05-18 ("wheel + outer +
-                # inner.  remove all other radial offset"):
-                # chain pitch circle inflation = pad TOTAL
-                # thickness = `segmentsOuterThickness +
-                # segmentsInnerThickness`.  Nothing else.
-                # T110E4: 0.0291 + 0.0615 = 0.0906 m.
+                # Per Coffee 2026-05-18 ("apply inner to w_d
+                # wheels.  add outer to W_L wheels.  leave other
+                # wheels as is.. no offset"): per-wheel-role
+                # radial inflation.  Build a side-scoped radii
+                # dict where each wheel name maps to its
+                # role-inflated R, then pass to
+                # build_chain_segments with
+                # `inner_thickness=0.0` (the inflation is
+                # already baked into the radii dict).
                 _outer_t = float(
                     ci.get('segmentsOuterThickness', 0.0) or 0.0)
                 _inner_t = float(
                     ci.get('segmentsInnerThickness', 0.0) or 0.0)
-                wheel_R_inflation = _outer_t + _inner_t
+                _side_tok = ('L' if side.lower().startswith('l')
+                             else 'R')
+                radii_inflated = dict(radii)
+                for _nm in (chain_roles.get(
+                        f'drive_sprockets_{_side_tok}') or []):
+                    if _nm in radii_inflated:
+                        radii_inflated[_nm] = (
+                            float(radii_inflated[_nm]) + _inner_t)
+                for _nm in (chain_roles.get(
+                        f'road_wheels_{_side_tok}') or []):
+                    if _nm in radii_inflated:
+                        radii_inflated[_nm] = (
+                            float(radii_inflated[_nm]) + _outer_t)
+                # Idlers + return rollers keep their bare R.
                 arcs_3 = _th.build_chain_segments(
-                    bones, radii, chain_roles, side,
+                    bones, radii_inflated, chain_roles, side,
                     n_pads, float(seg_len),
-                    inner_thickness=wheel_R_inflation)
+                    inner_thickness=0.0)
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
