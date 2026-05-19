@@ -240,6 +240,92 @@ def _filter_glancing_touches(loop):
     return keep
 
 
+def _filter_wrong_side_wraps(loop, max_iters=None):
+    """Drop wheels whose chain wrap is on the WRONG side of the
+    wheel (= chain folds back on itself at this wheel).
+
+    Per Coffee 2026-05-19 ("Pads under the wheels flip direction
+    when they are grabbed by a W_L.  Segments are being attached
+    in the wrong order.  it caused the spline to fold in on its
+    self"): the `_external_tangent_contacts(+1)` math can land
+    the tangent contacts on the WRONG SIDE of a wheel when that
+    wheel sits above the natural chord between its neighbours
+    (a "ledged-up" road wheel between two HANGING neighbours).
+    The resulting arc has its direction reversed -- _place_pads
+    then walks pads backwards through that arc, and the visible
+    chain folds.
+
+    Detection: at each wheel's `a_in`, compute the dot product
+    of (a) the incoming chain-line direction (= unit vector
+    from the previous wheel's `contact_out` to THIS wheel's
+    `contact_in`) and (b) the arc-traversal tangent at `a_in`
+    (= signed perpendicular to the radial at a_in, with the
+    sign chosen to match the SHORT arc direction).
+    `dot < 0` means the chain enters the wheel going one way
+    and then doubles back along the arc -- topologically
+    wrong-side.  Drop the wheel and recompute.
+
+    Iterative until stable, capped by `max_iters` for safety.
+    """
+    if len(loop) < 3:
+        return loop
+    keep = list(loop)
+    cap = max_iters if max_iters is not None else (len(keep) + 2)
+    for _ in range(cap):
+        n = len(keep)
+        if n < 3:
+            break
+        arcs = _compute_pie_arcs(keep)
+        drop_idx = None
+        for i in range(n):
+            entry = arcs[i]
+            a_in  = entry.get('a_in')
+            a_out = entry.get('a_out')
+            c_in  = entry.get('contact_in')
+            if a_in is None or a_out is None or c_in is None:
+                continue
+            # Previous wheel's contact_out.
+            prev_entry = arcs[(i - 1) % n]
+            c_prev_out = prev_entry.get('contact_out')
+            if c_prev_out is None:
+                continue
+            # Incoming chain-line direction in YZ.
+            line_in = c_in - c_prev_out
+            ln = float(np.linalg.norm(line_in))
+            if ln < 1e-9:
+                continue
+            line_in = line_in / ln
+            # Arc-traversal tangent at a_in.  Radial at a_in is
+            # (cos a_in, sin a_in) in (Z, Y).  CCW tangent (=
+            # a increases): (-sin a_in, cos a_in).
+            d = _short_arc_signed_diff(a_in, a_out)
+            if abs(d) < 1e-9:
+                # Pure-tangent kiss: no arc to be wrong-sided
+                # about.  Leave the wheel in.
+                continue
+            ccw = (d < 0)   # short arc goes CCW iff d < 0
+            tan_z = -math.sin(a_in) if ccw else math.sin(a_in)
+            tan_y =  math.cos(a_in) if ccw else -math.cos(a_in)
+            # line_in is stored as (Z, Y) per _angle_from_hub /
+            # `hub = (Z, Y)` convention used throughout this
+            # file.  np cross / dot work componentwise.
+            dot = (line_in[0] * tan_z) + (line_in[1] * tan_y)
+            if dot < 0.0:
+                # Wrong-side wrap.  Drop this wheel.  Don't
+                # drop sprockets / idlers -- those carry the
+                # chain endpoints; losing them collapses the
+                # whole loop.
+                role = entry.get('wheel', {}).get('role', '')
+                if role in ('sprocket', 'idler'):
+                    continue
+                drop_idx = i
+                break
+        if drop_idx is None:
+            break
+        keep.pop(drop_idx)
+    return keep
+
+
 def _compute_pie_arcs(loop):
     n = len(loop)
     if n < 2:
@@ -740,6 +826,17 @@ def build_chain_segments(bones, radii, roles, side, n_pads,
         for w in wheels:
             w['R'] = float(w['R']) + inner_t
     loop = _order_loop(wheels)
+    if len(loop) < 3:
+        return None
+    # Per Coffee 2026-05-19 ("Pads under the wheels flip
+    # direction when they are grabbed by a W_L.  Segments are
+    # being attached in the wrong order.  it caused the spline
+    # to fold in on its self"): topology filter -- drop wheels
+    # whose chain wrap lands on the WRONG side of the wheel
+    # (= chain folds back on itself).  Uses a dot-product check
+    # of incoming-line vs arc-traversal-tangent at a_in.
+    # Sprockets / idlers are exempt (they own the chain endpoints).
+    loop = _filter_wrong_side_wraps(loop)
     if len(loop) < 3:
         return None
     # Per Coffee 2026-05-11 ("our spline diameters are off..
