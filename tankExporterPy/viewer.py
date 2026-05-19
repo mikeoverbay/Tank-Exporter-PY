@@ -7090,6 +7090,42 @@ class Viewer:
                         _cs2 * _Y_old2 + _ss2 * _Z_old2)
                     xform_clamped[:, 0:3, 2] = (
                         -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    # One-shot diagnostic: confirm the segment2
+                    # extra rotation is actually firing and how
+                    # many arc pads are getting non-zero theta.
+                    if not getattr(self,
+                                    '_seg2_rot_logged', False):
+                        _n_arc = int(np.sum(_on_arc_disp))
+                        _n_nonzero = int(np.sum(
+                            np.abs(_thetas_x2) > 1e-6))
+                        _max_deg = float(np.degrees(
+                            np.max(np.abs(_thetas_x2))))
+                        self.log(
+                            f"[seg2] key={key!r}  side={side_letter}"
+                            f"  arc_pads={_n_arc}/"
+                            f"{len(_thetas_x2)}  nonzero_thetas="
+                            f"{_n_nonzero}  max_extra_rot="
+                            f"{_max_deg:.2f}°",
+                            color=(180, 220, 255))
+                        if _n_nonzero == 0:
+                            self.log(
+                                f"[seg2] WARNING: no arc pads --"
+                                f" extra rotation is a no-op",
+                                color=(255, 200, 80))
+                        self._seg2_rot_logged = True
+                elif not getattr(self,
+                                  '_seg2_rot_logged', False):
+                    self.log(
+                        f"[seg2] SKIP for key={key!r}: "
+                        f"R_eff_disp={_R_eff_disp is not None} "
+                        f"on_arc_disp={_on_arc_disp is not None} "
+                        f"len_match=" + (
+                            str(len(_R_eff_disp)
+                                == len(xform_clamped))
+                            if _R_eff_disp is not None
+                            else 'n/a'),
+                        color=(255, 120, 120))
+                    self._seg2_rot_logged = True
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
