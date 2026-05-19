@@ -7400,13 +7400,19 @@ class Viewer:
             # first inside-radius pad.
             ci_local = (getattr(self, '_pending_chassis_info',
                                 None) or {})
-            # Per Coffee 2026-05-18 ("ground to wheel center?"):
-            # uniform `R + segmentsInnerThickness` for every
-            # wheel -- matches the homie chain.
+            # Per Coffee 2026-05-18 ("On W_D wheels, do NOT
+            # add inner wheel offset"): every wheel except
+            # drive sprockets gets `+inner_thickness`; drive
+            # sprockets stay bare.
             _it_pbd = float(
                 ci_local.get('segmentsInnerThickness', 0.0)
                 or 0.0)
-            rs_inflated = [r + _it_pbd for r in rs]
+            rs_inflated = [
+                (r if (i < len(kinds)
+                       and kinds[i] == 'sprocket')
+                 else r + _it_pbd)
+                for i, r in enumerate(rs)
+            ]
             if need_seed:
                 inst = _pbd.TrackChainPBD(
                     side_x=side_x,
@@ -7815,12 +7821,42 @@ class Viewer:
         # = R + (outer + inner) - outer
         # = R + inner.  Same formula around the drive sprocket
         # and idler (pad inner face wraps the rim).
+        # Per Coffee 2026-05-18 ("bottom are good.  front is
+        # good.  On W_D wheels, do NOT add inner wheel
+        # offset"): drive sprockets bypass the inner_thickness
+        # inflation -- the chain wraps the sprocket TEETH which
+        # already engage chain pins at the tooth-tip radius
+        # encoded in the chassis XML's `<groupRadius>`.  Adding
+        # inner_thickness would push the chain ABOVE the tooth
+        # tips visibly.
+        # All non-drive wheels (road, end idler, return rollers,
+        # tensioners) still get `+ inner_thickness` -- pad inner
+        # face wraps the rim, hinge sits at `R + inner` from
+        # wheel centre.
         _ot = float(ci.get('segmentsOuterThickness', 0.0) or 0.0)
         _it = float(ci.get('segmentsInnerThickness', 0.0) or 0.0)
-        sp_radii = {}  # empty -> advance_wheel_angles uses
-                       # `inner_thickness` for every wheel.
-        ci_outer_t = _it  # kept name for the chain s_offset
-                          # slave below; value is now inner_t.
+        # Per-bone override for drive sprockets: set their
+        # effective R to bare (= raw R).  Other wheels are
+        # absent from sp_radii so advance_wheel_angles falls
+        # through to `R + inner_thickness` (the `ci_outer_t`
+        # kwarg).
+        sp_radii = {}
+        _wheel_radii_xml = ci.get('wheel_radii') or {}
+        for _side_tok in ('L', 'R'):
+            for _bare in (roles.get(
+                    f'drive_sprockets_{_side_tok}') or []):
+                _R = _wheel_radii_xml.get(_bare)
+                if _R is None:
+                    _R = _wheel_radii_xml.get(
+                        _bare + '_BlendBone')
+                try:
+                    _R = float(_R) if _R is not None else 0.0
+                except (TypeError, ValueError):
+                    _R = 0.0
+                if _R > 0.0:
+                    sp_radii[_bare] = _R    # bare, no offset
+        ci_outer_t = _it  # legacy name; value is inner_t,
+                          # applied to non-drive wheels.
         # Per Coffee 2026-05-18 (F3 manual_A100_T49_latest.json
         # showed chain_ds = 2 * chassis_dx): this function is
         # called TWICE per render frame -- once from the pad
@@ -7888,14 +7924,14 @@ class Viewer:
                             break
                     if _drive_idx < 0:
                         continue
-                    # Drive sprocket R = `R + inner_thickness`
-                    # (same value `advance_wheel_angles` used to
-                    # spin it).  Chain pads sit at the same
-                    # radius, so rim surface and chain advance
-                    # exactly match.
+                    # Drive sprocket spins at bare R (no inner
+                    # inflation, per Coffee 2026-05-18 "do NOT
+                    # add inner wheel offset" on W_D).  Use the
+                    # same bare radius so chain advance matches
+                    # the sprocket rim surface speed exactly.
                     _Rp = max(
                         float(tp.extra_rotating_radii[
-                            _drive_idx]) + ci_outer_t, 1e-3)
+                            _drive_idx]), 1e-3)
                     _cur_ang = float(ex_angles[_drive_idx])
                     _prev_ang = getattr(self, _attr_prev,
                                           _cur_ang)
@@ -8043,15 +8079,30 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
-                # Per Coffee 2026-05-18 ("ground to wheel
-                # center?"): UNIFORM chain pitch radius =
-                # `R + segmentsInnerThickness` for every wheel,
-                # derived from the ground-to-wheel-center
-                # geometry (see header comment above).
+                # Per Coffee 2026-05-18 ("On W_D wheels, do NOT
+                # add inner wheel offset"): every wheel EXCEPT
+                # the drive sprocket wraps the chain at
+                # `R + segmentsInnerThickness`; the drive
+                # sprocket stays at bare R because the chassis
+                # XML's sprocket `groupRadius` is the tooth-tip
+                # radius (= chain pin pitch already).  Build a
+                # side-scoped radii dict where the drive
+                # sprocket is pre-decremented by inner_t so the
+                # uniform inflation inside build_chain_segments
+                # cancels back to bare R for it.
                 _inner_t = float(
                     ci.get('segmentsInnerThickness', 0.0) or 0.0)
+                _side_tok = ('L' if side.lower().startswith('l')
+                             else 'R')
+                radii_for_chain = dict(radii)
+                for _nm in (chain_roles.get(
+                        f'drive_sprockets_{_side_tok}') or []):
+                    if _nm in radii_for_chain:
+                        radii_for_chain[_nm] = max(
+                            float(radii_for_chain[_nm])
+                            - _inner_t, 1e-3)
                 arcs_3 = _th.build_chain_segments(
-                    bones, radii, chain_roles, side,
+                    bones, radii_for_chain, chain_roles, side,
                     n_pads, float(seg_len),
                     inner_thickness=_inner_t)
                 if arcs_3 is None:
