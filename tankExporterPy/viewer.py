@@ -7067,6 +7067,13 @@ class Viewer:
             # Pure rotation post-mult so col3 (chord midpoint)
             # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
+            # One-shot diagnostic: pick the first arc pad on
+            # this side and dump its mat4 cols BEFORE and AFTER
+            # the seg2 extra rotation, so we can verify the
+            # GPU is actually receiving different matrices for
+            # seg1 vs seg2.
+            _dump_attr = f'_seg2_mat_dump_{side_letter}_logged'
+            _do_dump = (not getattr(self, _dump_attr, False))
             if 'segment2' in key:
                 _R_eff_disp = getattr(
                     self, f'_poly_R_eff_{side_letter}', None)
@@ -7092,6 +7099,26 @@ class Viewer:
                             _half_seg_seg2,
                             np.maximum(_R_eff_disp, 1e-6)),
                         0.0).astype(np.float32)
+                    # Find the first arc pad (for diagnostic
+                    # dump) BEFORE we overwrite the cols.
+                    _idx_first_arc = -1
+                    if _do_dump:
+                        _arc_idxs = np.where(_on_arc_disp)[0]
+                        if len(_arc_idxs) > 0:
+                            _idx_first_arc = int(_arc_idxs[0])
+                            _i = _idx_first_arc
+                            self.log(
+                                f"[seg2-dump {side_letter}] "
+                                f"first_arc={_i} key={key!r}"
+                                f"  theta_x2="
+                                f"{float(np.degrees(_thetas_x2[_i])):.3f}°",
+                                color=(180, 220, 255))
+                            self.log(
+                                f"  PRE col1={tuple(xform_clamped[_i,0:3,1])}",
+                                color=(180, 220, 255))
+                            self.log(
+                                f"  PRE col2={tuple(xform_clamped[_i,0:3,2])}",
+                                color=(180, 220, 255))
                     _cs2 = np.cos(_thetas_x2)[:, None]
                     _ss2 = np.sin(_thetas_x2)[:, None]
                     _Y_old2 = xform_clamped[:, 0:3, 1].copy()
@@ -7100,6 +7127,40 @@ class Viewer:
                         _cs2 * _Y_old2 + _ss2 * _Z_old2)
                     xform_clamped[:, 0:3, 2] = (
                         -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    if _do_dump and _idx_first_arc >= 0:
+                        _i = _idx_first_arc
+                        self.log(
+                            f"  POST col1={tuple(xform_clamped[_i,0:3,1])}",
+                            color=(180, 220, 255))
+                        self.log(
+                            f"  POST col2={tuple(xform_clamped[_i,0:3,2])}",
+                            color=(180, 220, 255))
+                        setattr(self, _dump_attr, True)
+            elif _do_dump and side_letter is not None:
+                # Also dump segment1's key for direct comparison
+                # so we can SEE in the log whether seg1 vs seg2
+                # have different cols going to the GPU.
+                _R_eff_disp_s1 = getattr(
+                    self, f'_poly_R_eff_{side_letter}', None)
+                _on_arc_disp_s1 = getattr(
+                    self, f'_poly_on_arc_{side_letter}', None)
+                if (_R_eff_disp_s1 is not None
+                        and _on_arc_disp_s1 is not None
+                        and len(_on_arc_disp_s1)
+                            == len(xform_clamped)):
+                    _arc_idxs1 = np.where(_on_arc_disp_s1)[0]
+                    if len(_arc_idxs1) > 0:
+                        _i1 = int(_arc_idxs1[0])
+                        self.log(
+                            f"[seg1-dump {side_letter}] "
+                            f"first_arc={_i1} key={key!r}",
+                            color=(180, 255, 180))
+                        self.log(
+                            f"  col1={tuple(xform_clamped[_i1,0:3,1])}",
+                            color=(180, 255, 180))
+                        self.log(
+                            f"  col2={tuple(xform_clamped[_i1,0:3,2])}",
+                            color=(180, 255, 180))
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
