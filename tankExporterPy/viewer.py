@@ -20659,13 +20659,39 @@ class Viewer:
         try:
             import ctypes
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             wm_info = pygame.display.get_wm_info()
             my_hwnd = wm_info.get('window') if wm_info else None
             cur     = user32.GetForegroundWindow()
             if not my_hwnd or cur == my_hwnd:
                 return    # already foreground; nothing to steal
             self._prev_foreground_hwnd = int(cur)
-            user32.SetForegroundWindow(int(my_hwnd))
+            # Per Coffee 2026-05-18 ("is there any way to make
+            # the render window grab mouse focus?  I hate having
+            # to click 2 times"): plain `SetForegroundWindow`
+            # is blocked by Windows 10/11's anti-focus-stealing
+            # rules when the requesting process isn't already
+            # foreground -- the call returns 0 and the window
+            # only flashes in the taskbar.  The reliable bypass
+            # is to AttachThreadInput onto the current
+            # foreground thread first, do the focus dance, then
+            # detach.  Windows treats "the foreground thread
+            # asking nicely" as authorized.
+            fg_tid = user32.GetWindowThreadProcessId(
+                int(cur), None)
+            my_tid = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg_tid and fg_tid != my_tid:
+                attached = bool(user32.AttachThreadInput(
+                    fg_tid, my_tid, True))
+            try:
+                user32.BringWindowToTop(int(my_hwnd))
+                user32.SetForegroundWindow(int(my_hwnd))
+                user32.SetFocus(int(my_hwnd))
+            finally:
+                if attached:
+                    user32.AttachThreadInput(
+                        fg_tid, my_tid, False)
         except Exception:
             # ctypes / WM-info / SetForegroundWindow can all fail
             # in edge cases (RDP sessions, screen-locked, security
