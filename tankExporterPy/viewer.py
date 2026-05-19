@@ -2100,6 +2100,26 @@ class Viewer:
             self.terrain        = None
             self.terrain_shader = None
 
+        # Per Coffee 2026-05-19 ("i want to do something fun.  How
+        # hard to add a six leg spider... Jonny Quest spider"):
+        # spawn a single Quest-style 4-leg target on the terrain
+        # at startup.  Procedural sphere body + 4 spindly legs.
+        # No animation yet -- static T-pose, foot height matched
+        # to terrain so the lowest foot just touches ground.
+        try:
+            from . import spider as _spider
+            self.spider = _spider.Spider(world_pos=(8.0, 0.0, 8.0))
+            if self.terrain is not None:
+                self.spider.set_terrain_height(self.terrain)
+            print(f"[viewer] Quest spider spawned at "
+                  f"({self.spider.world_pos[0]:+.2f}, "
+                  f"{self.spider.world_pos[1]:+.2f}, "
+                  f"{self.spider.world_pos[2]:+.2f})")
+        except Exception as _exc_sp:
+            print(f"[viewer] Spider spawn skipped: "
+                  f"{type(_exc_sp).__name__}: {_exc_sp}")
+            self.spider = None
+
         # ---- Procedural skydome ----------------------------------------
         # Per Coffee 2026-05-14 ("we have skydomes in the game.. make a
         # sphere. rad = map size / 2") + Coffee 2026-05-15
@@ -18965,6 +18985,17 @@ class Viewer:
                                   light_dir_world)
             self._frame_timers['terrain'] = (
                 (_time.perf_counter() - _t_ter0) * 1000.0)
+
+        # ---- Quest spider target ----------------------------------------
+        # Static 4-leg target rendered after terrain so it sits on
+        # the ground.  Drawn before tanks so tanks blow it up
+        # visually if they overlap (no actual collision yet).
+        try:
+            _sp = getattr(self, 'spider', None)
+            if _sp is not None:
+                _sp.render(self.color_shader, view, proj)
+        except Exception:
+            pass
 
         # ---- Shell-hole decal projector ----------------------------------
         # Per Coffee 2026-05-14 ("time to add a decal projector to
