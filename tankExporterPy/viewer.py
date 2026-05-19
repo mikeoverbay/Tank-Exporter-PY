@@ -18987,12 +18987,14 @@ class Viewer:
                 (_time.perf_counter() - _t_ter0) * 1000.0)
 
         # ---- Quest spider target ----------------------------------------
-        # Static 4-leg target rendered after terrain so it sits on
-        # the ground.  Drawn before tanks so tanks blow it up
-        # visually if they overlap (no actual collision yet).
+        # 4-leg target.  Drawn after terrain so it sits on the
+        # ground; before tanks for natural depth ordering.  Animation
+        # advanced by `step(dt)` using the same per-frame `dt` the
+        # particles + chain integration use.
         try:
             _sp = getattr(self, 'spider', None)
             if _sp is not None:
+                _sp.step(float(getattr(self, '_frame_dt', 1.0/60.0)))
                 _sp.render(self.color_shader, view, proj)
         except Exception:
             pass

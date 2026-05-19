@@ -192,10 +192,32 @@ class Spider:
     LEG_SEG_LEN         = 1.5   # cylinder pre-length (scaled per segment)
     LEG_COUNT           = 4
 
+    # ---- jump animation tunables (per Coffee 2026-05-19
+    # "can we make it do something?  jump maybe?") --------
+    JUMP_CYCLE_SEC      = 3.0   # total jump+rest period
+    JUMP_CROUCH_FRAC    = 0.20  # 0..frac : crouch
+    JUMP_LAUNCH_FRAC    = 0.06  # frac..+launch : push off
+    JUMP_AIR_FRAC       = 0.34  # +air : ballistic up-and-down
+    JUMP_LAND_FRAC      = 0.08  # +land : settle
+    JUMP_REST_FRAC      = 0.32  # +rest : standing pause (= remainder)
+    JUMP_CROUCH_DROP    = 0.25  # metres body drops below stand height
+    JUMP_PEAK_HEIGHT    = 1.50  # metres body apex above stand height
+    JUMP_KNEE_FLEX      = 0.40  # extra knee-height multiplier on crouch
+
     def __init__(self, world_pos=(0.0, 0.0, 0.0)):
         self.world_pos = np.asarray(world_pos, dtype=np.float32)
         # Body orientation -- only yaw matters for now; identity to start.
         self.yaw_rad   = 0.0
+        # Animation time accumulator and the resting (= ground-stand)
+        # body Y; the jump animation modulates self.world_pos[1] around
+        # this baseline so the spider returns to the same spot each
+        # cycle.  `_rest_y` is filled in by `set_terrain_height`.
+        self._t       = 0.0
+        self._rest_y  = float(world_pos[1])
+        # Live joint positions -- start at the static T-pose and get
+        # rewritten by `step()` each frame.  Legs are populated below.
+        self._legs_rest = []
+        self._legs      = []
 
         # Build body sphere VAO.
         bv, bc, bi = _make_sphere(
@@ -219,7 +241,6 @@ class Spider:
         # at +Y, a hip at angle phi off the pole sits at:
         #     y = R cos(phi)
         #     out_radius = R sin(phi)   (radial in XZ plane)
-        self._legs = []
         phi = math.radians(self.HIP_POLE_OFFSET_DEG)
         hip_y   = self.BODY_RADIUS * math.cos(phi)
         hip_xz  = self.BODY_RADIUS * math.sin(phi)
@@ -247,7 +268,9 @@ class Spider:
                 self.LEG_FOOT_HEIGHT,
                 self.LEG_FOOT_OUT * cz,
             ], dtype=np.float32)
-            self._legs.append((hip, knee, mid, foot))
+            self._legs_rest.append((hip, knee, mid, foot))
+            self._legs.append((hip.copy(), knee.copy(),
+                                mid.copy(), foot.copy()))
 
     # ---- accessors ---------------------------------------------------------
 
@@ -288,6 +311,84 @@ class Spider:
                 ground_y = need
         if ground_y > -1e8:
             self.world_pos[1] += ground_y
+        # Cache as the resting Y so jump animation knows where
+        # "standing" is.
+        self._rest_y = float(self.world_pos[1])
+
+    # ---- animation ---------------------------------------------------------
+
+    def step(self, dt):
+        """Advance jump animation by `dt` seconds.
+
+        Cycle phases (fraction of `JUMP_CYCLE_SEC`):
+            crouch  -- body lowers, knees flex outward
+            launch  -- body shoots up, knees extend
+            air     -- body follows a ballistic arc apex
+            land    -- body settles back to rest height
+            rest    -- standing pose until next cycle
+        """
+        try:
+            self._t += float(dt)
+        except (TypeError, ValueError):
+            return
+        cycle = max(float(self.JUMP_CYCLE_SEC), 1e-3)
+        phase = (self._t % cycle) / cycle      # 0..1
+        f_cr  = self.JUMP_CROUCH_FRAC
+        f_la  = f_cr + self.JUMP_LAUNCH_FRAC
+        f_ai  = f_la + self.JUMP_AIR_FRAC
+        f_ln  = f_ai + self.JUMP_LAND_FRAC
+        # `f_rest` is implicit -- whatever's left.
+
+        if phase < f_cr:
+            # Crouch: ease-down toward -JUMP_CROUCH_DROP.
+            p = phase / f_cr
+            y_off = -self.JUMP_CROUCH_DROP * (
+                0.5 - 0.5 * math.cos(p * math.pi))
+            knee_scale = 1.0 + self.JUMP_KNEE_FLEX * p
+        elif phase < f_la:
+            # Launch: rapid rise from crouch to apex-bound start.
+            p = (phase - f_cr) / max(
+                f_la - f_cr, 1e-6)
+            y_off = (-self.JUMP_CROUCH_DROP
+                     + (self.JUMP_CROUCH_DROP
+                        + 0.4 * self.JUMP_PEAK_HEIGHT) * p)
+            knee_scale = 1.0 + self.JUMP_KNEE_FLEX * (1.0 - p)
+        elif phase < f_ai:
+            # Ballistic arc: 0.4 * peak -> peak -> 0 over this span.
+            p = (phase - f_la) / max(
+                f_ai - f_la, 1e-6)
+            # Parabola y_off(p) with y(0)=0.4*peak, y(0.5)=peak, y(1)=0.
+            # Fit: y = peak * (1 - (2p - 0.x)^2) ... simpler:
+            #   y = peak * (1 - 4*(p - 0.5)^2)    apex at p=0.5
+            # Then offset so y(0) lines up with launch end.
+            y_off = self.JUMP_PEAK_HEIGHT * (
+                1.0 - 4.0 * (p - 0.5) * (p - 0.5))
+            knee_scale = 1.0          # legs hang relaxed midair
+        elif phase < f_ln:
+            # Landing: dip slightly past rest, then settle.
+            p = (phase - f_ai) / max(
+                f_ln - f_ai, 1e-6)
+            y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
+                p * math.pi)
+            knee_scale = 1.0 + 0.5 * self.JUMP_KNEE_FLEX * math.sin(
+                p * math.pi)
+        else:
+            # Rest: standing.
+            y_off = 0.0
+            knee_scale = 1.0
+
+        self.world_pos[1] = self._rest_y + float(y_off)
+        # Apply knee flex by adjusting each leg's knee point
+        # vertically.  Mid + foot stay at rest positions so the
+        # knee bends outward (= the leg looks like it springs).
+        for i, (hip_r, knee_r, mid_r, foot_r) in enumerate(
+                self._legs_rest):
+            hip_now  = hip_r
+            knee_now = knee_r.copy()
+            knee_now[1] = knee_r[1] * float(knee_scale)
+            mid_now  = mid_r
+            foot_now = foot_r
+            self._legs[i] = (hip_now, knee_now, mid_now, foot_now)
 
     # ---- render ------------------------------------------------------------
 
