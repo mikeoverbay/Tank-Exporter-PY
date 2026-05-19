@@ -6621,6 +6621,23 @@ class Viewer:
         # pads (A100_T49 etc.) already worked this way since
         # v1.215.0.
 
+        # Per Coffee 2026-05-18 ("we lost the seg 2 offset.  and
+        # rotate same as seg 1"): pull segment2's XML offset.
+        # Applied as a translation-only shift to segment2's
+        # per-pad mat4 in the dispatch loop below; the rotation
+        # columns are unchanged, so segment1 and segment2 share
+        # the same orientation R (= rotate as one rigid unit).
+        # Single-piece pads (no segment2 in track_segment_models)
+        # get 0.0 and the shift is a no-op.
+        _ci_disp = (getattr(self, '_pending_chassis_info', None)
+                     or {})
+        _tsm_disp = _ci_disp.get('track_segment_models') or {}
+        try:
+            seg2_offset = float(
+                _tsm_disp.get('segment2Offset', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            seg2_offset = 0.0
+
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
         # compose chassis_pose @ pad_xform on the CPU to get a
         # world-space mat4 per pad, sample terrain at each pad's
@@ -7033,19 +7050,22 @@ class Viewer:
             # chain anchor by v1.215.0's design and that
             # renders correctly today.
             #
-            # Per Coffee 2026-05-18 ("check rotation center of
-            # seg 2.  it should be at seg location"): the
-            # v1.231.38 segment2 world-space col3 shift was
-            # wrong -- it moved segment2's rotation centre off
-            # the chord midpoint (= the "seg location") to
-            # `T + seg2_offset * fwd_world`, so segment2 pivoted
-            # around the wrong point as the pad swept around a
-            # wheel.  Both halves now share the SAME
-            # `xform_clamped` -- col3 = T = chord midpoint for
-            # every renderer.  Any visible offset between the
-            # two mesh parts has to come from the mesh data
-            # itself (segment2's authored vertex coordinates).
+            # Per Coffee 2026-05-18 ("we lost the seg 2 offset.
+            # and rotate same as seg 1"): segment1 and segment2
+            # share the SAME rotation columns (col0-col2) of the
+            # per-pad mat4 -- they rotate identically.
+            # segment2's translation column (col3) gets shifted
+            # by `segment2Offset` along the pad-local forward
+            # direction so the segment2 mesh body sits one
+            # offset's worth ahead of segment1.  Single-piece
+            # pads (seg2_offset == 0.0) skip the shift.
             xform_clamped = xform_world.copy()
+            if seg2_offset != 0.0 and 'segment2' in key:
+                # World-forward = -col2 (pad_forward_axis='-Z').
+                _fwd_axes_disp = -xform_clamped[:, 0:3, 2]
+                xform_clamped[:, 0:3, 3] += (
+                    seg2_offset * _fwd_axes_disp).astype(
+                        np.float32)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
