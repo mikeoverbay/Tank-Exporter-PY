@@ -7090,12 +7090,15 @@ class Viewer:
                         _ci_seg2.get('segmentLength', 0.0) or 0.0)
                     _half_seg_seg2 = 0.5 * _seg_len_seg2
                     # `0.5 * atan(half_seg / R_eff)` of magnitude
-                    # = δ/4.  Negative for same-direction
-                    # continuation of the polygon correction
-                    # (= toward wheel centre, matching segment1).
+                    # = δ/4.  Sign flipped to POSITIVE per Coffee
+                    # 2026-05-19 ("flip the wheel center rotation
+                    # on the 2nd segs") -- segment2 now rotates
+                    # AWAY from the per-pad polygon-correction
+                    # direction about the wheel centre, sliding
+                    # back along the arc instead of forward.
                     _thetas_x2 = np.where(
                         _on_arc_disp & (_R_eff_disp > 1e-6),
-                        -0.5 * np.arctan2(
+                        +0.5 * np.arctan2(
                             _half_seg_seg2,
                             np.maximum(_R_eff_disp, 1e-6)),
                         0.0).astype(np.float32)
