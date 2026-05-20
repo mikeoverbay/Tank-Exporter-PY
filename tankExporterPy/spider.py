@@ -192,18 +192,30 @@ class Spider:
     LEG_SEG_LEN         = 1.5   # cylinder pre-length (scaled per segment)
     LEG_COUNT           = 4
 
-    # ---- jump physics tunables (per Coffee 2026-05-19
-    # "it needs to get off the ground.  it has mass at its
-    # body"): real gravity + impulse instead of a parametric
-    # bob.  The spider's mass at the body is implicit -- we
-    # just integrate `vel_y` against gravity, no force/mass
-    # split needed for a single rigid body.
+    # ---- physics + pose tunables ----
     GRAVITY             = 9.81  # m/s^2 downward
-    JUMP_PEAK_HEIGHT    = 1.50  # metres body apex above stand height
-    JUMP_CROUCH_DROP    = 0.25  # metres body drops below stand height
-    JUMP_CROUCH_SEC     = 0.45  # crouch duration before launch
-    JUMP_LAND_SEC       = 0.30  # landing spring-absorb duration
-    JUMP_REST_SEC       = 0.90  # standing pause between jumps
+    JUMP_PEAK_HEIGHT    = 1.50
+    JUMP_CROUCH_DROP    = 0.25
+    JUMP_CROUCH_SEC     = 0.45
+    JUMP_LAND_SEC       = 0.30
+    JUMP_REST_SEC       = 0.50  # standing pause between behaviours
+    # Per Coffee 2026-05-19 ("hit by shot squat.  Sleep/waiting.
+    # save the jump"): cycle through STAND, JUMP, SLEEP, HIT.
+    # Poses are tuples (body_y_off, foot_xz_scale, foot_y_off):
+    #   - body_y_off    : metres offset from rest standing height.
+    #   - foot_xz_scale : multiplier on the leg's rest XZ outward
+    #                     distance.  <1 pulls feet in (sleep), >1
+    #                     splays them out (squat).
+    #   - foot_y_off    : foot Y in spider-local; ignored when the
+    #                     leg is `anchored` (foot Y locked to ground).
+    POSE_STAND  = (0.00, 1.00, -1.50)
+    POSE_CROUCH = (-0.25, 1.00, -1.50)
+    POSE_SLEEP  = (-0.60, 0.35, -0.30)
+    POSE_SQUAT  = (-1.10, 1.50, -0.20)
+    SLEEP_HOLD_SEC = 3.00
+    SQUAT_HOLD_SEC = 1.50
+    POSE_BLEND_SEC = 0.50
+    HIT_IN_SEC     = 0.15   # rapid slam-down on hit
 
     def __init__(self, world_pos=(0.0, 0.0, 0.0), build_gl=True):
         self.world_pos = np.asarray(world_pos, dtype=np.float32)
@@ -224,13 +236,15 @@ class Spider:
         self._rest_y     = float(world_pos[1])
         self._y_off      = 0.0
         self._vel_y      = 0.0
-        self._mode       = 'rest'
+        self._mode       = 'stand'
         self._mode_start = 0.0
-        # When the spider is AIRBORNE its feet detach from the
-        # ground and travel with the body in spider-local space.
-        # When grounded, feet are anchored at their rest WORLD
-        # positions.  Flipped by the mode transitions in `step()`.
-        self._feet_grounded = True
+        # Pose blending state: source/target pose tuples between
+        # which to interpolate inside the *_in / *_out modes.
+        self._pose_src   = self.POSE_STAND
+        self._pose_tgt   = self.POSE_STAND
+        # Counter so the behaviour cycle alternates jump→sleep→
+        # jump→hit→jump→sleep→...
+        self._behaviour_idx = 0
         # Live joint positions -- start at the static T-pose and get
         # rewritten by `step()` each frame.  Legs are populated below.
         self._legs_rest = []
@@ -360,6 +374,24 @@ class Spider:
         self._mode       = mode
         self._mode_start = self._t
 
+    @staticmethod
+    def _lerp(a, b, t):
+        return a + (b - a) * t
+
+    @staticmethod
+    def _ease(p):
+        # Smoothstep: 3p² − 2p³.  Eases in/out around the midpoint
+        # so pose transitions look spring-loaded rather than
+        # linear.
+        p = max(0.0, min(p, 1.0))
+        return p * p * (3.0 - 2.0 * p)
+
+    def _blend_poses(self, src, tgt, p):
+        e = self._ease(p)
+        return (self._lerp(src[0], tgt[0], e),
+                self._lerp(src[1], tgt[1], e),
+                self._lerp(src[2], tgt[2], e))
+
     def step(self, dt):
         """Advance the jump state machine + physics by `dt`.
 
@@ -389,103 +421,174 @@ class Spider:
             return
         elapsed = self._t - self._mode_start
 
-        if self._mode == 'rest':
-            self._y_off = 0.0
-            self._vel_y = 0.0
-            self._feet_grounded = True
+        # Defaults overwritten by each mode below.
+        body_y_off  = 0.0
+        foot_xz     = 1.0
+        foot_y      = self.LEG_FOOT_HEIGHT
+        anchored    = True
+
+        if self._mode == 'stand':
+            body_y_off, foot_xz, foot_y = self.POSE_STAND
+            anchored = True
             if elapsed >= self.JUMP_REST_SEC:
-                self._enter_mode('crouch')
+                # Pick the next behaviour.  Odd cycles: sleep.
+                # Even cycles: jump → (50% post-land sleep,
+                # 50% post-land hit) for variety.
+                self._behaviour_idx += 1
+                if self._behaviour_idx % 3 == 1:
+                    self._pose_src = self.POSE_STAND
+                    self._pose_tgt = self.POSE_SLEEP
+                    self._enter_mode('sleep_in')
+                elif self._behaviour_idx % 3 == 2:
+                    self._pose_src = self.POSE_STAND
+                    self._pose_tgt = self.POSE_SQUAT
+                    self._enter_mode('hit_in')
+                else:
+                    self._enter_mode('crouch')
 
         elif self._mode == 'crouch':
-            self._feet_grounded = True
             p = min(elapsed / max(self.JUMP_CROUCH_SEC, 1e-6),
-                    1.0)
-            self._y_off = -self.JUMP_CROUCH_DROP * (
+                     1.0)
+            body_y_off = -self.JUMP_CROUCH_DROP * (
                 0.5 - 0.5 * math.cos(p * math.pi))
+            foot_xz, foot_y = 1.0, self.LEG_FOOT_HEIGHT
+            anchored = True
             if elapsed >= self.JUMP_CROUCH_SEC:
-                # Launch impulse: pick vel_y so the unforced
-                # ballistic arc peaks at +JUMP_PEAK_HEIGHT above
-                # rest.  v = sqrt(2 g h).  Start from the
-                # crouched height so the body has the full
-                # `JUMP_CROUCH_DROP + JUMP_PEAK_HEIGHT` of total
-                # rise -- looks more punchy.
                 self._vel_y = math.sqrt(
                     2.0 * self.GRAVITY * (
                         self.JUMP_PEAK_HEIGHT
                         + self.JUMP_CROUCH_DROP))
-                self._feet_grounded = False
+                self._y_off = body_y_off
                 self._enter_mode('air')
 
         elif self._mode == 'air':
             self._vel_y -= self.GRAVITY * float(dt)
             self._y_off += self._vel_y * float(dt)
-            self._feet_grounded = False
-            # Touchdown when we fall back to rest level (or
-            # below) while moving down.
+            body_y_off = self._y_off
+            foot_xz, foot_y = 1.0, self.LEG_FOOT_HEIGHT
+            anchored = False
             if self._y_off <= 0.0 and self._vel_y < 0.0:
                 self._y_off = 0.0
                 self._vel_y = 0.0
                 self._enter_mode('land')
 
         elif self._mode == 'land':
-            # Spring absorb: dip slightly past rest, then ease
-            # back up to rest.  Kinematic for now (no inertia
-            # in the landing -- the body has already lost its
-            # vertical momentum at touchdown).
-            self._feet_grounded = True
             p = min(elapsed / max(self.JUMP_LAND_SEC, 1e-6),
-                    1.0)
-            self._y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
+                     1.0)
+            body_y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
                 p * math.pi)
+            foot_xz, foot_y = 1.0, self.LEG_FOOT_HEIGHT
+            anchored = True
             if elapsed >= self.JUMP_LAND_SEC:
-                self._y_off = 0.0
-                self._enter_mode('rest')
+                self._enter_mode('stand')
+
+        elif self._mode == 'sleep_in':
+            p = elapsed / max(self.POSE_BLEND_SEC, 1e-6)
+            body_y_off, foot_xz, foot_y = self._blend_poses(
+                self._pose_src, self._pose_tgt, p)
+            anchored = False
+            if p >= 1.0:
+                self._enter_mode('sleep')
+
+        elif self._mode == 'sleep':
+            body_y_off, foot_xz, foot_y = self.POSE_SLEEP
+            anchored = False
+            if elapsed >= self.SLEEP_HOLD_SEC:
+                self._pose_src = self.POSE_SLEEP
+                self._pose_tgt = self.POSE_STAND
+                self._enter_mode('sleep_out')
+
+        elif self._mode == 'sleep_out':
+            p = elapsed / max(self.POSE_BLEND_SEC, 1e-6)
+            body_y_off, foot_xz, foot_y = self._blend_poses(
+                self._pose_src, self._pose_tgt, p)
+            anchored = False
+            if p >= 1.0:
+                self._enter_mode('stand')
+
+        elif self._mode == 'hit_in':
+            # Rapid slam-down: body crashes to the squat pose
+            # in HIT_IN_SEC.  Feet splay outward and land on the
+            # ground.  Anchored=False so the foot XZ can move
+            # freely to the splayed position; once we land in
+            # the squat the next mode pins them.
+            p = elapsed / max(self.HIT_IN_SEC, 1e-6)
+            body_y_off, foot_xz, foot_y = self._blend_poses(
+                self._pose_src, self._pose_tgt, p)
+            anchored = False
+            if p >= 1.0:
+                self._enter_mode('squat')
+
+        elif self._mode == 'squat':
+            body_y_off, foot_xz, foot_y = self.POSE_SQUAT
+            anchored = True   # legs pinned to ground while pinned
+            if elapsed >= self.SQUAT_HOLD_SEC:
+                self._pose_src = self.POSE_SQUAT
+                self._pose_tgt = self.POSE_STAND
+                self._enter_mode('hit_out')
+
+        elif self._mode == 'hit_out':
+            p = elapsed / max(self.POSE_BLEND_SEC, 1e-6)
+            body_y_off, foot_xz, foot_y = self._blend_poses(
+                self._pose_src, self._pose_tgt, p)
+            anchored = False
+            if p >= 1.0:
+                self._enter_mode('stand')
 
         else:
-            self._mode = 'rest'
-            self._mode_start = self._t
+            self._enter_mode('stand')
+            body_y_off, foot_xz, foot_y = self.POSE_STAND
 
-        self.world_pos[1] = self._rest_y + float(self._y_off)
-        self._update_leg_ik(float(self._y_off),
-                              self._feet_grounded)
+        self.world_pos[1] = self._rest_y + float(body_y_off)
+        self._update_leg_ik(float(body_y_off),
+                              float(foot_xz),
+                              float(foot_y),
+                              bool(anchored))
 
-    def _update_leg_ik(self, body_y_off, feet_grounded):
-        """Re-solve each leg with rigid segments.
+    def _update_leg_ik(self, body_y_off, foot_xz_scale, foot_y_off,
+                        anchored):
+        """Re-solve each leg with rigid segments + pose targets.
 
-        Treats each leg as a 2-link chain: bone-A (hip->knee, len
-        L1) and bone-B (knee->foot, len L2 + L3).  The `mid`
-        point is then interpolated along the knee->foot vector
-        so segment 2 has its rest length L2.
+        Args:
+            body_y_off    : body's Y offset from rest.  Used to
+                            adjust the spider-local foot Y when
+                            `anchored=True` so the foot world Y
+                            stays at the ground.
+            foot_xz_scale : multiplier on the leg's rest XZ
+                            outward distance.  <1 pulls feet in
+                            (sleep), >1 splays them out (squat).
+            foot_y_off    : foot Y in spider-local; used only when
+                            `anchored=False`.
+            anchored      : when True, foot world Y is locked to
+                            the rest ground level
+                            (`LEG_FOOT_HEIGHT - body_y_off` in
+                            spider-local).  When False, foot Y =
+                            `foot_y_off` directly.
 
-        `feet_grounded` selects where the foot lives:
-          True  -- foot anchored in WORLD at the rest position.
-                   In spider-local that means
-                   `foot.y = rest_foot.y - body_y_off` so as
-                   the body bobs up/down the leg flexes (knee
-                   folds outward when compressed, extends when
-                   the body rises).
-          False -- foot moves with the BODY (= keeps its
-                   spider-local rest position).  Used during
-                   airborne phases so the whole spider rides
-                   up together, no leg-stretch artifact.
-
-        Overstretch (grounded case only) is handled by pulling
-        the foot back along the hip->foot ray to exactly L1+L2+L3
-        -- the leg goes straight and the foot effectively lifts
-        with the body when the body climbs too high.
+        2-link IK with bone-A = L1, bone-B = L2+L3.  Mid sits on
+        the knee->foot line at distance L2 from the knee, so
+        segment 2 keeps its rest length and segment 3 absorbs
+        the rest.
         """
         for i, (hip_r, knee_r, mid_r, foot_r) in enumerate(
                 self._legs_rest):
             L1, L2, L3 = self._leg_seg_lens[i]
             Lreach = L1 + L2 + L3
+            out_dir = self._leg_out_dir[i]   # unit XZ outward
+            cx, _, cz = float(out_dir[0]), 0.0, float(out_dir[2])
             hip  = hip_r
-            foot = foot_r.copy()
-            if feet_grounded:
-                # Foot anchored in world -> spider-local Y of
-                # the foot drops as the body rises.
-                foot[1] = foot_r[1] - body_y_off
-            # else: foot stays at rest spider-local (= moves
-            # with body in world).
+            # Target foot in spider-local: XZ scaled, Y per pose
+            # (or per anchor rule).
+            target_xz = self.LEG_FOOT_OUT * foot_xz_scale
+            if anchored:
+                foot_y_local = self.LEG_FOOT_HEIGHT - body_y_off
+            else:
+                foot_y_local = foot_y_off
+            foot = np.asarray([
+                target_xz * cx,
+                foot_y_local,
+                target_xz * cz,
+            ], dtype=np.float32)
             # Vector hip -> foot.
             delta   = foot - hip
             d_len   = float(np.linalg.norm(delta))

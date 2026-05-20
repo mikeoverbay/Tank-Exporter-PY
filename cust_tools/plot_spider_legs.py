@@ -38,11 +38,15 @@ def main():
     # No GL context -- skip the VAO uploads.
     spider = Spider(world_pos=(0.0, 0.0, 0.0), build_gl=False)
 
-    # Three poses: rest (y_off=0), crouched (-0.25), airborne (+1.5)
+    # Five poses across the new behaviour cycle:
+    #   (label, body_y_off, foot_xz_scale, foot_y_off, anchored,
+    #    color)
     poses = [
-        ("rest",     0.0,  "C0", True),
-        ("crouched", -0.25, "C3", True),
-        ("apex",     +1.5,  "C2", False),  # feet detached
+        ("stand",    *Spider.POSE_STAND,  True,  "C0"),
+        ("crouched", *Spider.POSE_CROUCH, True,  "C3"),
+        ("apex",     +1.5, 1.0, -1.5, False, "C2"),
+        ("sleep",    *Spider.POSE_SLEEP,  False, "C4"),
+        ("squat",    *Spider.POSE_SQUAT,  True,  "C1"),
     ]
 
     fig = plt.figure(figsize=(14, 10))
@@ -53,20 +57,20 @@ def main():
     LEG_IDX = 0   # which leg to feature in panel A
 
     # ---- Panel A: side view (Y-up, Z right) of leg 0 across poses ----
-    for label, y_off, color, grounded in poses:
-        spider._update_leg_ik(y_off, grounded)
+    for label, body_y, fxz, fy, anchored, color in poses:
+        spider._update_leg_ik(body_y, fxz, fy, anchored)
         hip, knee, mid, foot = spider._legs[LEG_IDX]
         zs = [hip[2], knee[2], mid[2], foot[2]]
-        # Body Y offset modulates HIP world Y too (since hip is
-        # attached to the body) -- in spider-local frame here we
-        # ignore that.  For the side view we add y_off back so
-        # the WORLD Y is what's shown (body and hip rise with the
-        # jump).
-        ys = [hip[1] + y_off,
-              knee[1] + y_off,
-              mid[1] + y_off,
-              foot[1] + (y_off if not grounded else 0.0)]
-        axA.plot(zs, ys, '-o', color=color, label=f"{label}  Δy={y_off:+.2f}",
+        # Express in WORLD coords (= add body_y to hip + knee + mid
+        # since they're spider-local and the body has moved by
+        # body_y).  Foot's Y already accounts for body offset via
+        # the anchored branch in IK.
+        ys = [hip[1] + body_y,
+              knee[1] + body_y,
+              mid[1] + body_y,
+              foot[1] + body_y]
+        axA.plot(zs, ys, '-o', color=color,
+                  label=f"{label}  Δy={body_y:+.2f}  fxz={fxz:.2f}",
                   markersize=6, linewidth=2)
         # Annotate joints
         for j_label, jz, jy in zip(("hip", "knee", "mid", "foot"),
@@ -91,7 +95,7 @@ def main():
     # Body sphere top-down
     axB.add_patch(Circle((0, 0), spider.BODY_RADIUS,
                           fill=False, edgecolor="0.3", lw=1.5))
-    spider._update_leg_ik(0.0, True)
+    spider._update_leg_ik(*Spider.POSE_STAND, True)
     for i, (hip, knee, mid, foot) in enumerate(spider._legs):
         xs = [hip[0], knee[0], mid[0], foot[0]]
         zs = [hip[2], knee[2], mid[2], foot[2]]
@@ -109,7 +113,7 @@ def main():
 
     # ---- Panel C: lengths + IK structure table ----
     axC.axis("off")
-    spider._update_leg_ik(0.0, True)
+    spider._update_leg_ik(*Spider.POSE_STAND, True)
     text_lines = []
     text_lines.append("Per-leg geometry (spider-local meters)")
     text_lines.append("=" * 78)
