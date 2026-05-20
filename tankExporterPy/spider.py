@@ -677,21 +677,30 @@ class Spider:
                 delta = foot - hip
                 d_len = Lreach
             # Per Coffee 2026-05-19 ("you need bend in the mid...
-            # 150 degrees in side angle"): the mid joint has a
-            # FIXED interior bend of MID_BEND_ANGLE_DEG.  That
-            # means segments L2 and L3 form a closed triangle
-            # with the knee-foot virtual segment via the law of
-            # cosines:
+            # 150 degrees in side angle"): mid joint has a FIXED
+            # interior bend of MID_BEND_ANGLE_DEG.  L2 and L3
+            # form a closed triangle with the knee-foot virtual
+            # segment via law of cosines:
             #     L_bend^2 = L2^2 + L3^2 - 2 L2 L3 cos(α)
-            # where α is the interior angle at mid.  For α=150°,
-            # L_bend collapses slightly below L2+L3 -- the leg
-            # gets a visible kink instead of a straight knee-foot
-            # chord.
             mid_alpha = math.radians(self.MID_BEND_ANGLE_DEG)
             L_bend = math.sqrt(max(
                 L2 * L2 + L3 * L3
                 - 2.0 * L2 * L3 * math.cos(mid_alpha),
                 1e-12))
+            # Per Coffee 2026-05-19 ("hips cant bend past 90'
+            # straight up.  it folds oddly in sleep mode"):
+            # minimum-reach clamp.  If the foot is closer to
+            # the hip than |L1 - L_bend|, the 2-link IK has
+            # no forward solution and collapses the knee BEHIND
+            # the hip (= the weird fold).  Push the foot out
+            # along the hip->foot ray to exactly |L1 - L_bend|
+            # so the leg is fully folded but still bends in the
+            # forward / upward half-space.
+            d_min = abs(L1 - L_bend)
+            if d_len < d_min:
+                foot = hip + (d_min / max(d_len, 1e-6)) * delta
+                delta = foot - hip
+                d_len = d_min
             # 2-link IK: cosine rule for angle at hip between
             # bone-A (L1) and the hip-foot line.
             proj = (L1 * L1 + d_len * d_len - L_bend * L_bend) / (
@@ -699,23 +708,37 @@ class Spider:
             proj = max(min(proj, L1), -L1)
             h_sq = L1 * L1 - proj * proj
             h    = math.sqrt(max(h_sq, 0.0))
-            # Build the bend-plane basis: `along` = hip->foot
-            # direction; `perp` = the unit XZ outward direction
-            # projected to be perpendicular to `along`, then
-            # normalised.  Falls back to world +Y when degenerate.
+            # Per Coffee 2026-05-19 ("hips cant bend past 90'
+            # straight up"): the bend direction biases UPWARD,
+            # not XZ-outward.  Take +Y projected perpendicular
+            # to `along` so the knee always lifts above the
+            # hip-foot line.  When the leg points nearly
+            # straight up (along ~ +Y), fall back to the leg's
+            # XZ outward direction so the knee picks a
+            # consistent side.
             along = delta / d_len
             out   = self._leg_out_dir[i]
-            perp  = out - float(np.dot(out, along)) * along
+            up    = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+            perp  = up - float(np.dot(up, along)) * along
             pn    = float(np.linalg.norm(perp))
-            if pn < 1e-6:
-                perp = np.asarray([0.0, 1.0, 0.0],
-                                   dtype=np.float32)
+            if pn < 1e-3:
+                # along is almost vertical; fall back to outward
+                # XZ direction (which is automatically
+                # perpendicular to +Y).
+                perp = out
+                pn = float(np.linalg.norm(perp))
+                if pn < 1e-6:
+                    perp = np.asarray([1.0, 0.0, 0.0],
+                                       dtype=np.float32)
+                else:
+                    perp = perp / pn
             else:
                 perp = perp / pn
-            # Knee = hip + proj * along + h * perp_out.  The +h
-            # bias is chosen so the knee always sticks OUTWARD
-            # (= away from the body) -- characteristic Quest
-            # spider pose with the knee high above the body.
+            # Knee = hip + proj * along + h * perp_up.  The +h
+            # bias along the upward-projected perpendicular
+            # keeps the knee in the upper half-space of the
+            # hip -- it never wraps behind / below the hip,
+            # so the leg can't fold backward through the body.
             knee = (hip
                      + proj * along
                      + h * perp).astype(np.float32)
@@ -734,9 +757,14 @@ class Spider:
             kf_len  = float(np.linalg.norm(kf))
             if kf_len > 1e-6:
                 along_kf = kf / kf_len
-                # perp in the bend plane, oriented outward.
-                perp_kf  = out - float(
-                    np.dot(out, along_kf)) * along_kf
+                # Same upward-bias rule as the knee: bend the
+                # mid in the SAME half-space as the knee bend
+                # (= reuse `perp` from above when valid; else
+                # +Y projection of along_kf).  This keeps mid
+                # consistent with the knee so the leg doesn't
+                # zig-zag.
+                perp_kf  = perp - float(
+                    np.dot(perp, along_kf)) * along_kf
                 pn_kf    = float(np.linalg.norm(perp_kf))
                 if pn_kf < 1e-6:
                     perp_kf = perp
