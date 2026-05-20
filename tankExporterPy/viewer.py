@@ -295,7 +295,7 @@ class Viewer:
     _XML_BAR_HEADER_H = 22
     _XML_BAR_TAB_H    = 24
     _XML_BAR_LINE_H   = 16
-    _XML_BAR_LINES    = 5
+    _XML_BAR_LINES    = 24    # visible content rows when expanded
 
     # Heights of the control regions inside the side panels (pixels).
     # Left panel: top block holds display toggles, action buttons,
@@ -1206,6 +1206,14 @@ class Viewer:
         # the click handler can hit-test without recomputing.
         self._xml_bar_header_rect = (0, 0, 0, 0)   # x,y,w,h
         self._xml_bar_tab_rects   = []   # list of (rect, idx)
+        # Per Coffee 2026-05-20 ("fill the tabs under The Xml
+        # Files dropdown with the XML visual files"): per-tab
+        # file paths populated by `load_vehicle`, parsed
+        # content cached, scroll offset for mouse-wheel paging.
+        self._xml_bar_paths         = {}   # label -> {visual, model}
+        self._xml_bar_content_cache = {}   # tab_idx -> rows
+        self._xml_bar_scroll        = 0
+        self._xml_bar_content_rect  = (0, 0, 0, 0)
         # Per Coffee 2026-05-10 ("alt key down.. drag rectangle
         # area on screen.  release of alt key copies area to
         # clipboard"): screenshot-rectangle state.
@@ -8951,6 +8959,34 @@ class Viewer:
             self._on_resize(self.width, self.height)
         elif action == 'tab':
             self._xml_bar_active_idx = int(payload)
+            # Reset scroll so we start at the top of the new tab.
+            self._xml_bar_scroll = 0
+
+    def _xml_bar_wheel_hit(self, mx, my, wheel_y):
+        """Scroll the XML-bar content if the cursor is hovering
+        over its content area.  Returns True if the event was
+        consumed.  `wheel_y` follows pygame MOUSEWHEEL.event.y
+        (positive = wheel forward = scroll up).
+        """
+        if not getattr(self, '_xml_bar_expanded', False):
+            return False
+        rect = getattr(self, '_xml_bar_content_rect',
+                        (0, 0, 0, 0))
+        rx, ry, rw, rh = rect
+        if rw <= 0 or rh <= 0:
+            return False
+        if not (rx <= mx < rx + rw and ry <= my < ry + rh):
+            return False
+        rows = self._xml_bar_load_content(
+            int(self._xml_bar_active_idx))
+        # Three lines per wheel tick.  Wheel-forward (positive y)
+        # scrolls UP (toward top of file) = decrement scroll.
+        step = 3
+        self._xml_bar_scroll = max(0, min(
+            len(rows) - 1,
+            int(getattr(self, '_xml_bar_scroll', 0))
+            - int(wheel_y) * step))
+        return True
 
     def _xml_bar_make_tex(self, text, color):
         """Cached single-line texture render via the UI helper."""
@@ -8958,6 +8994,110 @@ class Viewer:
             self._xml_bar_tab_texs[text] = self.ui._make_tex(
                 text, color)
         return self._xml_bar_tab_texs[text]
+
+    # ----- XML-bar content loading + parsing ----------------------
+
+    _XML_BAR_TAB_TO_KIND = {
+        0: ('hull',    'visual'),
+        1: ('chassis', 'visual'),
+        2: ('turret',  'visual'),
+        3: ('gun',     'visual'),
+        # idx 4 is the spacer (None)
+        5: ('hull',    'model'),
+        6: ('chassis', 'model'),
+        7: ('turret',  'model'),
+        8: ('gun',     'model'),
+    }
+
+    def _xml_bar_load_content(self, tab_idx):
+        """Return a list of (kind, text) lines for the requested
+        tab.  `kind` is 'line' for a regular row and 'divider'
+        for a horizontal separator drawn between primitive
+        groups.  Cached per tab so we don't re-decode the
+        BWXML each frame.
+        """
+        paths = getattr(self, '_xml_bar_paths', None) or {}
+        cache = getattr(self, '_xml_bar_content_cache', None)
+        if cache is None:
+            cache = {}
+            self._xml_bar_content_cache = cache
+        if tab_idx in cache:
+            return cache[tab_idx]
+        mapping = self._XML_BAR_TAB_TO_KIND.get(tab_idx)
+        if mapping is None:
+            cache[tab_idx] = [('line',
+                               '(no XML mapped to this tab)')]
+            return cache[tab_idx]
+        comp_label, kind = mapping
+        comp = paths.get(comp_label) or {}
+        fpath = comp.get(kind)
+        if not fpath or not os.path.isfile(fpath):
+            cache[tab_idx] = [
+                ('line',
+                 f'({comp_label}.{kind}: no file loaded)')]
+            return cache[tab_idx]
+        try:
+            with open(fpath, 'rb') as fh:
+                raw = fh.read()
+        except Exception as exc:
+            cache[tab_idx] = [
+                ('line',
+                 f'(read error: {type(exc).__name__}: '
+                 f'{exc})')]
+            return cache[tab_idx]
+        # BWXML files decode via `decode_bwxml`; plain XML
+        # files use UTF-8.  Loaders ship both helpers.
+        try:
+            from .loaders import decode_bwxml, is_bwxml
+            if is_bwxml(raw):
+                text = decode_bwxml(raw)
+            else:
+                text = raw.decode('utf-8', errors='replace')
+        except Exception as exc:
+            cache[tab_idx] = [
+                ('line',
+                 f'(decode error: {type(exc).__name__}: '
+                 f'{exc})')]
+            return cache[tab_idx]
+        # Pretty-print so the XML has line breaks + indent.
+        # minidom is fastest, but it chokes on malformed
+        # markup.  Fall back to a naive `>` -> `>\n` split.
+        pretty = None
+        try:
+            import xml.dom.minidom as _md
+            pretty = _md.parseString(
+                text).toprettyxml(indent='  ')
+        except Exception:
+            pretty = None
+        if pretty is None:
+            # Naive line break after every closing tag boundary.
+            pretty = text.replace('><', '>\n<')
+        # Build the row list.  Lines that OPEN a `<renderSet>` or
+        # `<primitiveGroup>` are preceded by a divider so the
+        # primitives visibly separate.
+        rows = []
+        first_primgroup = True
+        for line in pretty.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                # Suppress all-blank rows from minidom.
+                continue
+            is_prim_open = (
+                stripped.startswith('<primitiveGroup')
+                or stripped.startswith('<renderSet')
+                or stripped.startswith('<primitive_group')
+                or stripped.startswith('<primitive ')
+                or stripped.startswith('<primitive>'))
+            if is_prim_open and not first_primgroup:
+                rows.append(('divider', ''))
+            if is_prim_open:
+                first_primgroup = False
+            rows.append(('line', line.rstrip()))
+        if not rows:
+            rows = [('line',
+                     '(empty decoded XML)')]
+        cache[tab_idx] = rows
+        return rows
 
     def _render_xml_bar(self, width, height):
         """Draw the collapsible XML-tab bar at the top of the
@@ -9058,21 +9198,80 @@ class Viewer:
                 self._xml_bar_tab_rects.append(
                     ((cx, tab_y, tab_w, tab_h), idx))
                 cx += tab_w + 2
-            # Content area: 5 lines of placeholder text.
+            # Content area -- show the active tab's XML lines.
             content_y = tab_y + tab_h
             content_h = self._XML_BAR_LINE_H * self._XML_BAR_LINES
             ui.shader.set_vec4('u_color',
                                0.08, 0.10, 0.13, 0.95)
             ui._draw_quad(scene_x, content_y,
                            scene_w, content_h)
-            placeholder = self._xml_bar_make_tex(
-                '(content placeholder -- '
-                'tab loading wires next)',
-                (140, 150, 165))
-            if placeholder is not None and placeholder[0]:
-                tid, tw, th = placeholder
-                ui._draw_tex(tid, scene_x + 10,
-                              content_y + 6, tw, th)
+            rows = self._xml_bar_load_content(
+                int(self._xml_bar_active_idx))
+            scroll = max(0, int(getattr(
+                self, '_xml_bar_scroll', 0)))
+            scroll = min(scroll, max(
+                0, len(rows) - self._XML_BAR_LINES))
+            line_h = self._XML_BAR_LINE_H
+            line_y = content_y + 2
+            line_color   = (210, 218, 228)
+            divider_rgba = (0.40, 0.50, 0.66, 0.95)
+            for row_idx in range(scroll,
+                                  min(len(rows),
+                                       scroll + self._XML_BAR_LINES)):
+                kind, txt = rows[row_idx]
+                if kind == 'divider':
+                    ui.shader.set_int('u_use_tex', 0)
+                    ui.shader.set_vec4('u_color', *divider_rgba)
+                    ui._draw_quad(scene_x + 6,
+                                   line_y + line_h // 2,
+                                   scene_w - 12, 1)
+                else:
+                    if txt:
+                        # Trim long lines so we don't blow up
+                        # the texture cache or scroll off the
+                        # right edge.  Visible content area is
+                        # roughly (scene_w / 7) characters wide
+                        # at the current font.
+                        max_chars = max(40, scene_w // 7)
+                        if len(txt) > max_chars:
+                            txt = txt[:max_chars - 1] + '…'
+                        tex = self._xml_bar_make_tex(
+                            txt, line_color)
+                        if tex is not None and tex[0]:
+                            tid, tw, th = tex
+                            ui._draw_tex(
+                                tid, scene_x + 10,
+                                line_y, tw, th)
+                line_y += line_h
+            # Footer: scroll indicator + file path hint.
+            mapping = self._XML_BAR_TAB_TO_KIND.get(
+                int(self._xml_bar_active_idx))
+            footer_color = (140, 150, 165)
+            if mapping is not None:
+                comp_label, kind = mapping
+                path = ((getattr(self, '_xml_bar_paths',
+                                   None) or {})
+                         .get(comp_label, {})
+                         .get(kind))
+                if path:
+                    short = os.path.basename(path)
+                    foot = (f"{comp_label}.{kind}  ({short})  "
+                            f"line {scroll + 1}-"
+                            f"{min(scroll + self._XML_BAR_LINES, len(rows))} "
+                            f"of {len(rows)}")
+                else:
+                    foot = f"{comp_label}.{kind}  (not loaded)"
+                tex = self._xml_bar_make_tex(foot, footer_color)
+                if tex is not None and tex[0]:
+                    tid, tw, th = tex
+                    ui._draw_tex(
+                        tid, scene_x + 10,
+                        content_y + content_h - th - 2,
+                        tw, th)
+            # Remember rect so mouse-wheel scroll knows
+            # whether the cursor is over the content area.
+            self._xml_bar_content_rect = (
+                scene_x, content_y, scene_w, content_h)
         ui.shader.set_int('u_use_tex', 0)
         glBindVertexArray(0)
 
@@ -15497,6 +15696,39 @@ class Viewer:
             self.meshes   = []
             all_positions = []
             self._exhaust_points = []   # filled per-component below
+            # Per Coffee 2026-05-20 ("fill the tabs under The Xml
+            # Files dropdown with the XML visual files"): stash
+            # the per-component .visual_processed and primitives
+            # paths so the XML-bar tabs can load + display them.
+            # Keyed by component label ('hull' / 'chassis' /
+            # 'turret' / 'gun').  `.model` paths derived
+            # alongside primitives (same dir, just swap the
+            # extension).
+            self._xml_bar_paths = {}
+            for _comp in components:
+                _lab = _comp.get('label')
+                if not _lab:
+                    continue
+                _vis = _comp.get('visual')
+                _prim = _comp.get('primitives')
+                _model = None
+                if _prim:
+                    _root, _ext = os.path.splitext(_prim)
+                    if _ext == '.primitives_processed':
+                        _maybe = _root + '.model'
+                    else:
+                        _maybe = _root.replace(
+                            '.primitives_processed', '') + '.model'
+                    if os.path.isfile(_maybe):
+                        _model = _maybe
+                self._xml_bar_paths[_lab] = {
+                    'visual': _vis,
+                    'model':  _model,
+                }
+            # Invalidate any cached content so the next render
+            # picks up the new tank.
+            self._xml_bar_content_cache = {}
+            self._xml_bar_scroll = 0
             # Per Coffee 2026-05-13: invalidate aim pivots so the new
             # tank captures its own turret / gun rotation centres and
             # XML pitch / yaw limits via `_capture_aim_pivots`.  Yaw /
@@ -17813,6 +18045,8 @@ class Viewer:
                 # zoom is also a mouse rotation -- block it.
                 if bool(pygame.key.get_mods() & pygame.KMOD_ALT):
                     pass
+                elif self._xml_bar_wheel_hit(mx, my, event.y):
+                    pass  # consumed by the XML-bar content area
                 elif self.ui.handle_mouse_wheel(mx, my, event.y):
                     pass  # consumed by the tree
                 else:
