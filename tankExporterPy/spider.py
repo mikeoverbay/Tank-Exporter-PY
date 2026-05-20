@@ -205,10 +205,14 @@ class Spider:
     JUMP_LAND_SEC       = 0.30  # landing spring-absorb duration
     JUMP_REST_SEC       = 0.90  # standing pause between jumps
 
-    def __init__(self, world_pos=(0.0, 0.0, 0.0)):
+    def __init__(self, world_pos=(0.0, 0.0, 0.0), build_gl=True):
         self.world_pos = np.asarray(world_pos, dtype=np.float32)
         # Body orientation -- only yaw matters for now; identity to start.
         self.yaw_rad   = 0.0
+        # When False, skip the VAO uploads.  Used by offline
+        # diagnostic plots that import the geometry math without
+        # an active OpenGL context.
+        self._has_gl   = bool(build_gl)
         # Animation time accumulator + jump physics state.  The
         # spider obeys real gravity once it leaves the ground;
         # `_y_off` is the body's Y offset from the standing rest
@@ -232,19 +236,22 @@ class Spider:
         self._legs_rest = []
         self._legs      = []
 
-        # Build body sphere VAO.
-        bv, bc, bi = _make_sphere(
-            radius=self.BODY_RADIUS,
-            color=(0.04, 0.04, 0.05))
-        self._body_vao = _upload_pos_color_vao(bv, bc, bi)
-
-        # Build a single cylinder VAO (length 1.0 along +Y) -- reused
-        # for all leg segments at different scales / orientations.
-        cv, cc, ci = _make_cylinder(
-            radius=self.LEG_BASE_RADIUS,
-            length=1.0,
-            color=(0.02, 0.02, 0.02))
-        self._leg_vao = _upload_pos_color_vao(cv, cc, ci)
+        # Build body sphere VAO + reusable leg cylinder VAO.  Only
+        # if we actually have a GL context (offline plots skip
+        # these and call the IK math directly).
+        if self._has_gl:
+            bv, bc, bi = _make_sphere(
+                radius=self.BODY_RADIUS,
+                color=(0.04, 0.04, 0.05))
+            self._body_vao = _upload_pos_color_vao(bv, bc, bi)
+            cv, cc, ci = _make_cylinder(
+                radius=self.LEG_BASE_RADIUS,
+                length=1.0,
+                color=(0.02, 0.02, 0.02))
+            self._leg_vao = _upload_pos_color_vao(cv, cc, ci)
+        else:
+            self._body_vao = None
+            self._leg_vao  = None
 
         # Per-leg joint positions in spider-local coords.  Each leg
         # has 4 points (hip, knee, mid, foot) -- 3 segments between
