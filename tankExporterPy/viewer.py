@@ -295,7 +295,10 @@ class Viewer:
     _XML_BAR_HEADER_H = 22
     _XML_BAR_TAB_H    = 24
     _XML_BAR_LINE_H   = 16
-    _XML_BAR_LINES    = 24    # visible content rows when expanded
+    _XML_BAR_LINES_DEFAULT = 24   # initial visible-row count
+    _XML_BAR_LINES_MIN     = 4    # smallest size when dragged up
+    _XML_BAR_LINES_MAX     = 60   # cap so it doesn't eat the whole viewport
+    _XML_BAR_RESIZE_H      = 6    # drag-handle strip height (px)
 
     # Heights of the control regions inside the side panels (pixels).
     # Left panel: top block holds display toggles, action buttons,
@@ -1214,6 +1217,14 @@ class Viewer:
         self._xml_bar_content_cache = {}   # tab_idx -> rows
         self._xml_bar_scroll        = 0
         self._xml_bar_content_rect  = (0, 0, 0, 0)
+        # Per Coffee 2026-05-20 ("make the Xml Files sizable
+        # drag"): visible-row count is now adjustable.  Stored
+        # per-instance so the user can drag the bottom edge of
+        # the bar to resize.  Live drag state tracked alongside.
+        self._xml_bar_lines         = self._XML_BAR_LINES_DEFAULT
+        self._xml_bar_resize_rect   = (0, 0, 0, 0)
+        self._xml_bar_resize_drag   = False
+        self._xml_bar_resize_start  = (0, 0)   # (start_my, start_lines)
         # Per Coffee 2026-05-10 ("alt key down.. drag rectangle
         # area on screen.  release of alt key copies area to
         # clipboard"): screenshot-rectangle state.
@@ -8924,9 +8935,12 @@ class Viewer:
         """
         if not getattr(self, '_xml_bar_expanded', False):
             return self._XML_BAR_HEADER_H
+        lines = int(getattr(
+            self, '_xml_bar_lines', self._XML_BAR_LINES_DEFAULT))
         return (self._XML_BAR_HEADER_H
                 + self._XML_BAR_TAB_H
-                + self._XML_BAR_LINE_H * self._XML_BAR_LINES)
+                + self._XML_BAR_LINE_H * lines
+                + self._XML_BAR_RESIZE_H)
 
     def _xml_bar_hit(self, mx, my):
         """Return what the user clicked inside the XML bar, or
@@ -8935,6 +8949,12 @@ class Viewer:
         Returns:
             ('header', None) -- header row (toggle expand)
             ('tab', idx)     -- tab idx in _XML_BAR_TABS
+            ('content', None) -- inside the expanded content
+                                 area (XML lines).  Used to
+                                 keep the OS cursor visible
+                                 and to swallow camera-orbit
+                                 clicks that would otherwise
+                                 fall through.
             None             -- outside the bar
         """
         hx, hy, hw, hh = self._xml_bar_header_rect
@@ -8947,6 +8967,26 @@ class Viewer:
                 rx, ry, rw, rh = rect
                 if rx <= mx < rx + rw and ry <= my < ry + rh:
                     return ('tab', idx)
+            # Per Coffee 2026-05-20 ("make the Xml Files
+            # sizable drag"): resize-handle strip beneath the
+            # content area.  Reported separately from 'content'
+            # so the click handler can start a drag.
+            rrx, rry, rrw, rrh = getattr(
+                self, '_xml_bar_resize_rect', (0, 0, 0, 0))
+            if (rrw > 0 and rrh > 0
+                    and rrx <= mx < rrx + rrw
+                    and rry <= my < rry + rrh):
+                return ('resize', None)
+            # Per Coffee 2026-05-20 ("need the mouse visible
+            # when in the tabs"): also treat the content area
+            # as part of the bar so the cursor stays visible
+            # while hovering the XML lines.
+            crx, cry, crw, crh = getattr(
+                self, '_xml_bar_content_rect', (0, 0, 0, 0))
+            if (crw > 0 and crh > 0
+                    and crx <= mx < crx + crw
+                    and cry <= my < cry + crh):
+                return ('content', None)
         return None
 
     def _on_xml_bar_click(self, hit):
@@ -8961,6 +9001,19 @@ class Viewer:
             self._xml_bar_active_idx = int(payload)
             # Reset scroll so we start at the top of the new tab.
             self._xml_bar_scroll = 0
+        elif action == 'resize':
+            # Start a resize drag.  Cache the cursor Y at drag
+            # start + the current row count so subsequent
+            # MOUSEMOTION events can compute a delta.
+            try:
+                _mx, my = pygame.mouse.get_pos()
+            except Exception:
+                my = 0
+            self._xml_bar_resize_drag  = True
+            self._xml_bar_resize_start = (
+                int(my),
+                int(getattr(self, '_xml_bar_lines',
+                              self._XML_BAR_LINES_DEFAULT)))
 
     def _xml_bar_wheel_hit(self, mx, my, wheel_y):
         """Scroll the XML-bar content if the cursor is hovering
@@ -9200,7 +9253,10 @@ class Viewer:
                 cx += tab_w + 2
             # Content area -- show the active tab's XML lines.
             content_y = tab_y + tab_h
-            content_h = self._XML_BAR_LINE_H * self._XML_BAR_LINES
+            n_lines = int(getattr(
+                self, '_xml_bar_lines',
+                self._XML_BAR_LINES_DEFAULT))
+            content_h = self._XML_BAR_LINE_H * n_lines
             ui.shader.set_vec4('u_color',
                                0.08, 0.10, 0.13, 0.95)
             ui._draw_quad(scene_x, content_y,
@@ -9210,14 +9266,14 @@ class Viewer:
             scroll = max(0, int(getattr(
                 self, '_xml_bar_scroll', 0)))
             scroll = min(scroll, max(
-                0, len(rows) - self._XML_BAR_LINES))
+                0, len(rows) - n_lines))
             line_h = self._XML_BAR_LINE_H
             line_y = content_y + 2
             line_color   = (210, 218, 228)
             divider_rgba = (0.40, 0.50, 0.66, 0.95)
             for row_idx in range(scroll,
                                   min(len(rows),
-                                       scroll + self._XML_BAR_LINES)):
+                                       scroll + n_lines)):
                 kind, txt = rows[row_idx]
                 if kind == 'divider':
                     ui.shader.set_int('u_use_tex', 0)
@@ -9257,7 +9313,7 @@ class Viewer:
                     short = os.path.basename(path)
                     foot = (f"{comp_label}.{kind}  ({short})  "
                             f"line {scroll + 1}-"
-                            f"{min(scroll + self._XML_BAR_LINES, len(rows))} "
+                            f"{min(scroll + n_lines, len(rows))} "
                             f"of {len(rows)}")
                 else:
                     foot = f"{comp_label}.{kind}  (not loaded)"
@@ -9272,6 +9328,32 @@ class Viewer:
             # whether the cursor is over the content area.
             self._xml_bar_content_rect = (
                 scene_x, content_y, scene_w, content_h)
+            # Per Coffee 2026-05-20 ("make the Xml Files sizable
+            # drag"): horizontal drag-handle strip at the very
+            # bottom of the expanded bar.  Lighter colour +
+            # subtle inner line so it reads as draggable.  The
+            # `_xml_bar_resize_rect` is used for hit-testing.
+            resize_y = content_y + content_h
+            resize_h = self._XML_BAR_RESIZE_H
+            handle_rgba = (
+                (0.34, 0.42, 0.55, 0.95)
+                if self._xml_bar_resize_drag
+                else (0.22, 0.27, 0.34, 0.95))
+            ui.shader.set_int('u_use_tex', 0)
+            ui.shader.set_vec4('u_color', *handle_rgba)
+            ui._draw_quad(scene_x, resize_y, scene_w, resize_h)
+            # Thin highlight pip in the middle so the handle
+            # reads as draggable regardless of theme tint.
+            ui.shader.set_vec4(
+                'u_color', 0.55, 0.65, 0.80, 0.95)
+            pip_w = 40
+            ui._draw_quad(scene_x + (scene_w - pip_w) // 2,
+                           resize_y + resize_h // 2,
+                           pip_w, 1)
+            self._xml_bar_resize_rect = (
+                scene_x, resize_y, scene_w, resize_h)
+        else:
+            self._xml_bar_resize_rect = (0, 0, 0, 0)
         ui.shader.set_int('u_use_tex', 0)
         glBindVertexArray(0)
 
@@ -18166,6 +18248,9 @@ class Viewer:
 
             elif event.type == MOUSEBUTTONUP:
                 if event.button == 1:
+                    # XML-bar resize drag (Coffee 2026-05-20).
+                    if getattr(self, '_xml_bar_resize_drag', False):
+                        self._xml_bar_resize_drag = False
                     # Snapshot whether a slider was being dragged BEFORE
                     # handle_mouse_up clears _active_slider.  If yes,
                     # the user just released after a tweak -- snapshot
@@ -18179,6 +18264,25 @@ class Viewer:
                         self._persist_all_sliders(write_json=True)
 
             elif event.type == MOUSEMOTION:
+                # XML-bar resize drag (Coffee 2026-05-20):
+                # convert vertical mouse delta into row-count
+                # delta and resize the bar.  Done BEFORE the UI
+                # hover update so the cursor change is reflected
+                # immediately on the next frame.
+                if getattr(self, '_xml_bar_resize_drag', False):
+                    _start_my, _start_lines = self._xml_bar_resize_start
+                    _delta_px   = int(event.pos[1]) - int(_start_my)
+                    _delta_rows = _delta_px // self._XML_BAR_LINE_H
+                    _new_lines  = max(
+                        self._XML_BAR_LINES_MIN,
+                        min(self._XML_BAR_LINES_MAX,
+                            int(_start_lines) + int(_delta_rows)))
+                    if _new_lines != self._xml_bar_lines:
+                        self._xml_bar_lines = _new_lines
+                        try:
+                            self._on_resize(self.width, self.height)
+                        except Exception:
+                            pass
                 self.ui.update_hover(*event.pos)
                 if event.buttons[0]:    # left button held -- update slider drag
                     self.ui.handle_mouse_drag(*event.pos)
