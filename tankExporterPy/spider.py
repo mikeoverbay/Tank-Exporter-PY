@@ -192,28 +192,41 @@ class Spider:
     LEG_SEG_LEN         = 1.5   # cylinder pre-length (scaled per segment)
     LEG_COUNT           = 4
 
-    # ---- jump animation tunables (per Coffee 2026-05-19
-    # "can we make it do something?  jump maybe?") --------
-    JUMP_CYCLE_SEC      = 3.0   # total jump+rest period
-    JUMP_CROUCH_FRAC    = 0.20  # 0..frac : crouch
-    JUMP_LAUNCH_FRAC    = 0.06  # frac..+launch : push off
-    JUMP_AIR_FRAC       = 0.34  # +air : ballistic up-and-down
-    JUMP_LAND_FRAC      = 0.08  # +land : settle
-    JUMP_REST_FRAC      = 0.32  # +rest : standing pause (= remainder)
-    JUMP_CROUCH_DROP    = 0.25  # metres body drops below stand height
+    # ---- jump physics tunables (per Coffee 2026-05-19
+    # "it needs to get off the ground.  it has mass at its
+    # body"): real gravity + impulse instead of a parametric
+    # bob.  The spider's mass at the body is implicit -- we
+    # just integrate `vel_y` against gravity, no force/mass
+    # split needed for a single rigid body.
+    GRAVITY             = 9.81  # m/s^2 downward
     JUMP_PEAK_HEIGHT    = 1.50  # metres body apex above stand height
-    JUMP_KNEE_FLEX      = 0.40  # extra knee-height multiplier on crouch
+    JUMP_CROUCH_DROP    = 0.25  # metres body drops below stand height
+    JUMP_CROUCH_SEC     = 0.45  # crouch duration before launch
+    JUMP_LAND_SEC       = 0.30  # landing spring-absorb duration
+    JUMP_REST_SEC       = 0.90  # standing pause between jumps
 
     def __init__(self, world_pos=(0.0, 0.0, 0.0)):
         self.world_pos = np.asarray(world_pos, dtype=np.float32)
         # Body orientation -- only yaw matters for now; identity to start.
         self.yaw_rad   = 0.0
-        # Animation time accumulator and the resting (= ground-stand)
-        # body Y; the jump animation modulates self.world_pos[1] around
-        # this baseline so the spider returns to the same spot each
-        # cycle.  `_rest_y` is filled in by `set_terrain_height`.
-        self._t       = 0.0
-        self._rest_y  = float(world_pos[1])
+        # Animation time accumulator + jump physics state.  The
+        # spider obeys real gravity once it leaves the ground;
+        # `_y_off` is the body's Y offset from the standing rest
+        # height, `_vel_y` is the integrated vertical velocity,
+        # and `_mode` selects which phase of the jump cycle is
+        # active.  `_rest_y` is the world Y the spider settles
+        # to (set by `set_terrain_height`).
+        self._t          = 0.0
+        self._rest_y     = float(world_pos[1])
+        self._y_off      = 0.0
+        self._vel_y      = 0.0
+        self._mode       = 'rest'
+        self._mode_start = 0.0
+        # When the spider is AIRBORNE its feet detach from the
+        # ground and travel with the body in spider-local space.
+        # When grounded, feet are anchored at their rest WORLD
+        # positions.  Flipped by the mode transitions in `step()`.
+        self._feet_grounded = True
         # Live joint positions -- start at the static T-pose and get
         # rewritten by `step()` each frame.  Legs are populated below.
         self._legs_rest = []
@@ -336,52 +349,100 @@ class Spider:
 
     # ---- animation ---------------------------------------------------------
 
-    def step(self, dt):
-        """Advance jump animation by `dt` seconds.
+    def _enter_mode(self, mode):
+        self._mode       = mode
+        self._mode_start = self._t
 
-        Per Coffee 2026-05-19 ("spider legs don't stretch.
-        spring in the joints"): segment lengths are RIGID; only
-        the joint angles flex.  Feet stay anchored at their
-        spider-local rest position as the body Y bobs up and
-        down, and 2-link IK in the per-leg bend plane re-solves
-        the knee position so the leg compresses by FLEXING
-        instead of stretching.
+    def step(self, dt):
+        """Advance the jump state machine + physics by `dt`.
+
+        Per Coffee 2026-05-19 ("it needs to get off the ground.
+        it has mass at its body"): real gravity drives the
+        airborne arc -- launch applies an upward impulse, AIR
+        integrates `vel_y -= g*dt`, and the foot positions
+        detach from the ground so the WHOLE spider rides up
+        with the body.
+
+        Mode sequence:
+            rest    : standing on terrain for JUMP_REST_SEC
+            crouch  : kinematic dip to -JUMP_CROUCH_DROP
+                      over JUMP_CROUCH_SEC (legs flex via IK
+                      with feet planted)
+            air     : impulse applied (vel_y = sqrt(2 g h));
+                      vel_y integrates against gravity; feet
+                      DETACHED from terrain, ride with body
+            land    : kinematic absorb back to rest over
+                      JUMP_LAND_SEC (feet plant at rest world
+                      again, legs absorb via IK)
+            ... loop ...
         """
         try:
             self._t += float(dt)
         except (TypeError, ValueError):
             return
-        cycle = max(float(self.JUMP_CYCLE_SEC), 1e-3)
-        phase = (self._t % cycle) / cycle      # 0..1
-        f_cr  = self.JUMP_CROUCH_FRAC
-        f_la  = f_cr + self.JUMP_LAUNCH_FRAC
-        f_ai  = f_la + self.JUMP_AIR_FRAC
-        f_ln  = f_ai + self.JUMP_LAND_FRAC
+        elapsed = self._t - self._mode_start
 
-        if phase < f_cr:
-            p = phase / f_cr
-            y_off = -self.JUMP_CROUCH_DROP * (
+        if self._mode == 'rest':
+            self._y_off = 0.0
+            self._vel_y = 0.0
+            self._feet_grounded = True
+            if elapsed >= self.JUMP_REST_SEC:
+                self._enter_mode('crouch')
+
+        elif self._mode == 'crouch':
+            self._feet_grounded = True
+            p = min(elapsed / max(self.JUMP_CROUCH_SEC, 1e-6),
+                    1.0)
+            self._y_off = -self.JUMP_CROUCH_DROP * (
                 0.5 - 0.5 * math.cos(p * math.pi))
-        elif phase < f_la:
-            p = (phase - f_cr) / max(f_la - f_cr, 1e-6)
-            y_off = (-self.JUMP_CROUCH_DROP
-                     + (self.JUMP_CROUCH_DROP
-                        + 0.4 * self.JUMP_PEAK_HEIGHT) * p)
-        elif phase < f_ai:
-            p = (phase - f_la) / max(f_ai - f_la, 1e-6)
-            y_off = self.JUMP_PEAK_HEIGHT * (
-                1.0 - 4.0 * (p - 0.5) * (p - 0.5))
-        elif phase < f_ln:
-            p = (phase - f_ai) / max(f_ln - f_ai, 1e-6)
-            y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
+            if elapsed >= self.JUMP_CROUCH_SEC:
+                # Launch impulse: pick vel_y so the unforced
+                # ballistic arc peaks at +JUMP_PEAK_HEIGHT above
+                # rest.  v = sqrt(2 g h).  Start from the
+                # crouched height so the body has the full
+                # `JUMP_CROUCH_DROP + JUMP_PEAK_HEIGHT` of total
+                # rise -- looks more punchy.
+                self._vel_y = math.sqrt(
+                    2.0 * self.GRAVITY * (
+                        self.JUMP_PEAK_HEIGHT
+                        + self.JUMP_CROUCH_DROP))
+                self._feet_grounded = False
+                self._enter_mode('air')
+
+        elif self._mode == 'air':
+            self._vel_y -= self.GRAVITY * float(dt)
+            self._y_off += self._vel_y * float(dt)
+            self._feet_grounded = False
+            # Touchdown when we fall back to rest level (or
+            # below) while moving down.
+            if self._y_off <= 0.0 and self._vel_y < 0.0:
+                self._y_off = 0.0
+                self._vel_y = 0.0
+                self._enter_mode('land')
+
+        elif self._mode == 'land':
+            # Spring absorb: dip slightly past rest, then ease
+            # back up to rest.  Kinematic for now (no inertia
+            # in the landing -- the body has already lost its
+            # vertical momentum at touchdown).
+            self._feet_grounded = True
+            p = min(elapsed / max(self.JUMP_LAND_SEC, 1e-6),
+                    1.0)
+            self._y_off = -0.5 * self.JUMP_CROUCH_DROP * math.sin(
                 p * math.pi)
+            if elapsed >= self.JUMP_LAND_SEC:
+                self._y_off = 0.0
+                self._enter_mode('rest')
+
         else:
-            y_off = 0.0
+            self._mode = 'rest'
+            self._mode_start = self._t
 
-        self.world_pos[1] = self._rest_y + float(y_off)
-        self._update_leg_ik(float(y_off))
+        self.world_pos[1] = self._rest_y + float(self._y_off)
+        self._update_leg_ik(float(self._y_off),
+                              self._feet_grounded)
 
-    def _update_leg_ik(self, body_y_off):
+    def _update_leg_ik(self, body_y_off, feet_grounded):
         """Re-solve each leg with rigid segments.
 
         Treats each leg as a 2-link chain: bone-A (hip->knee, len
@@ -389,31 +450,35 @@ class Spider:
         point is then interpolated along the knee->foot vector
         so segment 2 has its rest length L2.
 
-        Foot is ANCHORED at the rest spider-local position so
-        when the body lowers (y_off < 0) the foot's distance
-        from the hip drops and the knee folds outward.  When
-        the body rises (y_off > 0) and the leg would
-        overstretch past L1+L2+L3, the foot lifts toward the
-        hip along the leg's outward XZ direction (= leg fully
-        extended pointing down at the spawn ground point but
-        the foot rides up with the body).
+        `feet_grounded` selects where the foot lives:
+          True  -- foot anchored in WORLD at the rest position.
+                   In spider-local that means
+                   `foot.y = rest_foot.y - body_y_off` so as
+                   the body bobs up/down the leg flexes (knee
+                   folds outward when compressed, extends when
+                   the body rises).
+          False -- foot moves with the BODY (= keeps its
+                   spider-local rest position).  Used during
+                   airborne phases so the whole spider rides
+                   up together, no leg-stretch artifact.
+
+        Overstretch (grounded case only) is handled by pulling
+        the foot back along the hip->foot ray to exactly L1+L2+L3
+        -- the leg goes straight and the foot effectively lifts
+        with the body when the body climbs too high.
         """
         for i, (hip_r, knee_r, mid_r, foot_r) in enumerate(
                 self._legs_rest):
             L1, L2, L3 = self._leg_seg_lens[i]
             Lreach = L1 + L2 + L3
-            # Hip moves with the body in spider-local coords?  No
-            # -- hips are fixed in spider-local, body translates
-            # via the world matrix.  In SPIDER-LOCAL coords the
-            # hip stays at `hip_r` and the foot at `foot_r` --
-            # but the FOOT was anchored in WORLD by the body's
-            # rest position.  Now that the body has moved by
-            # `body_y_off` in world, the foot's spider-local
-            # Y appears at `foot_r.y - body_y_off` (foot stays
-            # in world but body moved up).
             hip  = hip_r
             foot = foot_r.copy()
-            foot[1] = foot_r[1] - body_y_off
+            if feet_grounded:
+                # Foot anchored in world -> spider-local Y of
+                # the foot drops as the body rises.
+                foot[1] = foot_r[1] - body_y_off
+            # else: foot stays at rest spider-local (= moves
+            # with body in world).
             # Vector hip -> foot.
             delta   = foot - hip
             d_len   = float(np.linalg.norm(delta))
