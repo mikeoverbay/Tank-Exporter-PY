@@ -208,14 +208,35 @@ class Spider:
     #                     splays them out (squat).
     #   - foot_y_off    : foot Y in spider-local; ignored when the
     #                     leg is `anchored` (foot Y locked to ground).
-    POSE_STAND  = (0.00, 1.00, -1.50)
-    POSE_CROUCH = (-0.25, 1.00, -1.50)
-    POSE_SLEEP  = (-0.60, 0.35, -0.30)
+    # Per Coffee 2026-05-19 ("more spread on legs in jump and
+    # sleep modes"): widen the foot XZ scale for STAND / CROUCH
+    # and SLEEP so the silhouette reads wider in profile.  The
+    # HIT squat stays at 1.5× (it was already the splayed pose).
+    POSE_STAND  = (0.00, 1.30, -1.50)
+    POSE_CROUCH = (-0.25, 1.30, -1.50)
+    POSE_SLEEP  = (-0.60, 0.65, -0.30)
     POSE_SQUAT  = (-1.10, 1.50, -0.20)
+    # Per Coffee 2026-05-19 ("you need bend in the mid... Id say
+    # 150 degrees in side angle"): mid joint INTERIOR angle.
+    # 150 deg = 30 deg deflection from straight (slight outward
+    # kink), matching the Quest cartoon's spindly leg silhouette.
+    MID_BEND_ANGLE_DEG = 150.0
     SLEEP_HOLD_SEC = 3.00
     SQUAT_HOLD_SEC = 1.50
     POSE_BLEND_SEC = 0.50
     HIT_IN_SEC     = 0.15   # rapid slam-down on hit
+    # Per Coffee 2026-05-19 ("simulated pressing down on eye
+    # (sphere) and releasing.  It should have some bounce"):
+    # the body sphere is pushed down by a hand-like force, held
+    # briefly, then released so it springs back with a damped
+    # oscillation.  Tunables:
+    PRESS_DEPTH    = 0.40   # m -- how far the press pushes the body down
+    PRESS_IN_SEC   = 0.55   # slow ease-down (= hand pushing)
+    PRESS_HOLD_SEC = 0.50   # squeeze held at the bottom
+    # Spring/damper for the release.  ω = 2π/T_bounce; ζ = damping.
+    PRESS_BOUNCE_T   = 0.45  # natural period (sec) of one full oscillation
+    PRESS_BOUNCE_ZETA = 0.22 # damping ratio (0 = ideal spring, 1 = critically damped)
+    PRESS_SETTLE_THRESH = 0.005  # |y| below this + slow → done
 
     def __init__(self, world_pos=(0.0, 0.0, 0.0), build_gl=True):
         self.world_pos = np.asarray(world_pos, dtype=np.float32)
@@ -431,18 +452,20 @@ class Spider:
             body_y_off, foot_xz, foot_y = self.POSE_STAND
             anchored = True
             if elapsed >= self.JUMP_REST_SEC:
-                # Pick the next behaviour.  Odd cycles: sleep.
-                # Even cycles: jump → (50% post-land sleep,
-                # 50% post-land hit) for variety.
+                # Behaviour rotation: jump → sleep → hit →
+                # press → repeat.
                 self._behaviour_idx += 1
-                if self._behaviour_idx % 3 == 1:
+                slot = self._behaviour_idx % 4
+                if slot == 1:
                     self._pose_src = self.POSE_STAND
                     self._pose_tgt = self.POSE_SLEEP
                     self._enter_mode('sleep_in')
-                elif self._behaviour_idx % 3 == 2:
+                elif slot == 2:
                     self._pose_src = self.POSE_STAND
                     self._pose_tgt = self.POSE_SQUAT
                     self._enter_mode('hit_in')
+                elif slot == 3:
+                    self._enter_mode('press_in')
                 else:
                     self._enter_mode('crouch')
 
@@ -535,6 +558,54 @@ class Spider:
             if p >= 1.0:
                 self._enter_mode('stand')
 
+        elif self._mode == 'press_in':
+            # Slow ease-down: body drops by PRESS_DEPTH over
+            # PRESS_IN_SEC.  Feet anchored (= legs flex) so it
+            # really looks like a hand pushing the eye down on
+            # the planted spider.
+            p = self._ease(elapsed / max(self.PRESS_IN_SEC, 1e-6))
+            body_y_off = -self.PRESS_DEPTH * p
+            foot_xz, foot_y = (
+                self.POSE_STAND[1], self.POSE_STAND[2])
+            anchored = True
+            if elapsed >= self.PRESS_IN_SEC:
+                # Seed the spring-damper state for the release.
+                self._y_off = -self.PRESS_DEPTH
+                self._vel_y = 0.0
+                self._enter_mode('press_hold')
+
+        elif self._mode == 'press_hold':
+            body_y_off = -self.PRESS_DEPTH
+            foot_xz, foot_y = (
+                self.POSE_STAND[1], self.POSE_STAND[2])
+            anchored = True
+            if elapsed >= self.PRESS_HOLD_SEC:
+                # Release.  Spring physics kicks in next frame.
+                self._enter_mode('press_release')
+
+        elif self._mode == 'press_release':
+            # Damped harmonic oscillator about the rest height.
+            # y'' = -ω² · y - 2ζω · y'
+            T   = max(self.PRESS_BOUNCE_T, 1e-3)
+            zeta = max(min(self.PRESS_BOUNCE_ZETA, 0.99), 0.0)
+            omega = 2.0 * math.pi / T
+            accel = (-omega * omega * self._y_off
+                      - 2.0 * zeta * omega * self._vel_y)
+            self._vel_y += accel * float(dt)
+            self._y_off += self._vel_y * float(dt)
+            body_y_off = self._y_off
+            foot_xz, foot_y = (
+                self.POSE_STAND[1], self.POSE_STAND[2])
+            anchored = True
+            # Settle: when y is small AND we're moving slow,
+            # snap to rest and continue.
+            if (abs(self._y_off) < self.PRESS_SETTLE_THRESH
+                    and abs(self._vel_y) < 0.05
+                    and elapsed > 0.3):
+                self._y_off = 0.0
+                self._vel_y = 0.0
+                self._enter_mode('stand')
+
         else:
             self._enter_mode('stand')
             body_y_off, foot_xz, foot_y = self.POSE_STAND
@@ -605,15 +676,24 @@ class Spider:
                 foot = hip + (Lreach / d_len) * delta
                 delta = foot - hip
                 d_len = Lreach
-            L_bend = L2 + L3
+            # Per Coffee 2026-05-19 ("you need bend in the mid...
+            # 150 degrees in side angle"): the mid joint has a
+            # FIXED interior bend of MID_BEND_ANGLE_DEG.  That
+            # means segments L2 and L3 form a closed triangle
+            # with the knee-foot virtual segment via the law of
+            # cosines:
+            #     L_bend^2 = L2^2 + L3^2 - 2 L2 L3 cos(α)
+            # where α is the interior angle at mid.  For α=150°,
+            # L_bend collapses slightly below L2+L3 -- the leg
+            # gets a visible kink instead of a straight knee-foot
+            # chord.
+            mid_alpha = math.radians(self.MID_BEND_ANGLE_DEG)
+            L_bend = math.sqrt(max(
+                L2 * L2 + L3 * L3
+                - 2.0 * L2 * L3 * math.cos(mid_alpha),
+                1e-12))
             # 2-link IK: cosine rule for angle at hip between
-            # bone-A and the hip-foot line.
-            #   d^2 = L1^2 + L_bend^2 - 2*L1*L_bend*cos(angle_at_knee)
-            #   d^2 = L1^2 - 2*L1*proj  +  proj^2 + h^2
-            #     where (proj, h) is knee relative to hip in
-            #     (along-foot, perpendicular) basis.
-            #   => proj = (L1^2 + d^2 - L_bend^2) / (2*d)
-            #   => h    = sqrt(max(L1^2 - proj^2, 0))
+            # bone-A (L1) and the hip-foot line.
             proj = (L1 * L1 + d_len * d_len - L_bend * L_bend) / (
                 2.0 * d_len)
             proj = max(min(proj, L1), -L1)
@@ -639,15 +719,38 @@ class Spider:
             knee = (hip
                      + proj * along
                      + h * perp).astype(np.float32)
-            # Mid sits on the line from knee to foot at length
-            # L2 from the knee (= the natural bend point of the
-            # lower segments).  This keeps the segment 2 length
-            # exact and lets segment 3 absorb the remainder.
+            # Per Coffee 2026-05-19 ("you need bend in the
+            # mid"): mid is OFF the knee-foot line.  Inside the
+            # (knee, mid, foot) triangle we know all three side
+            # lengths (L2, L3, L_bend) so the cosine rule gives
+            # the angle at the knee between the knee->mid and
+            # the knee->foot directions:
+            #   cos(θ_knee) = (L2^2 + L_bend^2 - L3^2)
+            #                 / (2 * L2 * L_bend)
+            # Place mid at L2 from the knee, rotated by θ_knee
+            # off the knee-foot line toward `perp_out` -- the
+            # same bend-plane direction used for the knee.
             kf      = foot - knee
             kf_len  = float(np.linalg.norm(kf))
             if kf_len > 1e-6:
-                mid = (knee + (L2 / kf_len) * kf
-                       ).astype(np.float32)
+                along_kf = kf / kf_len
+                # perp in the bend plane, oriented outward.
+                perp_kf  = out - float(
+                    np.dot(out, along_kf)) * along_kf
+                pn_kf    = float(np.linalg.norm(perp_kf))
+                if pn_kf < 1e-6:
+                    perp_kf = perp
+                else:
+                    perp_kf = perp_kf / pn_kf
+                cos_kn = (L2 * L2 + L_bend * L_bend - L3 * L3
+                            ) / (2.0 * L2 * L_bend)
+                cos_kn = max(min(cos_kn, 1.0), -1.0)
+                sin_kn = math.sqrt(max(
+                    1.0 - cos_kn * cos_kn, 0.0))
+                mid = (knee
+                        + L2 * (cos_kn * along_kf
+                                + sin_kn * perp_kf)
+                        ).astype(np.float32)
             else:
                 mid = knee.copy()
             self._legs[i] = (hip, knee, mid, foot)
