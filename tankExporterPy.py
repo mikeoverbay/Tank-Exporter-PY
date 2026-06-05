@@ -111,6 +111,23 @@ def main():
     print(f"[config] pkg_dir  : {cfg['pkg_dir']  or '(auto-detect)'}")
     print(f"[config] res_mods : {cfg['res_mods'] or '(auto-detect)'}")
 
+    # Per Coffee 2026-05-20 ("must be added to our requirements
+    # to load if it isn't there"): make sure the imgui-bundle
+    # dep used by the XML editor is importable BEFORE the GL
+    # window opens.  Running pip mid-session blocks the pygame
+    # main thread long enough for Windows to flag the app as
+    # Not Responding -- so it has to land here, while the user
+    # is still on the console.  go.bat already handles this
+    # via the import-probe + requirements/ install path; this
+    # branch covers users who launch python directly.
+    try:
+        from tankExporterPy.xml_editor import (
+            ensure_imgui_bundle_installed)
+        ensure_imgui_bundle_installed()
+    except Exception as exc:
+        print(f"[startup] imgui-bundle install skipped: "
+              f"{type(exc).__name__}: {exc}")
+
     from tankExporterPy.viewer import Viewer
     Viewer(args.filepath, cfg).run()
 

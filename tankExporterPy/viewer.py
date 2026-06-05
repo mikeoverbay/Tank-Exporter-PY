@@ -35,6 +35,8 @@ from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTT
                             K_a, K_d, K_s, K_F2, K_F3, K_F4, K_F8, K_F9,
                             K_F10,
                             K_LEFT, K_RIGHT, K_BACKSPACE,
+                            K_RETURN, K_KP_ENTER, K_DELETE, K_HOME, K_END,
+                            K_UP, K_DOWN, KMOD_CTRL, TEXTINPUT,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -281,21 +283,28 @@ class Viewer:
     # XML-bar tab layout (Coffee 2026-05-11 "The Xml Files").
     # Tabs are persistent across tank loads.  None entries
     # are spacers (extra horizontal gap, no clickable tab).
+    # Per Coffee 2026-05-20 ("change the tabs to just buttons
+    # that open each part.  Add one to open the tanks def file
+    # as well"): the bar is now a single row of buttons.  Each
+    # entry is (label, comp_label, kind); None inserts a spacer
+    # gap.  Clicking a button opens the imgui editor on that
+    # file.  No more expand/collapse + content preview.
     _XML_BAR_TABS = (
-        'Hull.visual',
-        'Chassis.visual',
-        'Turret.visual',
-        'Gun.visual',
-        None,                       # spacer between visuals + models
-        'Hull.model',
-        'Chassis.model',
-        'Turret.model',
-        'Gun.model',
+        ('Tank.def',       'tank',    'def'),
+        None,
+        ('Hull.visual',    'hull',    'visual'),
+        ('Chassis.visual', 'chassis', 'visual'),
+        ('Turret.visual',  'turret',  'visual'),
+        ('Gun.visual',     'gun',     'visual'),
+        None,
+        ('Hull.model',     'hull',    'model'),
+        ('Chassis.model',  'chassis', 'model'),
+        ('Turret.model',   'turret',  'model'),
+        ('Gun.model',      'gun',     'model'),
     )
-    _XML_BAR_HEADER_H = 22
-    _XML_BAR_TAB_H    = 24
-    _XML_BAR_LINE_H   = 16
-    _XML_BAR_LINES    = 5
+    _XML_BAR_HEADER_H = 28      # single button-row height
+    _XML_BAR_BTN_H    = 22
+    _XML_BAR_BTN_PAD  = 6       # horizontal padding inside each button
 
     # Heights of the control regions inside the side panels (pixels).
     # Left panel: top block holds display toggles, action buttons,
@@ -1206,6 +1215,45 @@ class Viewer:
         # the click handler can hit-test without recomputing.
         self._xml_bar_header_rect = (0, 0, 0, 0)   # x,y,w,h
         self._xml_bar_tab_rects   = []   # list of (rect, idx)
+        # Per Coffee 2026-05-20 ("fill the tabs under The Xml
+        # Files dropdown with the XML visual files"): per-tab
+        # file paths populated by `load_vehicle`, parsed
+        # content cached, scroll offset for mouse-wheel paging.
+        self._xml_bar_paths         = {}   # label -> {visual, model}
+        self._xml_bar_res_mods_root = ''   # set per-load by load_vehicle
+        self._xml_bar_content_cache = {}   # tab_idx -> rows
+        # Legacy attrs from the expand/collapse + resize-drag
+        # era of the XML bar.  The bar is a single button row
+        # now (v1.241.0); these stay as no-op shims so any
+        # stale code path that still touches them doesn't
+        # crash.
+        self._xml_bar_scroll        = 0
+        self._xml_bar_content_rect  = (0, 0, 0, 0)
+        self._xml_bar_resize_rect   = (0, 0, 0, 0)
+        self._xml_bar_resize_drag   = False
+        self._xml_bar_resize_start  = (0, 0)
+        # Per Coffee 2026-05-20 ("imgui-bundle (Dear ImGui +
+        # ImGuiColorTextEdit) -- make it so.  only for xml file
+        # editing"): the inline single-row edit was scrapped in
+        # favour of a real imgui editor window.  Kept around:
+        #   * `_xml_bar_dirty_tabs` -- tab indices that have
+        #     unsaved edits in the imgui editor; mirrors
+        #     `xml_editor.dirty_tab_indices()` so the tab label
+        #     "*" marker stays cheap to query each frame.
+        #   * `xml_editor` -- the imgui-bundle wrapper; lazily
+        #     initialises its GL renderer on first open_tab()
+        #     call so the dep loads only when actually needed.
+        self._xml_bar_dirty_tabs = set()
+        from .xml_editor import XMLEditor as _XMLEditor
+        self.xml_editor = _XMLEditor()
+        # Legacy inline-edit attrs kept as no-op shims so any
+        # stray reference in the codebase doesn't crash.  These
+        # used to drive the per-row caret edit; now the imgui
+        # window owns the buffer.
+        self._xml_bar_edit_tab    = None
+        self._xml_bar_edit_row    = None
+        self._xml_bar_edit_text   = ''
+        self._xml_bar_edit_cursor = 0
         # Per Coffee 2026-05-10 ("alt key down.. drag rectangle
         # area on screen.  release of alt key copies area to
         # clipboard"): screenshot-rectangle state.
@@ -2099,6 +2147,26 @@ class Viewer:
             print(f"[viewer] Terrain disabled: {exc}")
             self.terrain        = None
             self.terrain_shader = None
+
+        # Per Coffee 2026-05-19 ("i want to do something fun.  How
+        # hard to add a six leg spider... Jonny Quest spider"):
+        # spawn a single Quest-style 4-leg target on the terrain
+        # at startup.  Procedural sphere body + 4 spindly legs.
+        # No animation yet -- static T-pose, foot height matched
+        # to terrain so the lowest foot just touches ground.
+        try:
+            from . import spider as _spider
+            self.spider = _spider.Spider(world_pos=(8.0, 0.0, 8.0))
+            if self.terrain is not None:
+                self.spider.set_terrain_height(self.terrain)
+            print(f"[viewer] Quest spider spawned at "
+                  f"({self.spider.world_pos[0]:+.2f}, "
+                  f"{self.spider.world_pos[1]:+.2f}, "
+                  f"{self.spider.world_pos[2]:+.2f})")
+        except Exception as _exc_sp:
+            print(f"[viewer] Spider spawn skipped: "
+                  f"{type(_exc_sp).__name__}: {_exc_sp}")
+            self.spider = None
 
         # ---- Procedural skydome ----------------------------------------
         # Per Coffee 2026-05-14 ("we have skydomes in the game.. make a
@@ -6401,6 +6469,13 @@ class Viewer:
             side_tag = ('L' if xform is xform_L
                         else 'R' if xform is xform_R
                         else None)
+            # Revert v1.231.61 augmentation (Coffee 2026-05-19
+            # "this is so broken... lost the math"): read the
+            # original `_homie_*` stashes again so only true
+            # arc pads (drive sprocket, idler) get the radial-
+            # from-hub up vector and polygon-correction tilt.
+            # Bottom-run line pads keep the centroid-up from
+            # `build_oriented_transforms`.
             hubs_arr   = (self._homie_hubs_L
                           if side_tag == 'L'
                           else self._homie_hubs_R
@@ -6509,6 +6584,103 @@ class Viewer:
             xform[apply_mask, 0:3, 1] = (
                 new_up_os[apply_mask].astype(np.float32))
 
+        # Per Coffee 2026-05-18 ("the bend point is 1/2 of the
+        # seg length.  we want to calc the angle of r and 1/2
+        # of seg length and rotate the pads by that amount"):
+        # polygon-effect correction.  An arc pad sampled on the
+        # chain spline sits at a hinge point on the pitch
+        # circle; the pad CHORD (between consecutive hinges)
+        # is rotated by half the per-segment subtended angle
+        # away from the spline tangent at the sample point.
+        # Apply Rx(theta_i) about pad-local +X (hinge pin axis)
+        # so each arc pad's forward axis lines up with the
+        # chord direction instead of the tangent.
+        #   theta_i = atan( (segmentLength / 2) / R_eff_i )
+        # R_eff_i = current distance from pad position to its
+        # wheel hub (= effective pitch radius the chain is
+        # wrapping at this pad).  Line pads (`on_arc[i] ==
+        # False`) get theta = 0.
+        _ci_poly = (getattr(self, '_pending_chassis_info', None)
+                     or {})
+        _seg_len_poly = float(
+            _ci_poly.get('segmentLength', 0.0) or 0.0)
+        if _seg_len_poly > 1e-6:
+            _half_seg = 0.5 * _seg_len_poly
+            for xform, pos, side_tag2 in (
+                    (xform_L, left_pos, 'L'),
+                    (xform_R, right_pos, 'R')):
+                if (xform is None or pos is None
+                        or len(xform) != len(pos)
+                        or len(xform) == 0):
+                    continue
+                # Revert v1.231.61 augmentation: original
+                # `_homie_*` stashes only.  True arc pads only.
+                hubs_arr2 = (self._homie_hubs_L
+                             if side_tag2 == 'L'
+                             else self._homie_hubs_R)
+                on_arc_arr2 = (self._homie_onarc_L
+                               if side_tag2 == 'L'
+                               else self._homie_onarc_R)
+                if (hubs_arr2 is None or on_arc_arr2 is None
+                        or len(hubs_arr2) != len(xform)
+                        or len(on_arc_arr2) != len(xform)):
+                    continue
+                pos_f2 = np.asarray(pos, dtype=np.float32)
+                radial2 = pos_f2 - hubs_arr2
+                radial2[:, 0] = 0.0
+                R_eff = np.linalg.norm(radial2, axis=1)
+                on_arc_b2 = np.asarray(on_arc_arr2, dtype=bool)
+                # Stash R_eff + on_arc so the segment2 dispatch
+                # loop (much later in this function) can apply
+                # its own extra rotation = 1.5x the chord-face
+                # angle of segment1.  Per Coffee 2026-05-18
+                # ("rotate pad 2 150% of cord face angle").
+                setattr(self,
+                        f'_poly_R_eff_{side_tag2}',
+                        R_eff.copy())
+                setattr(self,
+                        f'_poly_on_arc_{side_tag2}',
+                        on_arc_b2.copy())
+                # Per-pad theta: -atan(half_seg / R_eff) on arc
+                # pads with valid R, else 0.  Per Coffee
+                # 2026-05-18 ("each cord middle point is the
+                # rotation point?") -- restore the FULL half-
+                # pie-slice angle (δ/2 = asin(L/(2R))) so the
+                # pad's forward axis lands on the chord
+                # direction between consecutive hinges.
+                # Combined with the L/2 forward shift below
+                # (= pivot at chord midpoint), this makes the
+                # pad face perpendicular to the radial at the
+                # chord midpoint -- i.e. facing the wheel
+                # centre.
+                thetas = np.where(
+                    on_arc_b2 & (R_eff > 1e-6),
+                    -np.arctan2(_half_seg,
+                                 np.maximum(R_eff, 1e-6)),
+                    0.0).astype(np.float32)
+                cs = np.cos(thetas)[:, None]    # (N, 1)
+                ss = np.sin(thetas)[:, None]
+                # Post-multiply Rx(theta) per pad -- pure
+                # rotation, so col3 unchanged here.
+                Y_old = xform[:, 0:3, 1].copy()
+                Z_old = xform[:, 0:3, 2].copy()
+                xform[:, 0:3, 1] = cs * Y_old + ss * Z_old
+                xform[:, 0:3, 2] = -ss * Y_old + cs * Z_old
+                # Per Coffee 2026-05-18 ("each cord middle point
+                # is the rotation point?"): shift col3 by L/2
+                # along the rotated forward direction so the
+                # pivot lands at the chord midpoint (= midway
+                # between two consecutive chain pins) instead
+                # of at the sample point.  Combined with the
+                # full δ/2 rotation above, the pad face is
+                # perpendicular to the radial at the chord
+                # midpoint -- = facing the wheel centre.
+                # pad_forward_axis='-Z', so world-forward
+                # = -col2 of the rotated mat4.
+                fwd_axes = -xform[:, 0:3, 2]
+                xform[:, 0:3, 3] += (
+                    _half_seg * fwd_axes).astype(np.float32)
+
         # Per Coffee 2026-05-10 ("don't flip x on the left
         # side"): the v1.118.10 X-mirror on L's pad transforms
         # has been removed.  L and R now both render with the
@@ -6520,73 +6692,25 @@ class Viewer:
         # the pad mesh is symmetric across its own X plane
         # (typical WoT track-shoe geometry).
         #
-        # Per Coffee 2026-05-10 ("it should be the hinge point on
-        # the tracks.. that's the offset we need"): the gameplay
-        # XML's `<trackPair><segmentOffset>` is where the pad
-        # mesh's HINGE PIN sits in pad-local coordinates -- the
-        # axis the pad rotates about as it travels along the
-        # spline.  The spline samples chain positions at uniform
-        # arc-length; what we WANT is for each pad's hinge pin
-        # to land at the sampled position, not for the pad
-        # mesh's local origin to land there.
+        # Per Coffee 2026-05-18 ("remove these from radial
+        # offset.  segmentOffset = 0.258, segment2Offset =
+        # 0.09"): the chassis XML's `<segmentOffset>` and
+        # `<segment2Offset>` are NOT radial placement offsets --
+        # they're per-mesh modeler-internal values that the
+        # runtime should NOT apply as a shift.  The pad halves'
+        # actual radial extent is encoded in the mesh geometry
+        # itself (and is described separately by
+        # `segmentsInnerThickness` + `segmentsOuterThickness` in
+        # the chassis XML, which together total ~0.09 m on T110E4
+        # vs the bogus 0.348 m sum of segOffset + segment2Offset).
         #
-        # Mathematically: we need the pad-local point
-        # `(0, 0, seg_offset)` (the hinge) to map to the spline
-        # position `(p)`.  In `world = xform_local @ pad_local`,
-        # that means `xform_local[:, :, 3]` (= world dest of
-        # pad-local origin) must be shifted by
-        # `-seg_offset * z_axis` so that the hinge ends up at
-        # `p` instead.  The pad mesh body then sits offset
-        # FROM the spline by seg_offset along its forward
-        # direction -- exactly how a real track shoe hangs
-        # off its hinge pin.
-        #
-        # Sign flipped vs the v1.118.30 attempt (which placed
-        # the mesh origin at the spline AND additionally
-        # shifted forward by seg_offset, producing the worst
-        # of both worlds -- pads off the spline AND in the
-        # wrong direction).
-        # Per Coffee 2026-05-11 ("some tanks have 2 parts but
-        # they are both attached to one point.  there are 2
-        # offsets to get total pad thickness"): the shoe
-        # assembly on tanks like T110E4 is TWO mesh parts
-        # rigidly bolted together -- segmentModel + segment2Model
-        # share the same chain anchor, but each has its own
-        # forward offset along pad-local +Z (segmentOffset for
-        # part 1, segment2Offset for part 2).  The two offsets
-        # together give the total pad thickness.
-        #
-        # We therefore DON'T pre-shift xform_L / xform_R in bulk
-        # any more (that would only let us pick a single offset).
-        # Instead the offset is applied per-renderer in the
-        # dispatch loop below, picked from the XML field whose
-        # name matches the renderer's source mesh.  Tiger I only
-        # has segmentModel -> single renderer per side -> one
-        # offset, same behaviour as before.  T110E4 has both
-        # -> two renderers per side, each at its own offset.
-        ci_local = (getattr(self, '_pending_chassis_info',
-                            None) or {})
-        tsm = ci_local.get('track_segment_models') or {}
-        seg_offset = 0.0
-        seg2_offset = 0.0
-        try:
-            seg_offset = float(
-                tsm.get('segmentOffset', 0.0) or 0.0)
-        except Exception:
-            seg_offset = 0.0
-        try:
-            seg2_offset = float(
-                tsm.get('segment2Offset', 0.0) or 0.0)
-        except Exception:
-            seg2_offset = 0.0
-        if not getattr(self, '_segoff_logged', False) and (
-                seg_offset != 0.0 or seg2_offset != 0.0):
-            self.log(
-                f"segmentOffset={seg_offset:+.4f}  "
-                f"segment2Offset={seg2_offset:+.4f}  "
-                f"(per-part hinge offsets along pad +Z)",
-                color=(180, 220, 255))
-            self._segoff_logged = True
+        # Every renderer (segment, segment2, link, on each side)
+        # therefore places its mesh-local origin at the chain
+        # anchor with no per-part offset shift.  Two-piece pads'
+        # halves overlap naturally at the anchor.  Single-piece
+        # pads (A100_T49 etc.) already worked this way since
+        # v1.215.0.
+
         # Per Coffee 2026-05-09 "pads can't penetrate terrain":
         # compose chassis_pose @ pad_xform on the CPU to get a
         # world-space mat4 per pad, sample terrain at each pad's
@@ -6848,37 +6972,17 @@ class Viewer:
 
         # Per Coffee 2026-05-11 ("both of the pad pieces should be
         # considered as one.  they need to both rotate at the
-        # pivot as one part.  could these be the offsets to
-        # center of rotation"):
+        # pivot as one part."), and 2026-05-18 ("remove these
+        # from radial offset"):
         #
-        # `segmentOffset` and `segment2Offset` are the LOCATION OF
-        # THE PIVOT (= center of rotation = hinge pin) inside each
-        # mesh part's local coordinate system.  Each pad piece's
-        # mesh-local origin is OFFSET from the pivot by the
-        # respective amount.  To rotate the whole 2-piece shoe
-        # around ONE shared pivot in world space (the chain
-        # anchor), we shift each mesh BACKWARDS along pad-local
-        # +Z by its offset -- so the mesh's pivot-local-point
-        # `(0, 0, offset)` ends up at the chain anchor.
-        #
-        # In world: world_pos_of_pivot
-        #   = xform_world[:, :, 3] - offset * z_axis + offset * z_axis
-        #   = xform_world[:, :, 3]   (= chain anchor, shared by both)
-        #
-        # Net visual: segment + segment2 share the SAME pivot in
-        # world space.  Both pieces extend "behind" the pivot
-        # along their respective lengths, forming one rigid shoe
-        # that rotates around the anchor as the chain bends.
-        # (Previously the sign was inverted: +offset moved the
-        # mesh FORWARD of the anchor, which placed the pivot 2x
-        # the offset ahead of where it should be -- and each
-        # piece's pivot landed at a DIFFERENT spot, so they
-        # rotated independently.)
-        #
-        # Pink pin markers therefore now go at the SHARED chain
-        # anchor (xform_world's pre-shift translation column),
-        # not per-renderer.  One pin per chain anchor regardless
-        # of variant count.
+        # Two-piece pads (T110E4 etc.) place BOTH `segmentModel`
+        # and `segment2Model` renderers at the same chain anchor
+        # with no per-part offset shift.  The mesh geometry
+        # itself encodes the relative position of the two
+        # halves, so they overlap naturally as one rigid shoe
+        # rotating around the anchor.  Pink pin markers go at
+        # the chain anchor (xform_world's translation column),
+        # one per anchor regardless of variant count.
         pin_segments = []
         PIN_COLOR = (1.0, 0.40, 0.78)
         pin_anchors_done = {'L': False, 'R': False}
@@ -6999,42 +7103,96 @@ class Viewer:
                     and not getattr(self,
                                      '_show_right_track', True)):
                 continue
-            # Per Coffee 2026-05-16 ("2 at pads at center.. see
-            # it?", "spline looks better.. pads not so much"):
-            # for TWO-piece pads, align the segment2 mesh with
-            # the segment mesh so they share the hinge pin in
-            # world space.
+            # Per Coffee 2026-05-16 ("2 at pads at center..", then
+            # 2026-05-18 "radial offsets"):  the chassis XML
+            # `<segmentOffset>` and `<segment2Offset>` values are
+            # RADIAL distances (along pad-local +Y -- outward from
+            # the wheel hub / chain centerline), NOT forward
+            # distances along the chain.  T110E4 has
+            # `segmentOffset=0.258`, `segment2Offset=0.09`: the
+            # two mesh halves sit at different radial distances
+            # from the chain anchor, and their hinge pins meet
+            # at the same radial location.
             #
-            # On two-piece pads the chassis XML carries DISTINCT
-            # `segmentOffset` and `segment2Offset` values
-            # describing where each mesh's hinge pin sits in its
-            # own local coordinate system.  With v1.215.0
-            # dropping the runtime shift, both meshes land at
-            # the SAME chain anchor in world space -- their
-            # bounding boxes coincide and we see "2 pads at
-            # center".
+            # With v1.215.0 dropping the runtime shift, both
+            # meshes land at the SAME chain anchor in world
+            # space -- their bounding boxes coincide and we
+            # see "2 pads at center".  Single-piece pads
+            # (A100_T49, Pudel, etc.) only have ONE renderer per
+            # side; their mesh-local origin is placed at the
+            # chain anchor by v1.215.0's design and that
+            # renders correctly today.
             #
-            # Single-piece pads (Pudel etc.) only have ONE
-            # renderer per side; their mesh-local origin is
-            # placed at the chain anchor by v1.215.0's design
-            # and that renders correctly today.  This fix is
-            # therefore GATED on the two-piece case: shift
-            # ONLY the `segment2*` renderers by
-            # `(seg_offset - seg2_offset) * z_axis` so that the
-            # segment2 mesh's hinge aligns with the segment
-            # mesh's hinge -- both end up at
-            # `chain_anchor + seg_offset * z_axis` in world.
-            # `segment*` (and `link*`) keep the v1.215.0
-            # placement.
+            # Per Coffee 2026-05-18 ("rotate pad 2 150% of cord
+            # face angle"): segment2 gets an ADDITIONAL rotation
+            # on top of the per-pad mat4 so its total chord-face
+            # angle is 1.5x of segment1's.
+            # segment1 already has Rx(+δ/2) baked into the
+            # per-pad mat4 (where δ/2 = atan(L/2/R_eff)).
+            # segment2 total = 1.5 * (δ/2) = δ/2 + δ/4, so the
+            # extra rotation for segment2 is Rx(+δ/4) about the
+            # same hinge-pin axis.  Pure rotation post-mult
+            # leaves col3 unchanged -> segment2 still rotates
+            # around the chord-midpoint pivot, same as segment1.
+            # Per Coffee 2026-05-18 ("we need to continue to
+            # rotate seg 2 to 1/2 of our seg length angle"):
+            # segment1 is already at δ/2 polygon-correction
+            # (= atan(L/2 / R_eff)).  segment2 CONTINUES that
+            # rotation by HALF the same angle -- another δ/4
+            # in the SAME direction (toward wheel centre).
+            # Net seg2 rotation = δ/2 + δ/4 = 3δ/4.
+            # Pure rotation post-mult so col3 (chord midpoint)
+            # is unchanged -- both halves keep the same pivot.
             xform_clamped = xform_world.copy()
-            is_two_piece = (seg_offset != 0.0
-                             and seg2_offset != 0.0)
-            if is_two_piece and 'segment2' in key:
-                delta_offset = seg_offset - seg2_offset
-                z_axis = xform_clamped[:, 0:3, 2]
-                xform_clamped[:, 0:3, 3] = (
-                    xform_clamped[:, 0:3, 3]
-                    + delta_offset * z_axis)
+            if 'segment2' in key:
+                # Per Coffee 2026-05-19 ("rotate the other way
+                # by 1/2"): segment2 gets an EXTRA Rx(+δ/4) on
+                # top of segment1's Rx(+δ/2), pushing its total
+                # rotation to +3δ/4 (opposite-sign half-step
+                # from v1.231.66's δ/4).  Then the L/2 forward
+                # shift along the new post-rotation chord
+                # direction.
+                _ci_seg2 = (getattr(self,
+                                     '_pending_chassis_info',
+                                     None) or {})
+                _seg_len_seg2 = float(
+                    _ci_seg2.get('segmentLength', 0.0) or 0.0)
+                _R_eff_disp = getattr(
+                    self, f'_poly_R_eff_{side_letter}', None)
+                _on_arc_disp = getattr(
+                    self, f'_poly_on_arc_{side_letter}', None)
+                if _seg_len_seg2 > 1e-6:
+                    # Step 1: extra Rx(+δ/4) about hinge-pin
+                    # axis.  `thetas = -0.5 * atan(L/2/R_eff)`
+                    # with the Rx(-thetas) matrix layout gives
+                    # an effective Rx(+δ/4).
+                    if (_R_eff_disp is not None
+                            and _on_arc_disp is not None
+                            and len(_R_eff_disp)
+                                == len(xform_clamped)):
+                        _half_seg_seg2 = 0.5 * _seg_len_seg2
+                        _thetas_x2 = np.where(
+                            _on_arc_disp & (_R_eff_disp > 1e-6),
+                            -0.5 * np.arctan2(
+                                _half_seg_seg2,
+                                np.maximum(_R_eff_disp, 1e-6)),
+                            0.0).astype(np.float32)
+                        _cs2 = np.cos(_thetas_x2)[:, None]
+                        _ss2 = np.sin(_thetas_x2)[:, None]
+                        _Y_old2 = xform_clamped[:, 0:3, 1].copy()
+                        _Z_old2 = xform_clamped[:, 0:3, 2].copy()
+                        xform_clamped[:, 0:3, 1] = (
+                            _cs2 * _Y_old2 + _ss2 * _Z_old2)
+                        xform_clamped[:, 0:3, 2] = (
+                            -_ss2 * _Y_old2 + _cs2 * _Z_old2)
+                    # Step 2: shift col3 by L/2 along the
+                    # POST-rotation forward direction (= -col2,
+                    # since pad_forward_axis='-Z').
+                    _shift_seg2 = 0.5 * _seg_len_seg2
+                    _fwd_seg2 = -xform_clamped[:, 0:3, 2]
+                    xform_clamped[:, 0:3, 3] += (
+                        _shift_seg2 * _fwd_seg2
+                    ).astype(np.float32)
             # One pink pin per chain anchor on this side -- the
             # pivot is shared between segment and segment2, so we
             # only need one marker per anchor (drawn the first
@@ -7470,10 +7628,13 @@ class Viewer:
             # first inside-radius pad.
             ci_local = (getattr(self, '_pending_chassis_info',
                                 None) or {})
-            inner_t_pbd = float(
+            # Per Coffee 2026-05-18 ("ground to wheel center?"):
+            # uniform `R + segmentsInnerThickness` for every
+            # wheel -- matches the homie chain.
+            _it_pbd = float(
                 ci_local.get('segmentsInnerThickness', 0.0)
                 or 0.0)
-            rs_inflated = [r + inner_t_pbd for r in rs]
+            rs_inflated = [r + _it_pbd for r in rs]
             if need_seed:
                 inst = _pbd.TrackChainPBD(
                     side_x=side_x,
@@ -7868,30 +8029,51 @@ class Viewer:
         # is the chassis-subdict (same handle the chain code
         # reads from above); fall back to 0.0 when the field is
         # missing.
-        ci_inner_t = float(ci.get('segmentsInnerThickness', 0.0)
-                            or 0.0)
-        # Per Coffee 2026-05-18 ("i dont want the chassis to
-        # stay level.  I want the chains to follow the drive
-        # wheels and not move faster or slower"): the chain
-        # WRAPS the drive sprocket at `R + inner_thickness`
-        # (per track_homie.build_chain_segments / SPLINE_CONSTRAINTS
-        # #3), so the drive sprocket must SPIN at the same radius
-        # for the rim surface to match the chain's linear speed.
-        # An earlier v1.231.17 attempt used the polygon-pitch
-        # formula `R_p = p / (2 * sin(pi / N))` for toothed wheels,
-        # which differs from `R + inner_thickness` by ~1-2% and
-        # produced visible chain-on-sprocket slip.  Pass an empty
-        # `sprocket_pitch_radii` so EVERY wheel (toothed or not)
-        # uses `R + inner_thickness` -- chain and rim move at the
-        # exact same surface speed, zero slip.
-        sp_radii = {}
-        try:
-            tp.advance_wheel_angles(
-                v_L, v_R, dt,
-                inner_thickness=ci_inner_t,
-                sprocket_pitch_radii=sp_radii)
-        except Exception:
-            pass
+        # Per Coffee 2026-05-18 ("apply inner to w_d wheels.
+        # add outer to W_L wheels.  leave other wheels as is..
+        # no offset", then "ground to wheel center?"): revert
+        # to UNIFORM `R + segmentsInnerThickness` inflation
+        # for every wheel.  Geometry: with the bottom-run pad
+        # sitting on the ground, the pad outer face is at y=0
+        # (ground), the hinge pin is at y=outer_thickness, the
+        # pad inner face / wheel rim is at y=(outer+inner), and
+        # the wheel center is at y=R+(outer+inner) above the
+        # ground.  Chain pitch radius from wheel center
+        # = wheel_center_height - hinge_pin_height
+        # = R + (outer + inner) - outer
+        # = R + inner.  Same formula around the drive sprocket
+        # and idler (pad inner face wraps the rim).
+        _ot = float(ci.get('segmentsOuterThickness', 0.0) or 0.0)
+        _it = float(ci.get('segmentsInnerThickness', 0.0) or 0.0)
+        sp_radii = {}  # empty -> advance_wheel_angles uses
+                       # `inner_thickness` for every wheel.
+        ci_outer_t = _it  # kept name for the chain s_offset
+                          # slave below; value is now inner_t.
+        # Per Coffee 2026-05-18 (F3 manual_A100_T49_latest.json
+        # showed chain_ds = 2 * chassis_dx): this function is
+        # called TWICE per render frame -- once from the pad
+        # render dispatch (~ line 6260) and once from the
+        # spline overlay (~ line 20107) -- so without a guard
+        # both `advance_wheel_angles` and the chain-s_offset
+        # slave below fire twice, doubling wheel spin AND
+        # chain advance.  Gate per `self.frame_count`.  First
+        # call this frame integrates; subsequent calls skip
+        # and just rebuild geometry from the already-current
+        # angle / s_offset state.
+        _f_now = int(getattr(self, 'frame_count', 0))
+        _f_last_int = int(getattr(self,
+                                  '_chain_last_integrated_frame',
+                                  -1))
+        _integrate_this_call = (_f_now != _f_last_int)
+        if _integrate_this_call:
+            self._chain_last_integrated_frame = _f_now
+            try:
+                tp.advance_wheel_angles(
+                    v_L, v_R, dt,
+                    inner_thickness=ci_outer_t,
+                    sprocket_pitch_radii=sp_radii)
+            except Exception:
+                pass
 
         # Per Coffee 2026-05-18 ("[chain] is locked to the
         # W_D wheels.  it can NOT move on those wheels"):
@@ -7910,7 +8092,8 @@ class Viewer:
             extras    = getattr(tp, 'extra_rotating_bones', None)
             ex_angles = getattr(tp, 'extra_rotating_angles_rad',
                                   None)
-            if (extras is not None
+            if (_integrate_this_call
+                    and extras is not None
                     and ex_angles is not None
                     and len(extras) == len(ex_angles)):
                 for _side_tok, _attr_off, _attr_prev in (
@@ -7933,17 +8116,14 @@ class Viewer:
                             break
                     if _drive_idx < 0:
                         continue
-                    # Use the SAME radius the drive sprocket
-                    # spins at (`R + inner_thickness`).  Since
-                    # `sp_radii` is empty (polygon-pitch override
-                    # dropped at v1.231.22 -- see the
-                    # `advance_wheel_angles` call above), this
-                    # is also the radius `advance_wheel_angles`
-                    # used for the angle integration.  Zero slip
-                    # between rim surface and chain pads.
+                    # Drive sprocket R = `R + inner_thickness`
+                    # (same value `advance_wheel_angles` used to
+                    # spin it).  Chain pads sit at the same
+                    # radius, so rim surface and chain advance
+                    # exactly match.
                     _Rp = max(
                         float(tp.extra_rotating_radii[
-                            _drive_idx]) + ci_inner_t, 1e-3)
+                            _drive_idx]) + ci_outer_t, 1e-3)
                     _cur_ang = float(ex_angles[_drive_idx])
                     _prev_ang = getattr(self, _attr_prev,
                                           _cur_ang)
@@ -7970,8 +8150,12 @@ class Viewer:
             # Belt-and-suspenders fallback: if the drive-angle
             # path failed for any reason, fall back to the old
             # v_L * dt accumulator so the chain still moves.
-            self._track_chain_s_offset_L += v_L * dt
-            self._track_chain_s_offset_R += v_R * dt
+            # Same once-per-frame gate as the angle integration
+            # above (function is called twice per render frame
+            # for pad + spline overlay).
+            if _integrate_this_call:
+                self._track_chain_s_offset_L += v_L * dt
+                self._track_chain_s_offset_R += v_R * dt
 
         # Per Coffee 2026-05-16 ("now, fix the segment stick as
         # before and it it will be peachy"): build a per-frame
@@ -8087,18 +8271,17 @@ class Viewer:
             if cached is not None and cached[0] == key:
                 arcs_3 = cached[1]
             else:
-                # Per Coffee 2026-05-16 ("add pad inner offset
-                # to R"): shift each wheel's wrap radius by the
-                # chassis XML's `<segmentsInnerThickness>` so
-                # the chain spline rides at the chain inner
-                # face rather than the wheel rim.  Default 0.0
-                # when the field is missing -- old behaviour.
-                inner_t = float(
+                # Per Coffee 2026-05-18 ("ground to wheel
+                # center?"): UNIFORM chain pitch radius =
+                # `R + segmentsInnerThickness` for every wheel,
+                # derived from the ground-to-wheel-center
+                # geometry (see header comment above).
+                _inner_t = float(
                     ci.get('segmentsInnerThickness', 0.0) or 0.0)
                 arcs_3 = _th.build_chain_segments(
                     bones, radii, chain_roles, side,
                     n_pads, float(seg_len),
-                    inner_thickness=inner_t)
+                    inner_thickness=_inner_t)
                 if arcs_3 is None:
                     setattr(self, cache_attr, None)
                     return None, None, None, None
@@ -8137,15 +8320,23 @@ class Viewer:
             # placement call -- the stored cumulative
             # `_track_chain_s_offset_<side>` keeps accumulating
             # `v * dt` cleanly without the bias baked in.
-            # Per Coffee 2026-05-18 ("disable all but 1, 2 and
-            # 3"): tooth-phase offset (#15) DISABLED -- s_offset
-            # is used as-is, no per-side phase shift to land a
-            # pad on sprocket tooth k=0.
-            if False:
-                tooth_syncs = ci.get('tooth_syncs') or {}
-                if tooth_syncs:
-                    s_offset -= _th.compute_tooth_phase_offset(
-                        arcs_3, tooth_syncs, side, n_pads)
+            # Per Coffee 2026-05-18 ("lets adopt center pad
+            # rotation at tangent and use the nudge to align
+            # the teeth to the chain"): re-enable the tooth-
+            # phase offset (#15 in SPLINE_CONSTRAINTS).  The
+            # per-pad polygon-correction rotation (v1.231.36 /
+            # v1.231.38) handles the geometric "center pad at
+            # tangent" placement.  This block applies the small
+            # `<startAngle>` nudge from chassis XML's
+            # `<teethSyncs>` -- converted to along-chain arc-
+            # length via `compute_tooth_phase_offset` -- so a
+            # chain pad lands exactly on tooth k=0 of the first
+            # drive sprocket on this side.  Tanks without
+            # `<teethSyncs>` fall through to the zero offset.
+            tooth_syncs = ci.get('tooth_syncs') or {}
+            if tooth_syncs:
+                s_offset -= _th.compute_tooth_phase_offset(
+                    arcs_3, tooth_syncs, side, n_pads)
             return _th.assemble_chain_arrays(
                 arcs_3, gauge_x, side, n_pads, s_offset)
 
@@ -8196,18 +8387,23 @@ class Viewer:
         # directions from centre" Coffee asked for.  Pads on
         # the road-wheel arcs now match the rotation rate of
         # pads on the drive / idler wrap.
-        # Per Coffee 2026-05-18 ("disable all but 1, 2 and 3"):
-        # central-chord tangent rebuild (#11) DISABLED -- pads
-        # keep their `_place_pads` forward-chord tangents.
-        if False:
-            for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
-                if pos is None or tan is None or len(pos) < 2:
-                    continue
-                chord = (np.roll(pos, -1, axis=0)
-                         - np.roll(pos, +1, axis=0))
-                nrm = np.linalg.norm(chord, axis=1, keepdims=True)
-                chord = chord / np.maximum(nrm, 1e-9)
-                tan[:] = chord.astype(tan.dtype)
+        # Per Coffee 2026-05-19 ("segments should follow the
+        # spline angle if they are on the ground"): re-enable
+        # the central-chord tangent rebuild (#11 in
+        # SPLINE_CONSTRAINTS) so each pad's forward axis
+        # samples `pos[i+1] - pos[i-1]` instead of the forward
+        # chord `pos[i+1] - pos[i]`.  Bottom-run pads (and all
+        # other pads) now follow the SMOOTHED spline tangent,
+        # changing by Δ/2 between consecutive pads instead of
+        # the full Δ.
+        for pos, tan in ((lp_L, lt_L), (lp_R, lt_R)):
+            if pos is None or tan is None or len(pos) < 2:
+                continue
+            chord = (np.roll(pos, -1, axis=0)
+                     - np.roll(pos, +1, axis=0))
+            nrm = np.linalg.norm(chord, axis=1, keepdims=True)
+            chord = chord / np.maximum(nrm, 1e-9)
+            tan[:] = chord.astype(tan.dtype)
 
         # Per Coffee 2026-05-11 ("we have breaks in our chain?
         # are we sure we are in order?"): apply the authored
@@ -8337,6 +8533,74 @@ class Viewer:
         self._homie_onarc_L  = la_L
         self._homie_hubs_R   = lh_R
         self._homie_onarc_R  = la_R
+        # Per Coffee 2026-05-19 ("our pads faces are not rotated
+        # to the W_L wheels center.  no tangent.  investigate"):
+        # for equal-R road wheels on flat ground, the geometric
+        # arc subtended per chord is 0° -- track_homie marks
+        # those pads as `on_arc=False` and the polygon-correction
+        # loop in _render_track_pad_body skips them.  Result:
+        # bottom-run pad faces sit flat against the chord with
+        # no tilt toward any road-wheel centre.
+        #
+        # Fix: build AUGMENTED hub + on_arc arrays where every
+        # line pad is assigned its NEAREST road-wheel hub (by
+        # chassis-local YZ distance) and re-flagged as "treat
+        # as arc".  Saved to separate `_poly_*` stashes so the
+        # original `_homie_*` arrays stay clean for the recorder
+        # and other consumers that need true arc/line semantics.
+        def _augment_with_road_wheels(side_token, pos_arr,
+                                       hubs_arr, onarc_arr):
+            if (pos_arr is None or hubs_arr is None
+                    or onarc_arr is None):
+                return hubs_arr, onarc_arr
+            road_names = (chain_roles.get(
+                f'road_wheels_{side_token}') or [])
+            if not road_names:
+                return hubs_arr, onarc_arr
+            road_yz = []
+            for nm in road_names:
+                b = bones.get(nm)
+                if b is None:
+                    b = bones.get(nm + '_BlendBone')
+                if b is not None:
+                    # bones stored as (X, Y, Z) chassis-local.
+                    # Note: assemble_chain_arrays stores hub Z
+                    # as `hub[0]` (= 2D X) and Y as `hub[1]`,
+                    # then flips Z when packing to (side_x, Y, Z).
+                    # Here we use chassis-local (Y, Z) directly.
+                    road_yz.append((float(b[1]), float(b[2])))
+            if not road_yz:
+                return hubs_arr, onarc_arr
+            rh = np.asarray(road_yz, dtype=np.float32)
+            hubs_aug  = np.asarray(hubs_arr, dtype=np.float32).copy()
+            onarc_aug = np.asarray(onarc_arr, dtype=bool).copy()
+            line_mask = ~onarc_aug
+            if not line_mask.any():
+                return hubs_aug, onarc_aug
+            pos_f = np.asarray(pos_arr, dtype=np.float32)
+            pad_yz = pos_f[line_mask, 1:3]            # (M, 2)
+            dists = np.linalg.norm(
+                pad_yz[:, None, :] - rh[None, :, :],
+                axis=2)                                # (M, K)
+            nearest = np.argmin(dists, axis=1)         # (M,)
+            line_idx = np.where(line_mask)[0]
+            # Side X gauge for the augmented hubs uses the pad's
+            # own X (= side_x as set by assemble_chain_arrays).
+            hubs_aug[line_idx, 0] = pos_f[line_idx, 0]
+            hubs_aug[line_idx, 1] = rh[nearest, 0]
+            # NB: assemble_chain_arrays stored hub Z as
+            # `float(hub_or_none[0])` (= the 2D X coord from
+            # _collect_wheels, which is chassis-local Z).
+            # That value matches the raw chassis-local Z, so
+            # we can pass it through directly.
+            hubs_aug[line_idx, 2] = rh[nearest, 1]
+            onarc_aug[line_idx] = True
+            return hubs_aug, onarc_aug
+
+        self._poly_hubs_L,  self._poly_onarc_L = (
+            _augment_with_road_wheels('L', lp_L, lh_L, la_L))
+        self._poly_hubs_R,  self._poly_onarc_R = (
+            _augment_with_road_wheels('R', lp_R, lh_R, la_R))
         # Per Coffee 2026-05-16 ("F3 is bound to record.  lets
         # record the seg positions that are affected by one of
         # the bottom wheels"): stash the per-frame chain pad
@@ -8693,48 +8957,281 @@ class Viewer:
     # =================================================================
 
     def _xml_bar_height(self):
-        """Total pixel height the XML bar reserves at the top of
-        the central viewport this frame.  When collapsed: just
-        the header row.  When expanded: header + tab row +
-        five content lines.
+        """Total pixel height the button bar reserves at the
+        top of the central viewport.  Per Coffee 2026-05-20
+        ("after tank loads only?") -- bar is hidden entirely
+        until a tank is loaded (= `_xml_bar_paths` populated).
+        Returns 0 in that case so the 3-D viewport stretches
+        the full window height and no empty strip sits at the
+        top.
         """
-        if not getattr(self, '_xml_bar_expanded', False):
-            return self._XML_BAR_HEADER_H
-        return (self._XML_BAR_HEADER_H
-                + self._XML_BAR_TAB_H
-                + self._XML_BAR_LINE_H * self._XML_BAR_LINES)
+        if not getattr(self, '_xml_bar_paths', None):
+            return 0
+        return self._XML_BAR_HEADER_H
 
     def _xml_bar_hit(self, mx, my):
-        """Return what the user clicked inside the XML bar, or
-        None if the click missed.
-
-        Returns:
-            ('header', None) -- header row (toggle expand)
-            ('tab', idx)     -- tab idx in _XML_BAR_TABS
-            None             -- outside the bar
+        """Return ('button', tab_idx) when the cursor lands on
+        a button, ('bar', None) when it's anywhere else inside
+        the bar (so the cursor stays visible + camera clicks
+        get swallowed), or None when outside.  `tab_idx` indexes
+        into `_XML_BAR_TABS` and is the same key the click
+        handler uses to resolve component / kind / file path.
         """
         hx, hy, hw, hh = self._xml_bar_header_rect
         if hw == 0 or hh == 0:
             return None
-        if hx <= mx < hx + hw and hy <= my < hy + hh:
-            return ('header', None)
-        if getattr(self, '_xml_bar_expanded', False):
-            for rect, idx in self._xml_bar_tab_rects:
-                rx, ry, rw, rh = rect
-                if rx <= mx < rx + rw and ry <= my < ry + rh:
-                    return ('tab', idx)
-        return None
+        if not (hx <= mx < hx + hw and hy <= my < hy + hh):
+            return None
+        for rect, idx in self._xml_bar_tab_rects:
+            rx, ry, rw, rh = rect
+            if rx <= mx < rx + rw and ry <= my < ry + rh:
+                return ('button', idx)
+        return ('bar', None)
 
     def _on_xml_bar_click(self, hit):
         """Apply the click action returned by `_xml_bar_hit`."""
         action, payload = hit
-        if action == 'header':
-            self._xml_bar_expanded = not self._xml_bar_expanded
-            # Reflow so the 3D viewport reflects the new
-            # bar height immediately.
-            self._on_resize(self.width, self.height)
-        elif action == 'tab':
-            self._xml_bar_active_idx = int(payload)
+        if action == 'button':
+            tab_idx = int(payload)
+            self._xml_bar_active_idx = tab_idx
+            self._open_xml_editor_for_active_tab()
+
+    # ----- ImGui-backed XML editor (Coffee 2026-05-20) ------------
+
+    def _open_xml_editor_for_active_tab(self):
+        """Pop the imgui editor window for the currently active
+        XML tab.  Resolves the tab's component / file path,
+        reads + pretty-prints the XML buffer (via the same
+        `_xml_bar_load_content` pipeline the in-bar preview
+        uses), and hands the buffer to `self.xml_editor` along
+        with a save callback that writes back to
+        `<project_root>/edited_xml/<comp>.<kind>.xml`.
+        """
+        tab_idx = int(self._xml_bar_active_idx)
+        mapping = self._xml_bar_tab_mapping(tab_idx)
+        if mapping is None:
+            return
+        comp_label, kind = mapping
+        rows = self._xml_bar_load_content(tab_idx)
+        # `rows` is what the in-bar preview shows -- one
+        # ('line', text) entry per pretty-printed line.  Join
+        # them back into a single XML buffer for the editor.
+        text = '\n'.join(t for k, t in rows if k == 'line')
+        path = ((getattr(self, '_xml_bar_paths', None) or {})
+                .get(comp_label, {})
+                .get(kind, ''))
+        label = f"{comp_label}.{kind}"
+        def _save_cb(new_text, _tab=tab_idx,
+                     _comp=comp_label, _kind=kind):
+            self._xml_editor_save(_tab, _comp, _kind, new_text)
+        try:
+            opened = self.xml_editor.open_tab(
+                tab_idx, label, path, text, _save_cb,
+                self.width, self.height)
+        except Exception as exc:
+            import traceback as _tb
+            _tb.print_exc()
+            try:
+                self.log(
+                    f"XML editor open failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    color=(255, 120, 120))
+            except Exception:
+                pass
+            return
+        if not opened:
+            try:
+                self.log(
+                    "XML editor unavailable -- run go.bat or "
+                    "`pip install imgui-bundle`, then restart.",
+                    color=(255, 180, 120))
+            except Exception:
+                pass
+
+    def _resolve_xml_save_path(self, comp_label, kind):
+        """Compute the res_mods-side destination for the edited
+        XML.  Strategy:
+            * pull the source path out of `_xml_bar_paths`
+            * find `vehicles/...` (or `vehicles\\...`) inside it
+            * append that relative path to `res_mods_root`
+        Falls back to `<res_mods>/<comp>.<kind>.xml` if the
+        source isn't under a `vehicles/` subtree.  Returns the
+        absolute path or None if `res_mods_root` is unset.
+        """
+        root = getattr(self, '_xml_bar_res_mods_root', '') or ''
+        if not root:
+            # Fall back to the cfg value if load_vehicle never
+            # stashed one (e.g. extract-only sessions).
+            root = (self._cfg.get('res_mods', '') or '').strip()
+        if not root:
+            return None
+        src = ((getattr(self, '_xml_bar_paths', None) or {})
+               .get(comp_label, {}) .get(kind, '') or '')
+        # Find the vehicles/ subtree inside the source path so
+        # the destination mirrors the WoT res tree.
+        rel = None
+        if src:
+            norm = src.replace('\\', '/')
+            low  = norm.lower()
+            idx  = low.find('/vehicles/')
+            if idx < 0 and low.startswith('vehicles/'):
+                idx = -1   # treat 'vehicles/...' at start as relative
+            if idx >= 0:
+                rel = norm[idx + 1:]
+            elif low.startswith('vehicles/'):
+                rel = norm
+        if not rel:
+            # Source isn't under vehicles/ -- drop a same-name
+            # file at the res_mods root so the user still gets
+            # something predictable.
+            rel = f"{comp_label}.{kind}.xml"
+        return os.path.join(root, rel.replace('/', os.sep))
+
+    def _confirm_dialog(self, title, message, default_yes=True):
+        """Tk askyesno helper with a transient hidden root so we
+        don't leak a window each call.  Returns True / False; if
+        Tk isn't available, falls back to True for create-folder
+        prompts (`default_yes`) and False for everything else.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+        except ImportError:
+            return bool(default_yes)
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes('-topmost', True)
+        except Exception:
+            pass
+        try:
+            ans = messagebox.askyesno(
+                title, message, parent=root)
+        except Exception:
+            ans = False
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return bool(ans)
+
+    def _xml_editor_save(self, tab_idx, comp_label, kind, text):
+        """Write the editor's buffer to the res_mods-side
+        destination computed from the source file's
+        `vehicles/.../` path.  Prompts to create the parent
+        directory if it doesn't exist, and to overwrite an
+        existing file.  Per Coffee 2026-05-20.
+        """
+        out_path = self._resolve_xml_save_path(comp_label, kind)
+        if out_path is None:
+            try:
+                self.log(
+                    "XML save: no res_mods folder configured. "
+                    "Set one in the launcher / config before saving.",
+                    color=(255, 180, 120))
+            except Exception:
+                pass
+            return
+        out_dir = os.path.dirname(out_path)
+        if not os.path.isdir(out_dir):
+            create = self._confirm_dialog(
+                "Create folder?",
+                f"The destination folder does not exist:\n\n"
+                f"{out_dir}\n\n"
+                f"Create it now?",
+                default_yes=True)
+            if not create:
+                try:
+                    self.log("XML save: cancelled (no folder).",
+                             color=(220, 200, 120))
+                except Exception:
+                    pass
+                return
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as exc:
+                try:
+                    self.log(
+                        f"XML save: mkdir failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        color=(255, 120, 120))
+                except Exception:
+                    pass
+                return
+        if os.path.exists(out_path):
+            overwrite = self._confirm_dialog(
+                "Overwrite file?",
+                f"This file already exists:\n\n"
+                f"{out_path}\n\n"
+                f"Overwrite with the edited version?",
+                default_yes=False)
+            if not overwrite:
+                try:
+                    self.log("XML save: cancelled (no overwrite).",
+                             color=(220, 200, 120))
+                except Exception:
+                    pass
+                return
+        try:
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+        except Exception as exc:
+            try:
+                self.log(
+                    f"XML save failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    color=(255, 120, 120))
+            except Exception:
+                pass
+            return
+        # Refresh the in-bar preview cache so the next bar redraw
+        # shows the edited text.
+        cache = getattr(self, '_xml_bar_content_cache', None)
+        if cache is not None:
+            cache[int(tab_idx)] = [
+                ('line', ln) for ln in text.splitlines()
+                if ln.strip()
+            ] or [('line', '(empty)')]
+        self._xml_bar_dirty_tabs.discard(int(tab_idx))
+        try:
+            self.log(f"saved -> {out_path}",
+                     color=(120, 220, 180))
+        except Exception:
+            pass
+
+    # Compat shim for the load-vehicle reset path which used to
+    # cancel an in-flight inline edit.  The imgui editor manages
+    # its own per-tab state and is closed on tank swap below.
+    def _xml_bar_edit_cancel(self):
+        if getattr(self, 'xml_editor', None) is not None:
+            for idx in list(self.xml_editor._tabs.keys()):
+                self.xml_editor.close_tab(idx)
+
+    def _xml_bar_wheel_hit(self, mx, my, wheel_y):
+        """Scroll the XML-bar content if the cursor is hovering
+        over its content area.  Returns True if the event was
+        consumed.  `wheel_y` follows pygame MOUSEWHEEL.event.y
+        (positive = wheel forward = scroll up).
+        """
+        if not getattr(self, '_xml_bar_expanded', False):
+            return False
+        rect = getattr(self, '_xml_bar_content_rect',
+                        (0, 0, 0, 0))
+        rx, ry, rw, rh = rect
+        if rw <= 0 or rh <= 0:
+            return False
+        if not (rx <= mx < rx + rw and ry <= my < ry + rh):
+            return False
+        rows = self._xml_bar_load_content(
+            int(self._xml_bar_active_idx))
+        # Three lines per wheel tick.  Wheel-forward (positive y)
+        # scrolls UP (toward top of file) = decrement scroll.
+        step = 3
+        self._xml_bar_scroll = max(0, min(
+            len(rows) - 1,
+            int(getattr(self, '_xml_bar_scroll', 0))
+            - int(wheel_y) * step))
+        return True
 
     def _xml_bar_make_tex(self, text, color):
         """Cached single-line texture render via the UI helper."""
@@ -8743,18 +9240,110 @@ class Viewer:
                 text, color)
         return self._xml_bar_tab_texs[text]
 
-    def _render_xml_bar(self, width, height):
-        """Draw the collapsible XML-tab bar at the top of the
-        central viewport.  Called from `render()` AFTER the UI
-        pass so it sits over any UI that bleeds into the
-        central area.
+    # ----- XML-bar content loading + parsing ----------------------
 
-        Layout (top-down):
-            * Header row (always visible): chevron + title.
-            * Tab row (expanded only): one button per
-              _XML_BAR_TABS entry, None = spacer gap.
-            * Content area (expanded only): 5 lines of
-              placeholder text.
+    # Mapping derived from `_XML_BAR_TABS` so the two stay in
+    # sync automatically -- pull the (comp_label, kind) from
+    # the tuple, skipping the None spacers.
+    @classmethod
+    def _xml_bar_tab_mapping(cls, tab_idx):
+        try:
+            entry = cls._XML_BAR_TABS[tab_idx]
+        except (IndexError, TypeError):
+            return None
+        if entry is None:
+            return None
+        _label, comp_label, kind = entry
+        return (comp_label, kind)
+
+    def _xml_bar_load_content(self, tab_idx):
+        """Return a list of (kind, text) lines for the requested
+        tab.  `kind` is 'line' for a regular row and 'divider'
+        for a horizontal separator drawn between primitive
+        groups.  Cached per tab so we don't re-decode the
+        BWXML each frame.
+        """
+        paths = getattr(self, '_xml_bar_paths', None) or {}
+        cache = getattr(self, '_xml_bar_content_cache', None)
+        if cache is None:
+            cache = {}
+            self._xml_bar_content_cache = cache
+        if tab_idx in cache:
+            return cache[tab_idx]
+        mapping = self._xml_bar_tab_mapping(tab_idx)
+        if mapping is None:
+            cache[tab_idx] = [('line',
+                               '(no XML mapped to this tab)')]
+            return cache[tab_idx]
+        comp_label, kind = mapping
+        comp = paths.get(comp_label) or {}
+        fpath = comp.get(kind)
+        if not fpath or not os.path.isfile(fpath):
+            cache[tab_idx] = [
+                ('line',
+                 f'({comp_label}.{kind}: no file loaded)')]
+            return cache[tab_idx]
+        try:
+            with open(fpath, 'rb') as fh:
+                raw = fh.read()
+        except Exception as exc:
+            cache[tab_idx] = [
+                ('line',
+                 f'(read error: {type(exc).__name__}: '
+                 f'{exc})')]
+            return cache[tab_idx]
+        # BWXML files decode via `decode_bwxml`; plain XML
+        # files use UTF-8.  Loaders ship both helpers.
+        try:
+            from .loaders import decode_bwxml, is_bwxml
+            if is_bwxml(raw):
+                text = decode_bwxml(raw)
+            else:
+                text = raw.decode('utf-8', errors='replace')
+        except Exception as exc:
+            cache[tab_idx] = [
+                ('line',
+                 f'(decode error: {type(exc).__name__}: '
+                 f'{exc})')]
+            return cache[tab_idx]
+        # Pretty-print so the XML has line breaks + indent.
+        # minidom is fastest, but it chokes on malformed
+        # markup.  Fall back to a naive `>` -> `>\n` split.
+        pretty = None
+        try:
+            import xml.dom.minidom as _md
+            pretty = _md.parseString(
+                text).toprettyxml(indent='  ')
+        except Exception:
+            pretty = None
+        if pretty is None:
+            # Naive line break after every closing tag boundary.
+            pretty = text.replace('><', '>\n<')
+        # Per Coffee 2026-05-20 ("remove the line separators.  I
+        # need to be able to edit the text"): no more dividers.
+        # Every non-blank line of pretty-printed XML becomes one
+        # editable row.
+        rows = []
+        for line in pretty.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                # Suppress all-blank rows from minidom.
+                continue
+            rows.append(('line', line.rstrip()))
+        if not rows:
+            rows = [('line',
+                     '(empty decoded XML)')]
+        cache[tab_idx] = rows
+        return rows
+
+    def _render_xml_bar(self, width, height):
+        """Draw the XML button strip at the top of the central
+        viewport.  Per Coffee 2026-05-20 ("change the tabs to
+        just buttons that open each part") -- one row of click-
+        to-open buttons, one per entry in `_XML_BAR_TABS` (None
+        = spacer gap).  Each button click pops the imgui editor
+        on the matching file.  No more expand/collapse, no
+        inline content preview, no resize drag.
         """
         ui = self.ui
         if ui is None or not hasattr(ui, 'shader'):
@@ -8763,6 +9352,10 @@ class Viewer:
         scene_w = max(1, width - scene_x - self.TREE_PANEL_W)
         bar_h   = self._xml_bar_height()
         if scene_w <= 0 or bar_h <= 0:
+            # No tank loaded -- make sure stale hit rects from
+            # a previous load can't false-positive.
+            self._xml_bar_header_rect = (0, 0, 0, 0)
+            self._xml_bar_tab_rects   = []
             return
         # 2D setup -- mirrors the status-overlay path.
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -8773,44 +9366,95 @@ class Viewer:
         ui.shader.use()
         ui.shader.set_mat4('projection', ui._ortho(width, height))
         glBindVertexArray(ui.quad_vao)
-        # Bar background (slightly transparent dark slate).
+        # Bar background.
         ui.shader.set_int('u_use_tex', 0)
         ui.shader.set_vec4('u_color',
                            0.12, 0.14, 0.18, 0.92)
         ui._draw_quad(scene_x, 0, scene_w, bar_h)
-        # Header row -- chevron + "The Xml Files" title.
-        hdr_h = self._XML_BAR_HEADER_H
-        # Subtle separator under the header.
+        # Subtle separator at the bottom edge.
         ui.shader.set_vec4('u_color',
                            0.30, 0.34, 0.42, 0.90)
-        ui._draw_quad(scene_x, hdr_h - 1, scene_w, 1)
-        # Chevron glyph (cached).
-        if self._xml_bar_chevron_d is None:
-            self._xml_bar_chevron_d = ui._make_tex(
-                'v', (220, 225, 235))
-            self._xml_bar_chevron_r = ui._make_tex(
-                '>', (220, 225, 235))
-        ch = (self._xml_bar_chevron_d
-              if self._xml_bar_expanded
-              else self._xml_bar_chevron_r)
-        if ch is not None and ch[0]:
-            tid, tw, th = ch
-            ui._draw_tex(tid, scene_x + 8,
-                          (hdr_h - th) // 2, tw, th)
-        # Title.
-        if self._xml_bar_title_tex is None:
-            self._xml_bar_title_tex = ui._make_tex(
-                'The Xml Files', (240, 245, 255))
-        if (self._xml_bar_title_tex is not None
-                and self._xml_bar_title_tex[0]):
-            tid, tw, th = self._xml_bar_title_tex
-            ui._draw_tex(tid, scene_x + 26,
-                          (hdr_h - th) // 2, tw, th)
+        ui._draw_quad(scene_x, bar_h - 1, scene_w, 1)
         # Update header hit rect for click handling.
-        self._xml_bar_header_rect = (scene_x, 0, scene_w, hdr_h)
-        # Tab row + content area (only when expanded).
+        self._xml_bar_header_rect = (scene_x, 0, scene_w, bar_h)
+        # Build the per-button rects + draw each button.
         self._xml_bar_tab_rects = []
-        if self._xml_bar_expanded:
+        btn_h    = self._XML_BAR_BTN_H
+        btn_pad  = self._XML_BAR_BTN_PAD
+        btn_y    = (bar_h - btn_h) // 2
+        spacer_w = 16
+        cx       = scene_x + 8
+        for idx, entry in enumerate(self._XML_BAR_TABS):
+            if entry is None:
+                cx += spacer_w
+                continue
+            label, comp_label, kind = entry
+            # Mark unavailable buttons (file missing) so it's
+            # visually obvious which slot has nothing to edit.
+            path = ((getattr(self, '_xml_bar_paths',
+                              None) or {})
+                    .get(comp_label, {})
+                    .get(kind))
+            is_dirty   = idx in self._xml_bar_dirty_tabs
+            has_file   = bool(path)
+            is_active  = (idx == self._xml_bar_active_idx)
+            # Compute button width from label text -- single-
+            # row UI fonts vary, so size to the texture.
+            lbl_text  = (label + ' *') if is_dirty else label
+            if is_dirty:
+                lbl_color = (255, 210, 130)
+            elif not has_file:
+                lbl_color = (120, 125, 135)
+            else:
+                lbl_color = (220, 225, 235)
+            lbl = self._xml_bar_make_tex(lbl_text, lbl_color)
+            tw = lbl[1] if (lbl and lbl[0]) else 60
+            th = lbl[2] if (lbl and lbl[0]) else 12
+            btn_w = tw + btn_pad * 2
+            # Button background.  Active = last-opened tab gets
+            # a slightly brighter fill so the user can see which
+            # button the imgui editor was launched from.
+            if not has_file:
+                ui.shader.set_vec4(
+                    'u_color', 0.13, 0.15, 0.18, 1.0)
+            elif is_active:
+                ui.shader.set_vec4(
+                    'u_color', 0.25, 0.38, 0.55, 1.0)
+            else:
+                ui.shader.set_vec4(
+                    'u_color', 0.18, 0.22, 0.28, 1.0)
+            ui._draw_quad(cx, btn_y, btn_w, btn_h)
+            # Hover outline for affordance.
+            try:
+                mx, my = pygame.mouse.get_pos()
+                hovered = (cx <= mx < cx + btn_w
+                           and btn_y <= my < btn_y + btn_h)
+            except Exception:
+                hovered = False
+            if hovered and has_file:
+                ui.shader.set_vec4(
+                    'u_color', 0.55, 0.72, 0.95, 0.95)
+                # 1px outline around the button.
+                ui._draw_quad(cx, btn_y, btn_w, 1)
+                ui._draw_quad(cx, btn_y + btn_h - 1,
+                               btn_w, 1)
+                ui._draw_quad(cx, btn_y, 1, btn_h)
+                ui._draw_quad(cx + btn_w - 1, btn_y,
+                               1, btn_h)
+            # Draw the label.
+            if lbl is not None and lbl[0]:
+                tid, _tw, _th = lbl
+                ui._draw_tex(
+                    tid, cx + (btn_w - _tw) // 2,
+                    btn_y + (btn_h - _th) // 2,
+                    _tw, _th)
+            # Record the hit rect (always, even for missing
+            # files; the click handler logs a clear "no file"
+            # message instead of silently doing nothing).
+            self._xml_bar_tab_rects.append(
+                ((cx, btn_y, btn_w, btn_h), idx))
+            cx += btn_w + 4
+        if False:
             tab_y = hdr_h
             tab_h = self._XML_BAR_TAB_H
             tab_w = 88
@@ -8830,9 +9474,15 @@ class Viewer:
                         'u_color', 0.18, 0.22, 0.28, 1.0)
                 ui._draw_quad(cx, tab_y + 2,
                                tab_w, tab_h - 4)
-                # Tab label.
+                # Tab label.  Dirty tabs (unsaved edits) get a
+                # trailing "*" + a warm color so the user can
+                # see at a glance which tabs need Ctrl+S.
+                is_dirty = idx in self._xml_bar_dirty_tabs
+                lbl_text  = (name + ' *') if is_dirty else name
+                lbl_color = ((255, 210, 130) if is_dirty
+                             else (220, 225, 235))
                 lbl = self._xml_bar_make_tex(
-                    name, (220, 225, 235))
+                    lbl_text, lbl_color)
                 if lbl is not None and lbl[0]:
                     tid, tw, th = lbl
                     ui._draw_tex(
@@ -8842,21 +9492,155 @@ class Viewer:
                 self._xml_bar_tab_rects.append(
                     ((cx, tab_y, tab_w, tab_h), idx))
                 cx += tab_w + 2
-            # Content area: 5 lines of placeholder text.
+            # Content area -- show the active tab's XML lines.
             content_y = tab_y + tab_h
-            content_h = self._XML_BAR_LINE_H * self._XML_BAR_LINES
+            n_lines = int(getattr(
+                self, '_xml_bar_lines',
+                self._XML_BAR_LINES_DEFAULT))
+            content_h = self._XML_BAR_LINE_H * n_lines
             ui.shader.set_vec4('u_color',
                                0.08, 0.10, 0.13, 0.95)
             ui._draw_quad(scene_x, content_y,
                            scene_w, content_h)
-            placeholder = self._xml_bar_make_tex(
-                '(content placeholder -- '
-                'tab loading wires next)',
-                (140, 150, 165))
-            if placeholder is not None and placeholder[0]:
-                tid, tw, th = placeholder
-                ui._draw_tex(tid, scene_x + 10,
-                              content_y + 6, tw, th)
+            rows = self._xml_bar_load_content(
+                int(self._xml_bar_active_idx))
+            scroll = max(0, int(getattr(
+                self, '_xml_bar_scroll', 0)))
+            scroll = min(scroll, max(
+                0, len(rows) - n_lines))
+            line_h = self._XML_BAR_LINE_H
+            line_y = content_y + 2
+            line_color   = (210, 218, 228)
+            edit_color   = (255, 240, 200)
+            divider_rgba = (0.40, 0.50, 0.66, 0.95)
+            active_tab = int(self._xml_bar_active_idx)
+            edit_row = (self._xml_bar_edit_row
+                        if self._xml_bar_edit_tab == active_tab
+                        else None)
+            for row_idx in range(scroll,
+                                  min(len(rows),
+                                       scroll + n_lines)):
+                kind, txt = rows[row_idx]
+                if kind == 'divider':
+                    ui.shader.set_int('u_use_tex', 0)
+                    ui.shader.set_vec4('u_color', *divider_rgba)
+                    ui._draw_quad(scene_x + 6,
+                                   line_y + line_h // 2,
+                                   scene_w - 12, 1)
+                else:
+                    is_editing = (edit_row == row_idx)
+                    if is_editing:
+                        # Highlight strip behind the editing row
+                        # so it reads as the active field.
+                        ui.shader.set_int('u_use_tex', 0)
+                        ui.shader.set_vec4(
+                            'u_color', 0.18, 0.22, 0.30, 0.95)
+                        ui._draw_quad(scene_x + 2, line_y - 1,
+                                       scene_w - 4, line_h)
+                        # Source the live buffer + caret position
+                        # for this row.
+                        display_txt = self._xml_bar_edit_text
+                        caret_col   = self._xml_bar_edit_cursor
+                    else:
+                        display_txt = txt
+                        caret_col   = None
+                    if display_txt or is_editing:
+                        # Trim long lines so we don't blow up
+                        # the texture cache or scroll off the
+                        # right edge.  Visible content area is
+                        # roughly (scene_w / 7) characters wide
+                        # at the current font.
+                        max_chars = max(40, scene_w // 7)
+                        # Scroll the displayed slice horizontally
+                        # so the caret stays visible while typing
+                        # past the right edge.
+                        h_off = 0
+                        if is_editing and caret_col > max_chars - 4:
+                            h_off = caret_col - (max_chars - 4)
+                        clipped = display_txt[h_off:]
+                        if len(clipped) > max_chars:
+                            clipped = clipped[:max_chars - 1] + '…'
+                        tex = self._xml_bar_make_tex(
+                            clipped,
+                            edit_color if is_editing else line_color)
+                        if tex is not None and tex[0]:
+                            tid, tw, th = tex
+                            ui._draw_tex(
+                                tid, scene_x + 10,
+                                line_y, tw, th)
+                        if is_editing and caret_col is not None:
+                            # Approximate monospace caret X via
+                            # the same scene_w / 7 heuristic the
+                            # trim uses.  Good enough for the UI
+                            # font; we don't have per-glyph
+                            # metrics handy.
+                            char_w = 7
+                            caret_x = (scene_x + 10
+                                       + (caret_col - h_off) * char_w)
+                            ui.shader.set_int('u_use_tex', 0)
+                            ui.shader.set_vec4(
+                                'u_color', 1.0, 0.95, 0.55, 0.95)
+                            ui._draw_quad(caret_x, line_y,
+                                           1, line_h - 2)
+                            # Restore tex sampling for the next
+                            # row's texture draw.
+                            ui.shader.set_int('u_use_tex', 1)
+                line_y += line_h
+            # Footer: scroll indicator + file path hint.
+            mapping = self._XML_BAR_TAB_TO_KIND.get(
+                int(self._xml_bar_active_idx))
+            footer_color = (140, 150, 165)
+            if mapping is not None:
+                comp_label, kind = mapping
+                path = ((getattr(self, '_xml_bar_paths',
+                                   None) or {})
+                         .get(comp_label, {})
+                         .get(kind))
+                if path:
+                    short = os.path.basename(path)
+                    foot = (f"{comp_label}.{kind}  ({short})  "
+                            f"line {scroll + 1}-"
+                            f"{min(scroll + n_lines, len(rows))} "
+                            f"of {len(rows)}")
+                else:
+                    foot = f"{comp_label}.{kind}  (not loaded)"
+                tex = self._xml_bar_make_tex(foot, footer_color)
+                if tex is not None and tex[0]:
+                    tid, tw, th = tex
+                    ui._draw_tex(
+                        tid, scene_x + 10,
+                        content_y + content_h - th - 2,
+                        tw, th)
+            # Remember rect so mouse-wheel scroll knows
+            # whether the cursor is over the content area.
+            self._xml_bar_content_rect = (
+                scene_x, content_y, scene_w, content_h)
+            # Per Coffee 2026-05-20 ("make the Xml Files sizable
+            # drag"): horizontal drag-handle strip at the very
+            # bottom of the expanded bar.  Lighter colour +
+            # subtle inner line so it reads as draggable.  The
+            # `_xml_bar_resize_rect` is used for hit-testing.
+            resize_y = content_y + content_h
+            resize_h = self._XML_BAR_RESIZE_H
+            handle_rgba = (
+                (0.34, 0.42, 0.55, 0.95)
+                if self._xml_bar_resize_drag
+                else (0.22, 0.27, 0.34, 0.95))
+            ui.shader.set_int('u_use_tex', 0)
+            ui.shader.set_vec4('u_color', *handle_rgba)
+            ui._draw_quad(scene_x, resize_y, scene_w, resize_h)
+            # Thin highlight pip in the middle so the handle
+            # reads as draggable regardless of theme tint.
+            ui.shader.set_vec4(
+                'u_color', 0.55, 0.65, 0.80, 0.95)
+            pip_w = 40
+            ui._draw_quad(scene_x + (scene_w - pip_w) // 2,
+                           resize_y + resize_h // 2,
+                           pip_w, 1)
+            self._xml_bar_resize_rect = (
+                scene_x, resize_y, scene_w, resize_h)
+        else:
+            self._xml_bar_resize_rect = (0, 0, 0, 0)
         ui.shader.set_int('u_use_tex', 0)
         glBindVertexArray(0)
 
@@ -10185,6 +10969,20 @@ class Viewer:
                     over_ui = True
             except Exception:
                 pass
+        # Per Coffee 2026-05-20 ("i must have a cursor when in
+        # the editors window"): the imgui XML editor lives over
+        # the 3D viewport but is its own modal-ish window.  Any
+        # time at least one editor window is open AND imgui is
+        # capturing the mouse (i.e. the cursor is inside the
+        # editor window's chrome), force the OS cursor visible.
+        if not over_ui:
+            try:
+                xed = getattr(self, 'xml_editor', None)
+                if (xed is not None and xed.is_active()
+                        and xed.wants_mouse()):
+                    over_ui = True
+            except Exception:
+                pass
         if over_ui:
             want_visible = True
         else:
@@ -10963,29 +11761,28 @@ class Viewer:
         Safe to call when no tank is loaded -- silently does
         nothing if pivots haven't been captured yet.
         """
-        # Per Coffee 2026-05-14 ("use our console for output.. clear
-        # it each shot before writing to it"): every fire wipes the
-        # in-app console and writes a fresh report.  Keeps the
-        # output focused on the just-fired round so distance /
-        # budget / spawn-density numbers are easy to read.
-        self.log_clear(status='Fire')
-        # Per Coffee 2026-05-14 ("multiple tracers showing.  its
-        # like i am firing 3-4 times. are we starting more than
-        # one emitter for some reason?"): list active slots BEFORE
-        # the new shot is dispatched so we can distinguish
-        # "1 click but 4 trails appeared" (a real bug -- a single
-        # fire is starting multiple PS systems) from "4 clicks
-        # accumulated, each slot legitimately draining" (expected,
-        # since slots stay rented while particles fade).  If you
-        # see N>0 at the top of every click's report, those are
-        # leftover trails from prior fires, not duplicates of
-        # this one.
+        # Per Coffee 2026-06-04 ("If a FBX has been loaded,
+        # disable firing the gun"): the imported-FBX path
+        # doesn't carry the live gun rig (per-shell speed
+        # data, HP_gunFire hardpoint metadata, recoil bone
+        # offsets, etc.) the rest of this method expects.
+        # Bail early -- silent (no log spam) since the user
+        # asked for the simple version.
+        if bool(getattr(self._fbx_set, 'meshes', None)):
+            return
+        # Per Coffee 2026-05-24 ("remove writes to the in app
+        # console for particle debugging"): the per-fire
+        # `log_clear(status='Fire')` + the pre-fire-active-slots
+        # write used to live here and lit up the in-app console
+        # with particle stats on every shot.  Removed.  Active
+        # slot snapshot is still computed because the on-disk
+        # debug_screens/fire_log.txt dump below references it,
+        # and the file dump is gated by DEBUG_FILE_DUMPS so it
+        # stays quiet in production.
         _pre_active = [
             i for i, sh in enumerate(self.shots.shots)
             if sh.active
         ]
-        self.log(f"pre-fire active slots: "
-                 f"{_pre_active if _pre_active else 'none'}")
         if (self._gun_pivot_chassis is None
                 or self.tank_physics is None):
             return None
@@ -11116,37 +11913,27 @@ class Viewer:
                 t_hit = dome_radius
             target_world = (_m + t_hit * _f).astype(np.float32)
 
-        # Per Coffee 2026-05-14 ("i want to see how many particles
-        # should fit in from gun to impact"): the ideal particle
-        # count = engagement distance * spawn_per_meter.  Compare
-        # to a trail PS's `max_particles` to see whether the budget
-        # is enough to keep the trail continuous all the way from
-        # gun to impact.  Numbers go to the in-app console (already
-        # cleared at top of this method) so each shot's report
-        # stands alone.
+        # Ideal particle count for the trail = engagement
+        # distance * spawn_per_meter.  Feeds the per-shot
+        # `ps.max` clamp below so the trail emits exactly
+        # enough particles to span gun -> impact.
+        #
+        # Per Coffee 2026-05-24 ("remove writes to the in app
+        # console for particle debugging"): the muzzle / target
+        # / dist / spawn_per_meter / ideal / budget block + the
+        # "trail will exhaust X% before impact" amber warning
+        # that lived here used to fire on every shot.  Removed.
+        # `_budget` (= the trail PS's `max` cap) was only ever
+        # consumed by those writes -- the runtime doesn't need
+        # it, so it's gone too.
         _spm = 15.0   # mirror of trail PS spawn_per_meter
-        _budget = '?'
         if self.shot_trail_systems:
             _spm = float(getattr(
                 self.shot_trail_systems[0], 'spawn_per_meter', _spm))
-            _budget = self.shot_trail_systems[0].max
         _dist = float(np.linalg.norm(
             np.asarray(target_world, dtype=np.float32)
             - np.asarray(muzzle,      dtype=np.float32)))
         _ideal = int(round(_dist * _spm))
-        self.log(f"muzzle  ({muzzle[0]:+.2f}, "
-                 f"{muzzle[1]:+.2f}, {muzzle[2]:+.2f})")
-        self.log(f"target  ({target_world[0]:+.2f}, "
-                 f"{target_world[1]:+.2f}, {target_world[2]:+.2f})")
-        self.log(f"dist            {_dist:7.2f} m")
-        self.log(f"spawn_per_meter {_spm:7.1f}")
-        self.log(f"ideal particles {_ideal:7d}")
-        self.log(f"budget          {_budget!s:>7}")
-        if isinstance(_budget, int) and _ideal > _budget:
-            self.log(f"  -> trail will exhaust "
-                     f"{(1.0 - _budget/max(_ideal,1))*100:.0f}% before "
-                     f"impact",
-                     color=(255, 180, 90))
 
         # Look up the default shell's speed in m/s from the parsed
         # gun XML.  `_active_set.tank_info['shells']` is the list
@@ -11233,9 +12020,12 @@ class Viewer:
                 # frame-fractions of `lifetime` so they auto-scale.
                 _flight_time = _dist / max(0.1, vis_speed)
                 ps.lifetime = max(0.5, float(_flight_time))
-                self.log(f"slot            {slot_idx:7d}")
-                self.log(f"cap             {ps.max:7d}")
-                self.log(f"lifetime        {ps.lifetime:7.2f} s")
+                # Per Coffee 2026-05-24 ("remove writes to the
+                # in app console for particle debugging"): the
+                # per-slot slot / cap / lifetime triple-log used
+                # to print here on every shot.  Removed.  Values
+                # are still computed and applied to the PS above;
+                # only the console echo is gone.
                 # Per Coffee 2026-05-14 ("multiple tracers showing"):
                 # append every fire to a persistent log file so the
                 # full click history is preserved across runs.  Even
@@ -15281,6 +16071,56 @@ class Viewer:
             self.meshes   = []
             all_positions = []
             self._exhaust_points = []   # filled per-component below
+            # Per Coffee 2026-05-20 ("fill the tabs under The Xml
+            # Files dropdown with the XML visual files"): stash
+            # the per-component .visual_processed and primitives
+            # paths so the XML-bar tabs can load + display them.
+            # Keyed by component label ('hull' / 'chassis' /
+            # 'turret' / 'gun').  `.model` paths derived
+            # alongside primitives (same dir, just swap the
+            # extension).
+            self._xml_bar_paths = {}
+            # Per Coffee 2026-05-20 ("Add one to open the tanks
+            # def file as well"): the vehicle XML driving this
+            # load is itself useful to edit in the bar.  Stash
+            # it under a synthetic 'tank'/'def' slot so the
+            # bar's button resolver finds it the same way as
+            # the per-component visual/model files.
+            if os.path.isfile(xml_path):
+                self._xml_bar_paths['tank'] = {'def': xml_path}
+            for _comp in components:
+                _lab = _comp.get('label')
+                if not _lab:
+                    continue
+                _vis = _comp.get('visual')
+                _prim = _comp.get('primitives')
+                _model = None
+                if _prim:
+                    _root, _ext = os.path.splitext(_prim)
+                    if _ext == '.primitives_processed':
+                        _maybe = _root + '.model'
+                    else:
+                        _maybe = _root.replace(
+                            '.primitives_processed', '') + '.model'
+                    if os.path.isfile(_maybe):
+                        _model = _maybe
+                self._xml_bar_paths[_lab] = {
+                    'visual': _vis,
+                    'model':  _model,
+                }
+            # Per Coffee 2026-05-20 ("where does it save it to?
+            # it should be our res_mods/version/path"): stash
+            # the resolved res_mods_root so the XML editor's
+            # save callback can land edits at
+            # <res_mods_root>/<vehicles/...>/<filename>.
+            self._xml_bar_res_mods_root = res_mods_root
+            # Invalidate any cached content so the next render
+            # picks up the new tank.  Also drop any unsaved edit
+            # state / dirty markers from the prior tank.
+            self._xml_bar_content_cache = {}
+            self._xml_bar_scroll = 0
+            self._xml_bar_edit_cancel()
+            self._xml_bar_dirty_tabs.clear()
             # Per Coffee 2026-05-13: invalidate aim pivots so the new
             # tank captures its own turret / gun rotation centres and
             # XML pitch / yaw limits via `_capture_aim_pivots`.  Yaw /
@@ -15739,8 +16579,33 @@ class Viewer:
                     _chassis_kwargs['min_offset'] = float(_ci['minOffset'])
                 if 'maxOffset' in _ci:
                     _chassis_kwargs['max_offset'] = float(_ci['maxOffset'])
-                if 'renderModelOffset' in _ci:
-                    _chassis_kwargs['track_thickness'] = float(_ci['renderModelOffset'])
+                # Per Coffee 2026-05-18 ("tank setting to low?..
+                # W_L wheels are inside of the bottom segments..
+                # settling"): the wheel-CENTRE settles at
+                # `R + track_thickness` above terrain.  For pad
+                # outer face to sit ON the terrain (so the wheel
+                # rim sits at +pad_thickness above the ground),
+                # `track_thickness` must equal the pad's TOTAL
+                # radial thickness = segmentsInnerThickness +
+                # segmentsOuterThickness.  T110E4: 0.091 m.
+                # `renderModelOffset` (~0.016 m) is a separate
+                # modeler field and is NOT pad thickness -- the
+                # old override silently capped the chassis below
+                # the chain.  Prefer the explicit pad totals;
+                # fall back to renderModelOffset for tanks
+                # missing the segments-thickness fields.
+                _it_xml = float(
+                    _ci.get('segmentsInnerThickness', 0.0)
+                    or 0.0)
+                _ot_xml = float(
+                    _ci.get('segmentsOuterThickness', 0.0)
+                    or 0.0)
+                _pad_total = _it_xml + _ot_xml
+                if _pad_total > 1e-6:
+                    _chassis_kwargs['track_thickness'] = _pad_total
+                elif 'renderModelOffset' in _ci:
+                    _chassis_kwargs['track_thickness'] = (
+                        float(_ci['renderModelOffset']))
                 # Total tank mass from the gameplay XML's per-component
                 # <weight> sum.  Drives the inertia-damped pose
                 # integrator: heavier tank -> slower pitch / roll
@@ -17025,6 +17890,17 @@ class Viewer:
         # binding the name before any reference.
         from . import viewer_input
         for event in pygame.event.get():
+            # Per Coffee 2026-05-20 (imgui XML editor): feed
+            # every event to the imgui editor first.  When the
+            # editor wants the mouse / keyboard (window focused,
+            # cursor over the editor), it consumes the event and
+            # the rest of the viewer's event handlers see nothing
+            # for this iteration.  No-op when no editor window is
+            # open.
+            if (getattr(self, 'xml_editor', None) is not None
+                    and self.xml_editor.is_active()):
+                if self.xml_editor.process_event(event):
+                    continue
             if event.type == QUIT:
                 self.running = False
 
@@ -17572,6 +18448,8 @@ class Viewer:
                 # zoom is also a mouse rotation -- block it.
                 if bool(pygame.key.get_mods() & pygame.KMOD_ALT):
                     pass
+                elif self._xml_bar_wheel_hit(mx, my, event.y):
+                    pass  # consumed by the XML-bar content area
                 elif self.ui.handle_mouse_wheel(mx, my, event.y):
                     pass  # consumed by the tree
                 else:
@@ -17691,6 +18569,9 @@ class Viewer:
 
             elif event.type == MOUSEBUTTONUP:
                 if event.button == 1:
+                    # XML-bar resize drag (Coffee 2026-05-20).
+                    if getattr(self, '_xml_bar_resize_drag', False):
+                        self._xml_bar_resize_drag = False
                     # Snapshot whether a slider was being dragged BEFORE
                     # handle_mouse_up clears _active_slider.  If yes,
                     # the user just released after a tweak -- snapshot
@@ -17704,6 +18585,25 @@ class Viewer:
                         self._persist_all_sliders(write_json=True)
 
             elif event.type == MOUSEMOTION:
+                # XML-bar resize drag (Coffee 2026-05-20):
+                # convert vertical mouse delta into row-count
+                # delta and resize the bar.  Done BEFORE the UI
+                # hover update so the cursor change is reflected
+                # immediately on the next frame.
+                if getattr(self, '_xml_bar_resize_drag', False):
+                    _start_my, _start_lines = self._xml_bar_resize_start
+                    _delta_px   = int(event.pos[1]) - int(_start_my)
+                    _delta_rows = _delta_px // self._XML_BAR_LINE_H
+                    _new_lines  = max(
+                        self._XML_BAR_LINES_MIN,
+                        min(self._XML_BAR_LINES_MAX,
+                            int(_start_lines) + int(_delta_rows)))
+                    if _new_lines != self._xml_bar_lines:
+                        self._xml_bar_lines = _new_lines
+                        try:
+                            self._on_resize(self.width, self.height)
+                        except Exception:
+                            pass
                 self.ui.update_hover(*event.pos)
                 if event.buttons[0]:    # left button held -- update slider drag
                     self.ui.handle_mouse_drag(*event.pos)
@@ -17865,8 +18765,16 @@ class Viewer:
                 f"speed_step={ss}")
             self._drive_gate_logged = True
 
+        # Per Coffee 2026-05-20: don't drive the tank while the
+        # imgui XML editor wants keyboard input -- otherwise
+        # typing 'w' / 'a' / 's' / 'd' / number keys in the
+        # editor would steer the tank in the background.
+        _editor_typing = (
+            getattr(self, 'xml_editor', None) is not None
+            and self.xml_editor.wants_keyboard())
         if (self.tank_physics_enabled and self.tank_physics
-                and self.terrain):
+                and self.terrain
+                and not _editor_typing):
             keys = pygame.key.get_pressed()
             dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
             # Stepped speed selector.  `_speed_yards_per_sec()`
@@ -18744,6 +19652,19 @@ class Viewer:
                                   light_dir_world)
             self._frame_timers['terrain'] = (
                 (_time.perf_counter() - _t_ter0) * 1000.0)
+
+        # ---- Quest spider target ----------------------------------------
+        # 4-leg target.  Drawn after terrain so it sits on the
+        # ground; before tanks for natural depth ordering.  Animation
+        # advanced by `step(dt)` using the same per-frame `dt` the
+        # particles + chain integration use.
+        try:
+            _sp = getattr(self, 'spider', None)
+            if _sp is not None:
+                _sp.step(float(getattr(self, '_frame_dt', 1.0/60.0)))
+                _sp.render(self.color_shader, view, proj)
+        except Exception:
+            pass
 
         # ---- Shell-hole decal projector ----------------------------------
         # Per Coffee 2026-05-14 ("time to add a decal projector to
@@ -20421,6 +21342,34 @@ class Viewer:
         # over anything the standard UI pass laid down in the
         # top strip.
         self._render_xml_bar(self.width, self.height)
+        # Per Coffee 2026-05-20: imgui editor windows draw last
+        # so they float on top of every other UI pass.  No-op
+        # when no editor window is open.  Also mirror the
+        # editor's dirty set onto `_xml_bar_dirty_tabs` so the
+        # tab labels show the "*" marker.
+        if (getattr(self, 'xml_editor', None) is not None
+                and self.xml_editor.is_active()):
+            try:
+                self._xml_bar_dirty_tabs = (
+                    self.xml_editor.dirty_tab_indices())
+                self.xml_editor.render(
+                    self.width, self.height,
+                    dt=float(getattr(
+                        self, '_frame_dt', 1.0 / 60.0)))
+            except Exception as _exc:
+                import traceback as _tb
+                _tb.print_exc()
+                # Take the editor offline so we don't loop on a
+                # broken state every frame.
+                self.xml_editor._failed = True
+                try:
+                    self.log(
+                        f"XML editor render crashed -- "
+                        f"editor disabled: "
+                        f"{type(_exc).__name__}: {_exc}",
+                        color=(255, 120, 120))
+                except Exception:
+                    pass
         self._frame_timers['ui'] = (
             (_time.perf_counter() - _t_ui0) * 1000.0)
 
@@ -20546,13 +21495,39 @@ class Viewer:
         try:
             import ctypes
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             wm_info = pygame.display.get_wm_info()
             my_hwnd = wm_info.get('window') if wm_info else None
             cur     = user32.GetForegroundWindow()
             if not my_hwnd or cur == my_hwnd:
                 return    # already foreground; nothing to steal
             self._prev_foreground_hwnd = int(cur)
-            user32.SetForegroundWindow(int(my_hwnd))
+            # Per Coffee 2026-05-18 ("is there any way to make
+            # the render window grab mouse focus?  I hate having
+            # to click 2 times"): plain `SetForegroundWindow`
+            # is blocked by Windows 10/11's anti-focus-stealing
+            # rules when the requesting process isn't already
+            # foreground -- the call returns 0 and the window
+            # only flashes in the taskbar.  The reliable bypass
+            # is to AttachThreadInput onto the current
+            # foreground thread first, do the focus dance, then
+            # detach.  Windows treats "the foreground thread
+            # asking nicely" as authorized.
+            fg_tid = user32.GetWindowThreadProcessId(
+                int(cur), None)
+            my_tid = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg_tid and fg_tid != my_tid:
+                attached = bool(user32.AttachThreadInput(
+                    fg_tid, my_tid, True))
+            try:
+                user32.BringWindowToTop(int(my_hwnd))
+                user32.SetForegroundWindow(int(my_hwnd))
+                user32.SetFocus(int(my_hwnd))
+            finally:
+                if attached:
+                    user32.AttachThreadInput(
+                        fg_tid, my_tid, False)
         except Exception:
             # ctypes / WM-info / SetForegroundWindow can all fail
             # in edge cases (RDP sessions, screen-locked, security

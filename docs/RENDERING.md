@@ -792,3 +792,4 @@ pass."  The picker is the easiest one to forget.
   intersects the gun ray with the dome as the final
   fallback so out-of-map shots terminate on the dome
   surface and trigger impact effects.
+

@@ -79,7 +79,7 @@ echo Using Python: %PY_EXE%
 
 :: -------- 2. Quick import probe ---------------------------------------------
 ::  Print nothing on success; non-zero exit triggers the install path.
-%PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
+%PY% -c "import pygame, OpenGL, numpy, PIL, imgui_bundle" >nul 2>&1
 if not errorlevel 1 goto :launch
 
 echo.
@@ -155,7 +155,7 @@ if not "!INSTALL_RC!"=="0" (
     echo The requirements\ folder has been left in place so you can retry.
     echo.
     echo Manual fallback ^(run from any cmd window^):
-    echo     %PY% -m pip install --user pygame PyOpenGL numpy Pillow
+    echo     %PY% -m pip install --user pygame PyOpenGL numpy Pillow imgui-bundle
     echo.
     pause
     exit /b 1
@@ -164,7 +164,7 @@ if not "!INSTALL_RC!"=="0" (
 :: -------- 3d. Verify --------------------------------------------------------
 ::  Probe each package separately so a failure points at the
 ::  actual missing one instead of a generic "imports failing".
-%PY% -c "import pygame, OpenGL, numpy, PIL" >nul 2>&1
+%PY% -c "import pygame, OpenGL, numpy, PIL, imgui_bundle" >nul 2>&1
 if errorlevel 1 (
     echo.
     echo ERROR: install reported success but imports still fail.
@@ -174,7 +174,7 @@ if errorlevel 1 (
     %PY% -c "import sys; print('     ', sys.executable); [print('     ', p) for p in sys.path]"
     echo.
     echo    per-package probe:
-    %PY% -c "import importlib; [print('      ', m, ':', 'OK' if importlib.util.find_spec(m) else 'MISSING') for m in ('pygame','OpenGL','numpy','PIL')]"
+    %PY% -c "import importlib; [print('      ', m, ':', 'OK' if importlib.util.find_spec(m) else 'MISSING') for m in ('pygame','OpenGL','numpy','PIL','imgui_bundle')]"
     echo.
     echo If a package shows MISSING, the install went to a different
     echo Python than the launcher is using.  Try:
@@ -183,6 +183,20 @@ if errorlevel 1 (
     echo.
     pause
     exit /b 1
+)
+
+:: -------- 3d-extra. Per-package reverify -----------------------------------
+::  Surfaces "everything else installed but imgui_bundle didn't" cases the
+::  combined probe above hides.  Common cause for users on an older PyPI
+::  mirror where imgui-bundle wheels weren't synced yet.
+%PY% -c "import imgui_bundle" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo WARNING: imgui-bundle import still fails after install.
+    echo The XML code editor will run in fallback mode (no editor).
+    echo Retry manually:
+    echo     %PY% -m pip install --user imgui-bundle
+    echo.
 )
 
 :: -------- 3e. Cleanup -------------------------------------------------------
