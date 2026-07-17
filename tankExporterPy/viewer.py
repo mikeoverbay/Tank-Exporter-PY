@@ -755,6 +755,18 @@ class Viewer:
         self._target_gun_pitch_deg  = 0.0
         self._aim_turret_yaw_rate_dps = 60.0   # default; overridden by XML
         self._aim_gun_pitch_rate_dps  = 45.0   # default; overridden by XML
+        # Per Coffee 2026-06-04 ("add a button to the model
+        # panel that locks the motion of the turret and gun...
+        # work regardless of cam selection"): when True,
+        # `_drive_aim_from_aim_state` stops writing the yaw +
+        # pitch TARGETS -- the current pose is left where it
+        # was at lock-engage time and the per-frame slew
+        # integrator has nothing to chase.  Toggled via the
+        # 'Lock Aim' button in the Model panel (registered in
+        # `_build_ui`).  Persisted in tankExporterPy.json.
+        # Independent of the older `_aim_yaw_locked` debug
+        # stub -- that one was never wired to UI.
+        self.aim_locked = bool(self._cfg.get('aim_locked', False))
         self._aim_yaw_min_deg    = -180.0   # 360 default for hull-traverse turrets
         self._aim_yaw_max_deg    =  180.0
         self._aim_pitch_min_deg  = -15.0    # depression default
@@ -796,6 +808,17 @@ class Viewer:
         # if it recoils, 0 otherwise.  Rebuilt per tank load.
         self._gun_palette_table = self._load_gun_palette_table()
         self._palette_recoil_flags = [0] * 64
+        # Deferred-resolve latch.  `_build_palette_recoil_flags`
+        # sets True for tanks NOT in `_gun_palette_table` -- in
+        # that case the flags array is left all-zero at load
+        # time and the render loop's first pass through a gun
+        # mesh resolves the recoil bone by NAME via
+        # `gun_recoil.pick_recoil_bone(palette)`, then flips
+        # this back to False so subsequent draws use the
+        # cached flags.  Per Coffee 2026-06-04 ("all the
+        # skinned models have the gun vertex colors backwards
+        # for what part of the gun moves").
+        self._palette_recoil_needs_resolve = False
         # Mouse aim mouse-sensitivity in degrees per pixel.
         self._aim_yaw_per_px   = 0.20
         self._aim_pitch_per_px = 0.15
@@ -3146,6 +3169,7 @@ class Viewer:
             # them like every other on/off state.
             (_('Wireframe'), 'wireframe',     'c1'),
             (_('Shaded'),    'shaded_mode',   'c1'),
+            (_('Lock Aim'),  'aim_locked',    'c1'),
         ]:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
@@ -4183,13 +4207,29 @@ class Viewer:
                 pidx = int(byte) // 3
                 if 0 <= pidx < 64:
                     flags[pidx] = 1
+            self._palette_recoil_needs_resolve = False
             return flags
-        # Fallback: assume palette idx 1 is the recoiling barrel
-        # (= byte 3, the common Tiger-style convention).  Wrong for
-        # twin-gun / autoloader tanks but matches the legacy
-        # `iii.x in {0, 6}` heuristic exactly on tanks we never
-        # classified.
-        flags[1] = 1
+        # Tank NOT in the palette table.  The old fallback was
+        # `flags[1] = 1` -- a Tiger-style guess (idx 0 = root
+        # `G_BlendBone`, idx 1 = recoil `Gun_BlendBone`).  Per
+        # Coffee 2026-06-04 ("all the skinned models have the
+        # gun vertex colors backwards for what part of the gun
+        # moves"): that guess is wrong for every tank whose
+        # authors declared the palette in the opposite order
+        # (A38-style: idx 0 = Gun_BlendBone barrel, idx 1 =
+        # G_BlendBone root).  For those tanks flags[1] = 1
+        # marks the ROOT as recoiling, so the mantlet slides
+        # back while the barrel stays put -- the visible
+        # "backwards" symptom the user reported.
+        #
+        # Fix: leave flags all-zero here and set a needs-resolve
+        # latch.  The render loop's first gun-mesh pass has the
+        # actual palette in hand (mesh.bone_palette), which
+        # `gun_recoil.pick_recoil_bone(palette)` resolves by
+        # NAME regardless of authoring order.  That result is
+        # cached back onto `_palette_recoil_flags` for
+        # subsequent draws.
+        self._palette_recoil_needs_resolve = True
         return flags
 
     def _apply_default_camera_view(self):
@@ -5226,8 +5266,10 @@ class Viewer:
         message = (
             "WORLD OF TANKS DEFAULT SCHEME\n"
             "  LMB click            fire (gun recoil)\n"
+            "                       -- disabled when an FBX is loaded\n"
             "  RMB drag             orbit camera (free look)\n"
             "  Mouse motion         aim turret + gun (no button held)\n"
+            "                       -- disabled when Lock Aim button is on\n"
             "  Mouse wheel          zoom in / out\n"
             "  W / S                drive forward / reverse\n"
             "  A / D                turn left / right\n"
@@ -5256,6 +5298,17 @@ class Viewer:
             "  F11                  fullscreen toggle\n"
             "  H                    contact-wheel highlight\n"
             "  N                    toggle normal map\n"
+            "\n"
+            "MODEL PANEL BUTTONS (left side, orange 'Model' group)\n"
+            "  Visible              open the mesh-visibility window\n"
+            "  Flip                 flip the loaded meshes\n"
+            "  Compare              FBX-vs-pkg mesh Compare dump\n"
+            "  Wireframe            outline overlay on the solid pass\n"
+            "  Shaded               shaded / unshaded fill toggle\n"
+            "  Lock Aim             freeze turret + gun in NEUTRAL pose;\n"
+            "                       mouse motion no longer drives aim,\n"
+            "                       independent of camera mode.  Click\n"
+            "                       again to release.\n"
             "\n"
             "RECORDERS\n"
             "  F3                   manual recorder start / stop\n"
@@ -11364,13 +11417,24 @@ class Viewer:
         target_yaw_rad   = math.atan2(-dx_n, -dz_n)
         ty_deg = math.degrees(target_yaw_rad)
         tp_deg = math.degrees(target_pitch_rad)
-        if not self._aim_yaw_locked:
-            self._target_turret_yaw_deg = max(
-                self._aim_yaw_min_deg,
-                min(self._aim_yaw_max_deg, ty_deg))
-        self._target_gun_pitch_deg = max(
-            self._aim_pitch_min_deg,
-            min(self._aim_pitch_max_deg, tp_deg))
+        # Per Coffee 2026-06-04 ("add a button to the model
+        # panel that locks the motion of the turret and gun...
+        # work regardless of cam selection"): `self.aim_locked`
+        # gates BOTH targets.  This is the single choke point
+        # -- `_drive_aim_from_aim_state` is called every frame
+        # regardless of which camera mode is active (orbit /
+        # aim / ortho-left), so gating here catches every
+        # possible input path.  The older `_aim_yaw_locked`
+        # debug stub still gates yaw-only for the legacy
+        # "block turret rotation so we can debug aiming" flow.
+        if not self.aim_locked:
+            if not self._aim_yaw_locked:
+                self._target_turret_yaw_deg = max(
+                    self._aim_yaw_min_deg,
+                    min(self._aim_yaw_max_deg, ty_deg))
+            self._target_gun_pitch_deg = max(
+                self._aim_pitch_min_deg,
+                min(self._aim_pitch_max_deg, tp_deg))
 
     def _aim_yaw_pitch_matrices(self):
         """Return (yaw_mat, pitch_mat) -- two 4x4 row-major numpy
@@ -17294,6 +17358,24 @@ class Viewer:
             # an overlay pass on top of the solid render, not a global
             # rasteriser-mode replacement.
             pass
+        elif attr == 'aim_locked' and btn.active:
+            # Per Coffee 2026-06-04 ("Can we reset the turret
+            # and gun rotations when we click lock aim?"): on
+            # engage, snap BOTH current pose AND target back to
+            # neutral (yaw=0, pitch=0) so the turret faces
+            # forward and the gun is level.  The per-frame slew
+            # integrator sees target == current, so nothing
+            # animates; the gun just teleports to neutral.
+            #
+            # Turning the lock OFF is a no-op here -- the next
+            # frame's `_drive_aim_from_aim_state` picks up fresh
+            # targets from the cursor, and the slew rediscovers
+            # them at the tank's authored turretYaw / gunPitch
+            # rate.
+            self._turret_yaw_deg        = 0.0
+            self._gun_pitch_deg         = 0.0
+            self._target_turret_yaw_deg = 0.0
+            self._target_gun_pitch_deg  = 0.0
 
     # ------------------------------------------------------------------
     def _layout_widgets(self):
@@ -17389,6 +17471,7 @@ class Viewer:
                 (_('Compare'),   2, 1),
                 (_('Wireframe'), 0, 1),
                 (_('Shaded'),    1, 1),
+                (_('Lock Aim'),  2, 1),
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
@@ -20060,6 +20143,66 @@ class Viewer:
             # can't accidentally apply recoil to a hull / turret /
             # chassis vert.
             if is_gun_mesh:
+                # Per Coffee 2026-06-04 ("A100_T49 still
+                # moving the parts backwards on the gun"):
+                # resolve the fallback recoil mask by GEOMETRY,
+                # not by bone name.  The name-based
+                # `gun_recoil.pick_recoil_bone` assumes the
+                # Tiger convention `Gun_BlendBone = barrel,
+                # G_BlendBone = root`, but A100_T49 (both base
+                # skin and every _skin/*, including
+                # A100_T49_3Dst_HW20) inverts it -- the barrel
+                # verts are weighted to G_BlendBone and the
+                # breech / mantlet verts to Gun_BlendBone.
+                # Whichever palette idx owns the most-negative-
+                # Z-average dominant-weight cluster IS the
+                # barrel (chassis convention: gun points -Z).
+                # That's ground truth regardless of authoring
+                # naming choices.  Deferred path fires only
+                # when the tank wasn't in _gun_palette_table;
+                # table entries are trusted verbatim.
+                if (self._palette_recoil_needs_resolve
+                        and palette
+                        and mesh.bone_indices is not None
+                        and mesh.bone_weights is not None
+                        and mesh.positions is not None):
+                    try:
+                        _bi  = mesh.bone_indices
+                        _bw  = mesh.bone_weights
+                        _pos = mesh.positions
+                        # Dominant-weight palette idx per vert
+                        # (SC_UBYTE4 -> byte / 3 palette lookup).
+                        _dom_slot = np.argmax(_bw, axis=1)
+                        _dom_pidx = (
+                            _bi[np.arange(len(_bi)), _dom_slot]
+                            // 3)
+                        _uniq = np.unique(_dom_pidx)
+                        _best_pidx = -1
+                        _best_z    = float('inf')
+                        for _p in _uniq:
+                            _z = float(
+                                _pos[_dom_pidx == _p, 2].mean())
+                            if _z < _best_z:
+                                _best_z    = _z
+                                _best_pidx = int(_p)
+                        self._palette_recoil_flags = [0] * 64
+                        if 0 <= _best_pidx < 64:
+                            self._palette_recoil_flags[_best_pidx] = 1
+                    except Exception:
+                        # Geometric detection can't run: fall
+                        # back to name-based pick as a
+                        # last-resort so at least SOMETHING
+                        # is flagged.
+                        try:
+                            from .gun_recoil import pick_recoil_bone
+                            _recoil_idx = pick_recoil_bone(palette)
+                        except Exception:
+                            _recoil_idx = None
+                        self._palette_recoil_flags = [0] * 64
+                        if (_recoil_idx is not None
+                                and 0 <= _recoil_idx < 64):
+                            self._palette_recoil_flags[_recoil_idx] = 1
+                    self._palette_recoil_needs_resolve = False
                 active.set_int_array('u_palette_recoil',
                                       self._palette_recoil_flags)
             else:
@@ -21966,6 +22109,7 @@ class Viewer:
             self._cfg['debug']         = bool(self._debug)
             self._cfg['show_terrain']  = bool(self.show_terrain)
             self._cfg['suspension_test'] = bool(self._suspension_test)
+            self._cfg['aim_locked']    = bool(self.aim_locked)
             self._cfg.pop('show_hardpoints', None)
             self._cfg.pop('show_fire_cards', None)
             _config.save(self._cfg)
