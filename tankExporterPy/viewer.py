@@ -19572,9 +19572,51 @@ class Viewer:
                     m.model_matrix = (chassis_pose @ _yaw_mat
                                        @ m.bind_model_matrix).astype(np.float32)
                 elif comp == 'gun':
+                    # Per Coffee 2026-06-04 ("the entire loader
+                    # gun section doesn't tilt"): pitch stays
+                    # in the model matrix so EVERY gun-mesh
+                    # vert pitches by default (barrel, mantlet,
+                    # loader mechanism, mounts).  The fabric-
+                    # skirt stretch is delivered separately by
+                    # OVERRIDING the cloth palette slot
+                    # (bones[2], byte 6 -> palette idx 2) with
+                    # `inv(pitch_meshlocal)` inside
+                    # `_upload_skinning`.  For a pure-cloth
+                    # vert (iii=(6,6,6,0), ww=(1,0,0,0)) the
+                    # skin becomes bones[2] = inv_pitch, and
+                    # then `model @ inv_pitch @ pos = chassis
+                    # @ yaw @ pitch @ bind @ inv(pitch_meshlocal)
+                    # @ pos = chassis @ yaw @ bind @ pos`
+                    # (algebraic identity, pitch cancels).
+                    # Weight-blended cloth verts (e.g.
+                    # (3, 6, 6, 0)) get partial inv-pitch, so
+                    # they land between fully-pitched and
+                    # unpitched positions -> visible fabric
+                    # stretch proportional to the pitch angle.
                     m.model_matrix = (chassis_pose @ _yaw_mat
                                        @ _pitch_mat
                                        @ m.bind_model_matrix).astype(np.float32)
+                    # `pitch_meshlocal = bind_inv @ pitch @ bind`
+                    # = pitch rotation in gun-mesh-local frame.
+                    # `_gun_inv_pitch_meshlocal` is its inverse
+                    # -- inv(bind_inv @ pitch @ bind) =
+                    # bind_inv @ inv(pitch) @ bind.  Uploaded
+                    # per-draw into bones[2] so cloth verts
+                    # can "cancel out" the model-matrix pitch
+                    # via standard skinning.
+                    try:
+                        _bm = m.bind_model_matrix
+                        _bm_inv = np.linalg.inv(_bm)
+                        _pm_ml = _bm_inv @ _pitch_mat @ _bm
+                        m._gun_pitch_meshlocal = _pm_ml.astype(
+                            np.float32)
+                        m._gun_inv_pitch_meshlocal = (
+                            np.linalg.inv(_pm_ml).astype(np.float32))
+                    except Exception:
+                        m._gun_pitch_meshlocal = np.eye(
+                            4, dtype=np.float32)
+                        m._gun_inv_pitch_meshlocal = np.eye(
+                            4, dtype=np.float32)
                 else:
                     m.model_matrix = (chassis_pose
                                        @ m.bind_model_matrix).astype(np.float32)
@@ -20113,6 +20155,44 @@ class Viewer:
             recoil_translation = (0.0, 0.0, 0.0)
             if has_skin_data and is_gun_mesh:
                 bones = self.gun_recoil.bone_matrix_array(palette)
+                # Per Coffee 2026-06-04 ("the entire loader
+                # gun section doesn't tilt"): pitch is back in
+                # the model matrix so EVERY gun vert pitches
+                # by default.  The stretch is delivered by
+                # overriding bones[2] (byte 6 -> palette idx
+                # 2 -> the cloth slot per WoT convention)
+                # with the INVERSE mesh-local pitch matrix.
+                # Weighted skinning
+                # `sum(ww[i] * bones[iii[i]/3])` then LINEAR-
+                # INTERPOLATES between the model-matrix pitch
+                # (default) and its inverse (cloth), so:
+                #   * pure barrel (3,3,3,0): skin=identity,
+                #     model applies pitch -> full pitch.
+                #   * pure cloth (6,6,6,0): skin=inv_pitch,
+                #     model applies pitch, they cancel ->
+                #     vert stays at bind pose = anchored
+                #     to the mantlet, not pitching with the
+                #     gun.
+                #   * weight-blended (3,6,6,0): skin =
+                #     partial inv_pitch, verts land between
+                #     fully-pitched and unpitched -> visible
+                #     fabric stretch proportional to pitch
+                #     angle.
+                # Recoil translation still goes through the
+                # shader's `u_gun_recoil_translation` uniform
+                # so it stacks on top AFTER skinning per
+                # Coffee "stretch should be in the gun render
+                # call before recoil is applied."
+                try:
+                    n_bones = int(bones.shape[0])
+                    if n_bones > 2:
+                        _ipm = getattr(
+                            mesh, '_gun_inv_pitch_meshlocal', None)
+                        if _ipm is not None:
+                            bones = bones.copy()
+                            bones[2] = _ipm.astype(np.float32)
+                except Exception:
+                    pass
                 active.set_mat4_array('u_bones', bones)
                 active.set_int('u_skinned', 1)
                 recoil_byte = 3

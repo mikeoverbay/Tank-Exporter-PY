@@ -126,6 +126,17 @@ uniform int  u_palette_recoil[MAX_BONES];
 // palette entirely so it doesn't matter which palette index the
 // recoil bone happens to live at on this tank.  Set per-frame by
 // viewer.py from `gun_recoil.offset_m`.
+//
+// NOTE: gun PITCH is NOT in this uniform.  Per Coffee 2026-06-04
+// ("we are need to stretch by angle... stretch should be in the
+// gun render call before recoil is applied"): pitch is applied
+// via `u_bones[1]` -- viewer.py overrides that slot with the
+// mesh-local pitch matrix so the standard weighted-sum skinning
+// naturally interpolates between pitched and static for weight-
+// blended cloth verts.  Stretch amount is proportional to weight
+// (= to angle, since bones[1] = pitch is angle-parameterised).
+// Recoil translation is added AFTER skinning here so it stacks
+// on top of the pitched position.
 uniform vec3 u_gun_recoil_translation;
 
 void main() {
@@ -158,6 +169,14 @@ void main() {
     // rule those got partially translated on every shot,
     // producing the visible "wrong parts move on the gun"
     // symptom the user reported.  The iii.x-only rule fixes it.
+    // Only the recoil translation lives here now.  Pitch is
+    // handled by the standard skinning path via
+    // `u_bones[1] = pitch_meshlocal` (viewer.py:_upload_skinning
+    // overrides that slot for skinned gun meshes).  Weight-
+    // blended skinning naturally interpolates between pitched
+    // (bones[1]) and static (bones[0], bones[2]) per-vertex,
+    // giving smooth angle-proportional stretch on cloth /
+    // fabric-skirt verts.
     vec3 gr_effective_t = vec3(0.0);
     if (u_gun_recoil_byte >= 0 && int(iii.x) == u_gun_recoil_byte) {
         gr_effective_t = u_gun_recoil_translation;
