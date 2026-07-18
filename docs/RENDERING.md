@@ -792,3 +792,89 @@ pass."  The picker is the easiest one to forget.
   intersects the gun ray with the dome as the final
   fallback so out-of-map shots terminate on the dome
   surface and trigger impact effects.
+
+---
+
+## Tank-rig sidecar (FBX/GLB/GLTF/OBJ export)
+
+> Lives in: `tankExporterPy/exporters/_tankrig_sidecar.py` (the
+> bake) and `tankExporterPy/exporters/_blender_runner.py`'s
+> `_apply_tankrig_sidecar` / `_build_tankrig_armature` /
+> `_build_tankrig_pad_instances` / `_build_tankrig_centerline_curves`
+> helpers (the consume side, running inside Blender's Python).
+> Importer pass-through in
+> `tankExporterPy/importers/_blender_importer.py` echoes the
+> sidecar back under `payload['tankrig']` for round-trip
+> integrity.
+
+The FBX exporter today ships hull/turret/gun/wheel meshes but
+drops the entire chain rig (no armature, no bones, no wheel
+hubs, no chain spline, no per-pad transforms).  v1.243.0 closes
+that gap by writing a `<base>.tankrig.json` sidecar alongside
+every FBX/GLB/GLTF/OBJ.  Schema is locked at
+`schema_version = 1` and documented in the module docstring
+of `_tankrig_sidecar.py`.
+
+Sidecar payload at a glance:
+
+* `tank` -- tag / nation / chassis variant.
+* `bone_palette` -- one entry per chassis bone, ordered alpha
+  by name, with `idx`, `parent`, and a 16-float row-major
+  `bind_world_mat4` (identity rotation + parsed translation).
+* `wheel_roles` -- drive_sprockets_L/R, idlers_L/R,
+  road_wheels_L/R, return_rollers_L/R (every key emitted even
+  when empty, so downstream consumers can iterate without
+  `if key in` guards).
+* `wheel_radii` -- `{bone_name: float}`.
+* `chain_inputs` -- segmentLength, segmentsCount,
+  segmentsInnerThickness, segmentsOuterThickness,
+  segmentOffsets sub-dict, teethSyncs sub-dict,
+  groupRadius_road.  Missing values are explicit `null`
+  (not absent keys).
+* `pad_mesh` -- `{segment, segment2}`: each is a
+  `<model_zip>#<key>` reference into the resolved
+  `_track_pad_paths` table, or `null` (e.g. `segment2`
+  on single-piece tanks).
+* `pad_transforms_bind_pose` -- `{L: [mat4...], R: [mat4...]}`,
+  16-float row-major flat lists.  Built by replaying
+  `track_homie.build_chain_segments` +
+  `assemble_chain_arrays` + `track_pads.build_oriented_transforms`
+  once at chassis-bind (suspension residual = 0, s_offset = 0).
+  Empty list when the tank carries no chain rig (wheeled
+  vehicles).
+* `centerline_v_loc` -- `{L: [[x,y,z]...], R: [[x,y,z]...]}`,
+  per-shoe pitch points (same `pad_pos` array fed into the
+  transform builder).
+
+The Blender runner consumes the sidecar after building the
+mesh objects:
+
+* `_build_tankrig_armature` creates a real `bpy.types.Armature`
+  with one EditBone per palette entry.  Parent links from
+  `parent` field; head at swizzled translation, tail
+  `+0.05 X` so Blender doesn't prune zero-length bones.
+* `_attach_armature_modifiers` adds an `ARMATURE` modifier to
+  every mesh carrying both `WoTBoneIdx` and `WoTBoneWeight`
+  color attrs.  Vertex-group decode (byte/3 -> palette index
+  per CLAUDE.md's SC_UBYTE4_REVERSE_PADDED note) is a future
+  pass -- the artist can bind weights manually for now.
+* `_build_tankrig_pad_instances` creates one Empty per baked
+  mat4, ARROWS display, parented to the root.  A future
+  payload-stage extension will ship the actual pad-shoe
+  geometry; until then the Empties give the chain its visible
+  outline.
+* `_build_tankrig_centerline_curves` adds a closed BEZIER
+  curve per side at the pitch points; `display_type='WIRE'`
+  keeps it out of solid-shaded preview.
+
+Round-trip integrity: the importer copies the same sidecar
+verbatim into `payload['tankrig']` so the viewer-side import
+path sees the bone palette + chain inputs without depending
+on whether the Blender FBX/GLB/GLTF round trip preserved
+the armature in any particular form.
+
+The plan that drove this lives at
+`hand_off/TRACK_SPLINE_BLENDER_PLAN_2026-05-24.md`.  Frozen
+files (`tankExporterPy/track_homie.py`, `track_chain_pbd.py`,
+`track_sag.py`, `tank_physics.py`, chain code in
+`tankExporterPy/viewer.py`) were not touched.

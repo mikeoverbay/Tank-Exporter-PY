@@ -3322,8 +3322,35 @@ class VehicleXMLLoader:
                     median_R = sorted(group_rs)[len(group_rs)//2]
                     R_threshold = 0.7 * median_R
                 else:
-                    median_R = None
-                    R_threshold = None
+                    # No <wheels><group> road wheels on this
+                    # side -- happens on tanks whose road wheels
+                    # are ALL authored as singular <wheel>
+                    # entries (E-100's eight road wheels per
+                    # side, for example).  Fall back to the
+                    # chassis-level groupRadius_road, populated
+                    # earlier in this loader from <wheelGroups>;
+                    # that's the modal road-wheel radius from
+                    # the per-bone-name radius dict, and it
+                    # reflects the same road-wheel class even
+                    # when the <wheels><group> bucket is empty.
+                    # Without this fallback, every W_-singular
+                    # gets bucketed as an idler (because
+                    # R_threshold is None) which makes
+                    # `_filter_wrong_side_wraps` and `_correct_R`
+                    # apply the wrong role-class rules.  Per
+                    # Coffee 2026-05-24 (E-100 polish from
+                    # TRACK_DATA_AUDIT_2026-05-24.md).
+                    gr_road = info['chassis'].get(
+                        'groupRadius_road')
+                    if gr_road is not None:
+                        median_R = float(gr_road)
+                        R_threshold = 0.7 * median_R
+                    else:
+                        # Truly no road-wheel reference --
+                        # legacy "everything singular = idler"
+                        # fallback.
+                        median_R = None
+                        R_threshold = None
                 for nm, side in list(_singular_wheels):
                     if side != side_token:
                         continue

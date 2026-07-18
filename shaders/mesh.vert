@@ -93,23 +93,31 @@ uniform int  u_skinned;
 uniform int  u_contact_mode;
 uniform int  u_wheel_state[MAX_BONES];
 
-// Gun-recoil enable gate.  -1 = disabled (chassis / hull / turret
-// meshes, or gun off).  >= 0 = gun mesh; consult
-// `u_palette_recoil[]` to decide which verts recoil.  The actual
-// byte value carried here is a historical artefact (used to be the
-// magic "byte 3 = recoil" sentinel); kept as a non-negative gate
-// flag so the shader can still skip the recoil branch when there's
-// no recoiling component to draw.
+// Gun-recoil marker byte.  For skinned gun meshes viewer.py sets
+// this to 3 (the WoT-wide `iii.x = 3` recoil convention -- see
+// `gun_iii_unique_tuples.txt` for the corpus-wide distribution
+// confirming this).  -1 = disabled (chassis / hull / turret /
+// non-skinned meshes) -- skips the recoil branch entirely.
+//
+// Per Coffee 2026-06-04 ("fix it, buddy :)"): the shader now
+// classifies verts DIRECTLY by iii byte value against this marker,
+// no palette-index lookup.  A vert whose iii.<slot> equals the
+// marker gets `ww.<slot> * u_gun_recoil_translation` added.  This
+// matches the memory `project_gun_iii_pattern_legend` rule:
+// `(3, ?, ?, ?)` = recoil, `(0, ?, ?, ?)` = solid, `(6, ?, ?, ?)`
+// = cloth.  Byte-based rule is palette-order-invariant, unlike the
+// prior palette-mask approach which needed per-tank overrides in
+// `gun_palette_table.json` for tanks whose palette declared the
+// bones in a non-Tiger order.
 uniform int  u_gun_recoil_byte;
 
-// Per-palette-idx recoil flag.  `u_palette_recoil[i] == 1` means
-// the bone at palette index `i` is a recoiling bone (= barrel /
-// muzzle); `== 0` means rigid / autoloader / cloth.  Uploaded by
-// `viewer.py` from `gun_palette_table.json` at every gun-mesh
-// draw; zeroed for every non-gun draw.  Per Coffee 2026-05-14:
-// the offline name-based classifier already named every bone in
-// every WoT tank's gun palette, so the runtime classification is
-// just a per-vert array lookup -- no bit-mask heuristics needed.
+// LEGACY: per-palette-idx recoil flag.  No longer consulted by
+// the recoil branch below -- kept in the shader interface so
+// viewer.py's per-draw upload (`active.set_int_array('u_palette_
+// recoil', ...)`) continues to link without needing a
+// corresponding rework.  Ignored.  Safe to drop from viewer.py
+// in a future cleanup pass once the byte-based rule has proven
+// itself across the corpus.
 uniform int  u_palette_recoil[MAX_BONES];
 
 // Gun-recoil translation in mesh-local space.  When set on a gun
@@ -118,6 +126,17 @@ uniform int  u_palette_recoil[MAX_BONES];
 // palette entirely so it doesn't matter which palette index the
 // recoil bone happens to live at on this tank.  Set per-frame by
 // viewer.py from `gun_recoil.offset_m`.
+//
+// NOTE: gun PITCH is NOT in this uniform.  Per Coffee 2026-06-04
+// ("we are need to stretch by angle... stretch should be in the
+// gun render call before recoil is applied"): pitch is applied
+// via `u_bones[1]` -- viewer.py overrides that slot with the
+// mesh-local pitch matrix so the standard weighted-sum skinning
+// naturally interpolates between pitched and static for weight-
+// blended cloth verts.  Stretch amount is proportional to weight
+// (= to angle, since bones[1] = pitch is angle-parameterised).
+// Recoil translation is added AFTER skinning here so it stacks
+// on top of the pitched position.
 uniform vec3 u_gun_recoil_translation;
 
 void main() {
@@ -125,41 +144,42 @@ void main() {
     // When skinned, build the weighted sum of bone matrices indexed
     // by iii/3.  When not skinned, the matrix collapses to the
     // identity so the rest of this shader sees a no-op skin step.
-    // Per Coffee 2026-05-14 (3-category vertex classification):
-    // each gun vert is either pure-recoil, pure-rigid, or a
-    // STRETCH blend between a recoil slot and a rigid slot.
-    // Stretch verts (~1.3% of all gun verts across the corpus)
-    // are the cloth / rubber drape verts whose weight is split
-    // between the barrel and a mantlet anchor -- they should
-    // get a FRACTION of the recoil translation, scaled by the
-    // recoil-slot weight, so they STRETCH instead of either
-    // fully recoiling or sitting still.
+    // Per Coffee 2026-06-04 ("0,12 is mantlet and 3,12 is
+    // recoiled... 3,3,0 = recoiled, 0,3,3 = mantlet... 3,6,6 =
+    // recoiled, 0,6,3 = mantlet... 3,6,0 = recoiled"): iii.x
+    // ALONE is the binary classifier for every gun vert.
     //
-    // Recipe: walk all 4 slots; for any slot whose bone is in
-    // the per-tank recoil set (u_palette_recoil[i] != 0),
-    // accumulate ww[slot] * u_gun_recoil_translation.  The
-    // result is the per-vert effective translation:
-    //   * pure recoil vert: sum(ww[slot]) = ~1.0 -> full translate.
-    //   * pure rigid vert: 0 contribution -> no translate.
-    //   * 50/50 stretch vert: 0.5 * translate -> drape stretches.
-    // Skinning matrix stays a clean weighted sum of bone matrices
-    // (which are identity for gun meshes since gun_recoil.py
-    // builds an identity bone palette and uploads the translation
-    // via the uniform).
+    //     iii.x == 3 -> recoil vert  (translate FULL amount)
+    //     iii.x != 3 -> mantlet vert (do NOT translate)
+    //
+    // The other slots carry secondary skin data (bones for
+    // cloth drapes, mantlet anchors, blend weights) but do NOT
+    // change whether the vert recoils.  This is binary, not
+    // stretchy: a vert with iii = (0, 3, 3, 0) is 100% mantlet
+    // even though two of its slots reference the recoil bone,
+    // and (3, 6, 6, 0) is 100% recoil even though slot y+z
+    // reference the mantlet bone.
+    //
+    // The previous per-slot rule (any slot == 3 -> partial
+    // translate) was WRONG for the (0, 3, ?, ?) family --
+    // 815k verts across 579 tanks (the LARGEST pattern in the
+    // corpus per gun_iii_unique_tuples.txt) -- which are
+    // mantlet verts with secondary skinning to the recoil
+    // bone for smoothness at the joint.  Under the per-slot
+    // rule those got partially translated on every shot,
+    // producing the visible "wrong parts move on the gun"
+    // symptom the user reported.  The iii.x-only rule fixes it.
+    // Only the recoil translation lives here now.  Pitch is
+    // handled by the standard skinning path via
+    // `u_bones[1] = pitch_meshlocal` (viewer.py:_upload_skinning
+    // overrides that slot for skinned gun meshes).  Weight-
+    // blended skinning naturally interpolates between pitched
+    // (bones[1]) and static (bones[0], bones[2]) per-vertex,
+    // giving smooth angle-proportional stretch on cloth /
+    // fabric-skirt verts.
     vec3 gr_effective_t = vec3(0.0);
-    if (u_gun_recoil_byte >= 0) {
-        int p0 = int(iii.x) / 3;
-        int p1 = int(iii.y) / 3;
-        int p2 = int(iii.z) / 3;
-        int p3 = int(iii.w) / 3;
-        if (p0 >= 0 && p0 < MAX_BONES && u_palette_recoil[p0] != 0)
-            gr_effective_t += ww.x * u_gun_recoil_translation;
-        if (p1 >= 0 && p1 < MAX_BONES && u_palette_recoil[p1] != 0)
-            gr_effective_t += ww.y * u_gun_recoil_translation;
-        if (p2 >= 0 && p2 < MAX_BONES && u_palette_recoil[p2] != 0)
-            gr_effective_t += ww.z * u_gun_recoil_translation;
-        if (p3 >= 0 && p3 < MAX_BONES && u_palette_recoil[p3] != 0)
-            gr_effective_t += ww.w * u_gun_recoil_translation;
+    if (u_gun_recoil_byte >= 0 && int(iii.x) == u_gun_recoil_byte) {
+        gr_effective_t = u_gun_recoil_translation;
     }
 
     mat4 skin = mat4(1.0);

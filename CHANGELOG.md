@@ -7,6 +7,14 @@ available at the time this file was written).
 
 ---
 
+## 2026-06-04
+
+### Tank-rig sidecar JSON next to every Blender export (1.243.0)
+
+New `tankExporterPy/exporters/_tankrig_sidecar.py` snapshots the runtime chain rig (bone palette + wheel roles/radii + chain inputs + per-pad chassis-bind mat4 bake + centerline pitch points) into `<base>.tankrig.json` next to every FBX/GLB/GLTF the Blender bridge emits; the Blender runner now consumes that sidecar to build a real Armature, attach Armature modifiers to every skinned mesh, instance one Empty per baked pad mat4, and add a closed wire-display Bezier curve at the chain centerline -- closing the "no track, no bones" gap in the exported scene with no edits to the frozen track_homie / track_chain_pbd / track_sag / tank_physics / viewer-chain code.
+
+---
+
 ## 2026-05-16
 
 ### Add `Mouse` + `Visible` to all locale catalogs (1.230.5)

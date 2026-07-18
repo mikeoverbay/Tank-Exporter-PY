@@ -8,8 +8,8 @@
   "info_panel_collapsed": false,
   "theme": "TEPY Default",
   "theme_bg": null,
-  "light_value": 0.169921875,
-  "ambient_value": 0.65625,
+  "light_value": 0.25,
+  "ambient_value": 0.7265625,
   "smoke_groups": {
     "gas_small": {
       "start_size": 0.1037037037037037,
@@ -19,18 +19,18 @@
       "fade_end_frame": 39.82222222222222
     },
     "gas_medium": {
-      "start_size": 0.1,
-      "end_size": 0.25,
-      "speed": 2.0,
-      "fade_start_frame": 30.0,
-      "fade_end_frame": 58.785185185185185
+      "start_size": 0.28888888888888886,
+      "end_size": 0.5407407407407407,
+      "speed": 2.962962962962963,
+      "fade_start_frame": 0.0,
+      "fade_end_frame": 38.87407407407407
     },
     "gas_large": {
-      "start_size": 0.07407407407407407,
-      "end_size": 0.7703703703703704,
-      "speed": 2.6666666666666665,
-      "fade_start_frame": 2.3703703703703702,
-      "fade_end_frame": 54.992592592592594
+      "start_size": 0.26296296296296295,
+      "end_size": 0.34074074074074073,
+      "speed": 2.725925925925926,
+      "fade_start_frame": 0.0,
+      "fade_end_frame": 60.20740740740741
     },
     "diesel_small": {
       "start_size": 0.07,
@@ -40,18 +40,18 @@
       "fade_end_frame": 60.0
     },
     "diesel_medium": {
-      "start_size": 0.11,
-      "end_size": 0.27,
-      "speed": 2.0,
-      "fade_start_frame": 30.0,
-      "fade_end_frame": 60.0
+      "start_size": 0.1925925925925926,
+      "end_size": 0.37777777777777777,
+      "speed": 2.311111111111111,
+      "fade_start_frame": 0.0,
+      "fade_end_frame": 61.15555555555556
     },
     "diesel_large": {
       "start_size": 0.2,
-      "end_size": 0.45,
+      "end_size": 0.6,
       "speed": 2.5,
       "fade_start_frame": 0.0,
-      "fade_end_frame": 60.0
+      "fade_end_frame": 29.866666666666667
     },
     "diesel_strv": {
       "start_size": 0.09,
@@ -69,7 +69,7 @@
       "size": 1.4814814814814814
     },
     "gas_large": {
-      "size": 1.5407407407407407
+      "size": 1.3333333333333333
     },
     "diesel_small": {
       "size": 1.1
@@ -78,7 +78,7 @@
       "size": 1.7
     },
     "diesel_large": {
-      "size": 1.5703703703703704
+      "size": 1.037037037037037
     },
     "diesel_strv": {
       "size": 1.4
@@ -96,8 +96,11 @@
   "motif_bg": null,
   "normals_length": 0.0,
   "normals_per_vertex": false,
-  "debug": true,
+  "debug": false,
   "show_terrain": true,
   "suspension_test": true,
-  "show_track_spline": true
+  "show_track_spline": false,
+  "mouse_aim_sens": 3.984375,
+  "show_track_pads": true,
+  "aim_locked": false
 }

@@ -35,6 +35,8 @@ from pygame.locals import (DOUBLEBUF, KEYDOWN, K_F11, MOUSEBUTTONDOWN, MOUSEBUTT
                             K_a, K_d, K_s, K_F2, K_F3, K_F4, K_F8, K_F9,
                             K_F10,
                             K_LEFT, K_RIGHT, K_BACKSPACE,
+                            K_RETURN, K_KP_ENTER, K_DELETE, K_HOME, K_END,
+                            K_UP, K_DOWN, KMOD_CTRL, TEXTINPUT,
                             K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9)
 from OpenGL.GL import *
 
@@ -281,24 +283,28 @@ class Viewer:
     # XML-bar tab layout (Coffee 2026-05-11 "The Xml Files").
     # Tabs are persistent across tank loads.  None entries
     # are spacers (extra horizontal gap, no clickable tab).
+    # Per Coffee 2026-05-20 ("change the tabs to just buttons
+    # that open each part.  Add one to open the tanks def file
+    # as well"): the bar is now a single row of buttons.  Each
+    # entry is (label, comp_label, kind); None inserts a spacer
+    # gap.  Clicking a button opens the imgui editor on that
+    # file.  No more expand/collapse + content preview.
     _XML_BAR_TABS = (
-        'Hull.visual',
-        'Chassis.visual',
-        'Turret.visual',
-        'Gun.visual',
-        None,                       # spacer between visuals + models
-        'Hull.model',
-        'Chassis.model',
-        'Turret.model',
-        'Gun.model',
+        ('Tank.def',       'tank',    'def'),
+        None,
+        ('Hull.visual',    'hull',    'visual'),
+        ('Chassis.visual', 'chassis', 'visual'),
+        ('Turret.visual',  'turret',  'visual'),
+        ('Gun.visual',     'gun',     'visual'),
+        None,
+        ('Hull.model',     'hull',    'model'),
+        ('Chassis.model',  'chassis', 'model'),
+        ('Turret.model',   'turret',  'model'),
+        ('Gun.model',      'gun',     'model'),
     )
-    _XML_BAR_HEADER_H = 22
-    _XML_BAR_TAB_H    = 24
-    _XML_BAR_LINE_H   = 16
-    _XML_BAR_LINES_DEFAULT = 24   # initial visible-row count
-    _XML_BAR_LINES_MIN     = 4    # smallest size when dragged up
-    _XML_BAR_LINES_MAX     = 60   # cap so it doesn't eat the whole viewport
-    _XML_BAR_RESIZE_H      = 6    # drag-handle strip height (px)
+    _XML_BAR_HEADER_H = 28      # single button-row height
+    _XML_BAR_BTN_H    = 22
+    _XML_BAR_BTN_PAD  = 6       # horizontal padding inside each button
 
     # Heights of the control regions inside the side panels (pixels).
     # Left panel: top block holds display toggles, action buttons,
@@ -749,6 +755,18 @@ class Viewer:
         self._target_gun_pitch_deg  = 0.0
         self._aim_turret_yaw_rate_dps = 60.0   # default; overridden by XML
         self._aim_gun_pitch_rate_dps  = 45.0   # default; overridden by XML
+        # Per Coffee 2026-06-04 ("add a button to the model
+        # panel that locks the motion of the turret and gun...
+        # work regardless of cam selection"): when True,
+        # `_drive_aim_from_aim_state` stops writing the yaw +
+        # pitch TARGETS -- the current pose is left where it
+        # was at lock-engage time and the per-frame slew
+        # integrator has nothing to chase.  Toggled via the
+        # 'Lock Aim' button in the Model panel (registered in
+        # `_build_ui`).  Persisted in tankExporterPy.json.
+        # Independent of the older `_aim_yaw_locked` debug
+        # stub -- that one was never wired to UI.
+        self.aim_locked = bool(self._cfg.get('aim_locked', False))
         self._aim_yaw_min_deg    = -180.0   # 360 default for hull-traverse turrets
         self._aim_yaw_max_deg    =  180.0
         self._aim_pitch_min_deg  = -15.0    # depression default
@@ -790,6 +808,17 @@ class Viewer:
         # if it recoils, 0 otherwise.  Rebuilt per tank load.
         self._gun_palette_table = self._load_gun_palette_table()
         self._palette_recoil_flags = [0] * 64
+        # Deferred-resolve latch.  `_build_palette_recoil_flags`
+        # sets True for tanks NOT in `_gun_palette_table` -- in
+        # that case the flags array is left all-zero at load
+        # time and the render loop's first pass through a gun
+        # mesh resolves the recoil bone by NAME via
+        # `gun_recoil.pick_recoil_bone(palette)`, then flips
+        # this back to False so subsequent draws use the
+        # cached flags.  Per Coffee 2026-06-04 ("all the
+        # skinned models have the gun vertex colors backwards
+        # for what part of the gun moves").
+        self._palette_recoil_needs_resolve = False
         # Mouse aim mouse-sensitivity in degrees per pixel.
         self._aim_yaw_per_px   = 0.20
         self._aim_pitch_per_px = 0.15
@@ -1214,17 +1243,40 @@ class Viewer:
         # file paths populated by `load_vehicle`, parsed
         # content cached, scroll offset for mouse-wheel paging.
         self._xml_bar_paths         = {}   # label -> {visual, model}
+        self._xml_bar_res_mods_root = ''   # set per-load by load_vehicle
         self._xml_bar_content_cache = {}   # tab_idx -> rows
+        # Legacy attrs from the expand/collapse + resize-drag
+        # era of the XML bar.  The bar is a single button row
+        # now (v1.241.0); these stay as no-op shims so any
+        # stale code path that still touches them doesn't
+        # crash.
         self._xml_bar_scroll        = 0
         self._xml_bar_content_rect  = (0, 0, 0, 0)
-        # Per Coffee 2026-05-20 ("make the Xml Files sizable
-        # drag"): visible-row count is now adjustable.  Stored
-        # per-instance so the user can drag the bottom edge of
-        # the bar to resize.  Live drag state tracked alongside.
-        self._xml_bar_lines         = self._XML_BAR_LINES_DEFAULT
         self._xml_bar_resize_rect   = (0, 0, 0, 0)
         self._xml_bar_resize_drag   = False
-        self._xml_bar_resize_start  = (0, 0)   # (start_my, start_lines)
+        self._xml_bar_resize_start  = (0, 0)
+        # Per Coffee 2026-05-20 ("imgui-bundle (Dear ImGui +
+        # ImGuiColorTextEdit) -- make it so.  only for xml file
+        # editing"): the inline single-row edit was scrapped in
+        # favour of a real imgui editor window.  Kept around:
+        #   * `_xml_bar_dirty_tabs` -- tab indices that have
+        #     unsaved edits in the imgui editor; mirrors
+        #     `xml_editor.dirty_tab_indices()` so the tab label
+        #     "*" marker stays cheap to query each frame.
+        #   * `xml_editor` -- the imgui-bundle wrapper; lazily
+        #     initialises its GL renderer on first open_tab()
+        #     call so the dep loads only when actually needed.
+        self._xml_bar_dirty_tabs = set()
+        from .xml_editor import XMLEditor as _XMLEditor
+        self.xml_editor = _XMLEditor()
+        # Legacy inline-edit attrs kept as no-op shims so any
+        # stray reference in the codebase doesn't crash.  These
+        # used to drive the per-row caret edit; now the imgui
+        # window owns the buffer.
+        self._xml_bar_edit_tab    = None
+        self._xml_bar_edit_row    = None
+        self._xml_bar_edit_text   = ''
+        self._xml_bar_edit_cursor = 0
         # Per Coffee 2026-05-10 ("alt key down.. drag rectangle
         # area on screen.  release of alt key copies area to
         # clipboard"): screenshot-rectangle state.
@@ -3117,6 +3169,7 @@ class Viewer:
             # them like every other on/off state.
             (_('Wireframe'), 'wireframe',     'c1'),
             (_('Shaded'),    'shaded_mode',   'c1'),
+            (_('Lock Aim'),  'aim_locked',    'c1'),
         ]:
             initial = getattr(self, attr, False)
             btn      = self.ui.add_button(label, x, y, 70, h, active=initial)
@@ -4154,13 +4207,29 @@ class Viewer:
                 pidx = int(byte) // 3
                 if 0 <= pidx < 64:
                     flags[pidx] = 1
+            self._palette_recoil_needs_resolve = False
             return flags
-        # Fallback: assume palette idx 1 is the recoiling barrel
-        # (= byte 3, the common Tiger-style convention).  Wrong for
-        # twin-gun / autoloader tanks but matches the legacy
-        # `iii.x in {0, 6}` heuristic exactly on tanks we never
-        # classified.
-        flags[1] = 1
+        # Tank NOT in the palette table.  The old fallback was
+        # `flags[1] = 1` -- a Tiger-style guess (idx 0 = root
+        # `G_BlendBone`, idx 1 = recoil `Gun_BlendBone`).  Per
+        # Coffee 2026-06-04 ("all the skinned models have the
+        # gun vertex colors backwards for what part of the gun
+        # moves"): that guess is wrong for every tank whose
+        # authors declared the palette in the opposite order
+        # (A38-style: idx 0 = Gun_BlendBone barrel, idx 1 =
+        # G_BlendBone root).  For those tanks flags[1] = 1
+        # marks the ROOT as recoiling, so the mantlet slides
+        # back while the barrel stays put -- the visible
+        # "backwards" symptom the user reported.
+        #
+        # Fix: leave flags all-zero here and set a needs-resolve
+        # latch.  The render loop's first gun-mesh pass has the
+        # actual palette in hand (mesh.bone_palette), which
+        # `gun_recoil.pick_recoil_bone(palette)` resolves by
+        # NAME regardless of authoring order.  That result is
+        # cached back onto `_palette_recoil_flags` for
+        # subsequent draws.
+        self._palette_recoil_needs_resolve = True
         return flags
 
     def _apply_default_camera_view(self):
@@ -5197,8 +5266,10 @@ class Viewer:
         message = (
             "WORLD OF TANKS DEFAULT SCHEME\n"
             "  LMB click            fire (gun recoil)\n"
+            "                       -- disabled when an FBX is loaded\n"
             "  RMB drag             orbit camera (free look)\n"
             "  Mouse motion         aim turret + gun (no button held)\n"
+            "                       -- disabled when Lock Aim button is on\n"
             "  Mouse wheel          zoom in / out\n"
             "  W / S                drive forward / reverse\n"
             "  A / D                turn left / right\n"
@@ -5227,6 +5298,17 @@ class Viewer:
             "  F11                  fullscreen toggle\n"
             "  H                    contact-wheel highlight\n"
             "  N                    toggle normal map\n"
+            "\n"
+            "MODEL PANEL BUTTONS (left side, orange 'Model' group)\n"
+            "  Visible              open the mesh-visibility window\n"
+            "  Flip                 flip the loaded meshes\n"
+            "  Compare              FBX-vs-pkg mesh Compare dump\n"
+            "  Wireframe            outline overlay on the solid pass\n"
+            "  Shaded               shaded / unshaded fill toggle\n"
+            "  Lock Aim             freeze turret + gun in NEUTRAL pose;\n"
+            "                       mouse motion no longer drives aim,\n"
+            "                       independent of camera mode.  Click\n"
+            "                       again to release.\n"
             "\n"
             "RECORDERS\n"
             "  F3                   manual recorder start / stop\n"
@@ -8928,92 +9010,255 @@ class Viewer:
     # =================================================================
 
     def _xml_bar_height(self):
-        """Total pixel height the XML bar reserves at the top of
-        the central viewport this frame.  When collapsed: just
-        the header row.  When expanded: header + tab row +
-        five content lines.
+        """Total pixel height the button bar reserves at the
+        top of the central viewport.  Per Coffee 2026-05-20
+        ("after tank loads only?") -- bar is hidden entirely
+        until a tank is loaded (= `_xml_bar_paths` populated).
+        Returns 0 in that case so the 3-D viewport stretches
+        the full window height and no empty strip sits at the
+        top.
         """
-        if not getattr(self, '_xml_bar_expanded', False):
-            return self._XML_BAR_HEADER_H
-        lines = int(getattr(
-            self, '_xml_bar_lines', self._XML_BAR_LINES_DEFAULT))
-        return (self._XML_BAR_HEADER_H
-                + self._XML_BAR_TAB_H
-                + self._XML_BAR_LINE_H * lines
-                + self._XML_BAR_RESIZE_H)
+        if not getattr(self, '_xml_bar_paths', None):
+            return 0
+        return self._XML_BAR_HEADER_H
 
     def _xml_bar_hit(self, mx, my):
-        """Return what the user clicked inside the XML bar, or
-        None if the click missed.
-
-        Returns:
-            ('header', None) -- header row (toggle expand)
-            ('tab', idx)     -- tab idx in _XML_BAR_TABS
-            ('content', None) -- inside the expanded content
-                                 area (XML lines).  Used to
-                                 keep the OS cursor visible
-                                 and to swallow camera-orbit
-                                 clicks that would otherwise
-                                 fall through.
-            None             -- outside the bar
+        """Return ('button', tab_idx) when the cursor lands on
+        a button, ('bar', None) when it's anywhere else inside
+        the bar (so the cursor stays visible + camera clicks
+        get swallowed), or None when outside.  `tab_idx` indexes
+        into `_XML_BAR_TABS` and is the same key the click
+        handler uses to resolve component / kind / file path.
         """
         hx, hy, hw, hh = self._xml_bar_header_rect
         if hw == 0 or hh == 0:
             return None
-        if hx <= mx < hx + hw and hy <= my < hy + hh:
-            return ('header', None)
-        if getattr(self, '_xml_bar_expanded', False):
-            for rect, idx in self._xml_bar_tab_rects:
-                rx, ry, rw, rh = rect
-                if rx <= mx < rx + rw and ry <= my < ry + rh:
-                    return ('tab', idx)
-            # Per Coffee 2026-05-20 ("make the Xml Files
-            # sizable drag"): resize-handle strip beneath the
-            # content area.  Reported separately from 'content'
-            # so the click handler can start a drag.
-            rrx, rry, rrw, rrh = getattr(
-                self, '_xml_bar_resize_rect', (0, 0, 0, 0))
-            if (rrw > 0 and rrh > 0
-                    and rrx <= mx < rrx + rrw
-                    and rry <= my < rry + rrh):
-                return ('resize', None)
-            # Per Coffee 2026-05-20 ("need the mouse visible
-            # when in the tabs"): also treat the content area
-            # as part of the bar so the cursor stays visible
-            # while hovering the XML lines.
-            crx, cry, crw, crh = getattr(
-                self, '_xml_bar_content_rect', (0, 0, 0, 0))
-            if (crw > 0 and crh > 0
-                    and crx <= mx < crx + crw
-                    and cry <= my < cry + crh):
-                return ('content', None)
-        return None
+        if not (hx <= mx < hx + hw and hy <= my < hy + hh):
+            return None
+        for rect, idx in self._xml_bar_tab_rects:
+            rx, ry, rw, rh = rect
+            if rx <= mx < rx + rw and ry <= my < ry + rh:
+                return ('button', idx)
+        return ('bar', None)
 
     def _on_xml_bar_click(self, hit):
         """Apply the click action returned by `_xml_bar_hit`."""
         action, payload = hit
-        if action == 'header':
-            self._xml_bar_expanded = not self._xml_bar_expanded
-            # Reflow so the 3D viewport reflects the new
-            # bar height immediately.
-            self._on_resize(self.width, self.height)
-        elif action == 'tab':
-            self._xml_bar_active_idx = int(payload)
-            # Reset scroll so we start at the top of the new tab.
-            self._xml_bar_scroll = 0
-        elif action == 'resize':
-            # Start a resize drag.  Cache the cursor Y at drag
-            # start + the current row count so subsequent
-            # MOUSEMOTION events can compute a delta.
+        if action == 'button':
+            tab_idx = int(payload)
+            self._xml_bar_active_idx = tab_idx
+            self._open_xml_editor_for_active_tab()
+
+    # ----- ImGui-backed XML editor (Coffee 2026-05-20) ------------
+
+    def _open_xml_editor_for_active_tab(self):
+        """Pop the imgui editor window for the currently active
+        XML tab.  Resolves the tab's component / file path,
+        reads + pretty-prints the XML buffer (via the same
+        `_xml_bar_load_content` pipeline the in-bar preview
+        uses), and hands the buffer to `self.xml_editor` along
+        with a save callback that writes back to
+        `<project_root>/edited_xml/<comp>.<kind>.xml`.
+        """
+        tab_idx = int(self._xml_bar_active_idx)
+        mapping = self._xml_bar_tab_mapping(tab_idx)
+        if mapping is None:
+            return
+        comp_label, kind = mapping
+        rows = self._xml_bar_load_content(tab_idx)
+        # `rows` is what the in-bar preview shows -- one
+        # ('line', text) entry per pretty-printed line.  Join
+        # them back into a single XML buffer for the editor.
+        text = '\n'.join(t for k, t in rows if k == 'line')
+        path = ((getattr(self, '_xml_bar_paths', None) or {})
+                .get(comp_label, {})
+                .get(kind, ''))
+        label = f"{comp_label}.{kind}"
+        def _save_cb(new_text, _tab=tab_idx,
+                     _comp=comp_label, _kind=kind):
+            self._xml_editor_save(_tab, _comp, _kind, new_text)
+        try:
+            opened = self.xml_editor.open_tab(
+                tab_idx, label, path, text, _save_cb,
+                self.width, self.height)
+        except Exception as exc:
+            import traceback as _tb
+            _tb.print_exc()
             try:
-                _mx, my = pygame.mouse.get_pos()
+                self.log(
+                    f"XML editor open failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    color=(255, 120, 120))
             except Exception:
-                my = 0
-            self._xml_bar_resize_drag  = True
-            self._xml_bar_resize_start = (
-                int(my),
-                int(getattr(self, '_xml_bar_lines',
-                              self._XML_BAR_LINES_DEFAULT)))
+                pass
+            return
+        if not opened:
+            try:
+                self.log(
+                    "XML editor unavailable -- run go.bat or "
+                    "`pip install imgui-bundle`, then restart.",
+                    color=(255, 180, 120))
+            except Exception:
+                pass
+
+    def _resolve_xml_save_path(self, comp_label, kind):
+        """Compute the res_mods-side destination for the edited
+        XML.  Strategy:
+            * pull the source path out of `_xml_bar_paths`
+            * find `vehicles/...` (or `vehicles\\...`) inside it
+            * append that relative path to `res_mods_root`
+        Falls back to `<res_mods>/<comp>.<kind>.xml` if the
+        source isn't under a `vehicles/` subtree.  Returns the
+        absolute path or None if `res_mods_root` is unset.
+        """
+        root = getattr(self, '_xml_bar_res_mods_root', '') or ''
+        if not root:
+            # Fall back to the cfg value if load_vehicle never
+            # stashed one (e.g. extract-only sessions).
+            root = (self._cfg.get('res_mods', '') or '').strip()
+        if not root:
+            return None
+        src = ((getattr(self, '_xml_bar_paths', None) or {})
+               .get(comp_label, {}) .get(kind, '') or '')
+        # Find the vehicles/ subtree inside the source path so
+        # the destination mirrors the WoT res tree.
+        rel = None
+        if src:
+            norm = src.replace('\\', '/')
+            low  = norm.lower()
+            idx  = low.find('/vehicles/')
+            if idx < 0 and low.startswith('vehicles/'):
+                idx = -1   # treat 'vehicles/...' at start as relative
+            if idx >= 0:
+                rel = norm[idx + 1:]
+            elif low.startswith('vehicles/'):
+                rel = norm
+        if not rel:
+            # Source isn't under vehicles/ -- drop a same-name
+            # file at the res_mods root so the user still gets
+            # something predictable.
+            rel = f"{comp_label}.{kind}.xml"
+        return os.path.join(root, rel.replace('/', os.sep))
+
+    def _confirm_dialog(self, title, message, default_yes=True):
+        """Tk askyesno helper with a transient hidden root so we
+        don't leak a window each call.  Returns True / False; if
+        Tk isn't available, falls back to True for create-folder
+        prompts (`default_yes`) and False for everything else.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+        except ImportError:
+            return bool(default_yes)
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes('-topmost', True)
+        except Exception:
+            pass
+        try:
+            ans = messagebox.askyesno(
+                title, message, parent=root)
+        except Exception:
+            ans = False
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return bool(ans)
+
+    def _xml_editor_save(self, tab_idx, comp_label, kind, text):
+        """Write the editor's buffer to the res_mods-side
+        destination computed from the source file's
+        `vehicles/.../` path.  Prompts to create the parent
+        directory if it doesn't exist, and to overwrite an
+        existing file.  Per Coffee 2026-05-20.
+        """
+        out_path = self._resolve_xml_save_path(comp_label, kind)
+        if out_path is None:
+            try:
+                self.log(
+                    "XML save: no res_mods folder configured. "
+                    "Set one in the launcher / config before saving.",
+                    color=(255, 180, 120))
+            except Exception:
+                pass
+            return
+        out_dir = os.path.dirname(out_path)
+        if not os.path.isdir(out_dir):
+            create = self._confirm_dialog(
+                "Create folder?",
+                f"The destination folder does not exist:\n\n"
+                f"{out_dir}\n\n"
+                f"Create it now?",
+                default_yes=True)
+            if not create:
+                try:
+                    self.log("XML save: cancelled (no folder).",
+                             color=(220, 200, 120))
+                except Exception:
+                    pass
+                return
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as exc:
+                try:
+                    self.log(
+                        f"XML save: mkdir failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        color=(255, 120, 120))
+                except Exception:
+                    pass
+                return
+        if os.path.exists(out_path):
+            overwrite = self._confirm_dialog(
+                "Overwrite file?",
+                f"This file already exists:\n\n"
+                f"{out_path}\n\n"
+                f"Overwrite with the edited version?",
+                default_yes=False)
+            if not overwrite:
+                try:
+                    self.log("XML save: cancelled (no overwrite).",
+                             color=(220, 200, 120))
+                except Exception:
+                    pass
+                return
+        try:
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+        except Exception as exc:
+            try:
+                self.log(
+                    f"XML save failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    color=(255, 120, 120))
+            except Exception:
+                pass
+            return
+        # Refresh the in-bar preview cache so the next bar redraw
+        # shows the edited text.
+        cache = getattr(self, '_xml_bar_content_cache', None)
+        if cache is not None:
+            cache[int(tab_idx)] = [
+                ('line', ln) for ln in text.splitlines()
+                if ln.strip()
+            ] or [('line', '(empty)')]
+        self._xml_bar_dirty_tabs.discard(int(tab_idx))
+        try:
+            self.log(f"saved -> {out_path}",
+                     color=(120, 220, 180))
+        except Exception:
+            pass
+
+    # Compat shim for the load-vehicle reset path which used to
+    # cancel an in-flight inline edit.  The imgui editor manages
+    # its own per-tab state and is closed on tank swap below.
+    def _xml_bar_edit_cancel(self):
+        if getattr(self, 'xml_editor', None) is not None:
+            for idx in list(self.xml_editor._tabs.keys()):
+                self.xml_editor.close_tab(idx)
 
     def _xml_bar_wheel_hit(self, mx, my, wheel_y):
         """Scroll the XML-bar content if the cursor is hovering
@@ -9050,17 +9295,19 @@ class Viewer:
 
     # ----- XML-bar content loading + parsing ----------------------
 
-    _XML_BAR_TAB_TO_KIND = {
-        0: ('hull',    'visual'),
-        1: ('chassis', 'visual'),
-        2: ('turret',  'visual'),
-        3: ('gun',     'visual'),
-        # idx 4 is the spacer (None)
-        5: ('hull',    'model'),
-        6: ('chassis', 'model'),
-        7: ('turret',  'model'),
-        8: ('gun',     'model'),
-    }
+    # Mapping derived from `_XML_BAR_TABS` so the two stay in
+    # sync automatically -- pull the (comp_label, kind) from
+    # the tuple, skipping the None spacers.
+    @classmethod
+    def _xml_bar_tab_mapping(cls, tab_idx):
+        try:
+            entry = cls._XML_BAR_TABS[tab_idx]
+        except (IndexError, TypeError):
+            return None
+        if entry is None:
+            return None
+        _label, comp_label, kind = entry
+        return (comp_label, kind)
 
     def _xml_bar_load_content(self, tab_idx):
         """Return a list of (kind, text) lines for the requested
@@ -9076,7 +9323,7 @@ class Viewer:
             self._xml_bar_content_cache = cache
         if tab_idx in cache:
             return cache[tab_idx]
-        mapping = self._XML_BAR_TAB_TO_KIND.get(tab_idx)
+        mapping = self._xml_bar_tab_mapping(tab_idx)
         if mapping is None:
             cache[tab_idx] = [('line',
                                '(no XML mapped to this tab)')]
@@ -9125,26 +9372,16 @@ class Viewer:
         if pretty is None:
             # Naive line break after every closing tag boundary.
             pretty = text.replace('><', '>\n<')
-        # Build the row list.  Lines that OPEN a `<renderSet>` or
-        # `<primitiveGroup>` are preceded by a divider so the
-        # primitives visibly separate.
+        # Per Coffee 2026-05-20 ("remove the line separators.  I
+        # need to be able to edit the text"): no more dividers.
+        # Every non-blank line of pretty-printed XML becomes one
+        # editable row.
         rows = []
-        first_primgroup = True
         for line in pretty.splitlines():
             stripped = line.strip()
             if not stripped:
                 # Suppress all-blank rows from minidom.
                 continue
-            is_prim_open = (
-                stripped.startswith('<primitiveGroup')
-                or stripped.startswith('<renderSet')
-                or stripped.startswith('<primitive_group')
-                or stripped.startswith('<primitive ')
-                or stripped.startswith('<primitive>'))
-            if is_prim_open and not first_primgroup:
-                rows.append(('divider', ''))
-            if is_prim_open:
-                first_primgroup = False
             rows.append(('line', line.rstrip()))
         if not rows:
             rows = [('line',
@@ -9153,17 +9390,13 @@ class Viewer:
         return rows
 
     def _render_xml_bar(self, width, height):
-        """Draw the collapsible XML-tab bar at the top of the
-        central viewport.  Called from `render()` AFTER the UI
-        pass so it sits over any UI that bleeds into the
-        central area.
-
-        Layout (top-down):
-            * Header row (always visible): chevron + title.
-            * Tab row (expanded only): one button per
-              _XML_BAR_TABS entry, None = spacer gap.
-            * Content area (expanded only): 5 lines of
-              placeholder text.
+        """Draw the XML button strip at the top of the central
+        viewport.  Per Coffee 2026-05-20 ("change the tabs to
+        just buttons that open each part") -- one row of click-
+        to-open buttons, one per entry in `_XML_BAR_TABS` (None
+        = spacer gap).  Each button click pops the imgui editor
+        on the matching file.  No more expand/collapse, no
+        inline content preview, no resize drag.
         """
         ui = self.ui
         if ui is None or not hasattr(ui, 'shader'):
@@ -9172,6 +9405,10 @@ class Viewer:
         scene_w = max(1, width - scene_x - self.TREE_PANEL_W)
         bar_h   = self._xml_bar_height()
         if scene_w <= 0 or bar_h <= 0:
+            # No tank loaded -- make sure stale hit rects from
+            # a previous load can't false-positive.
+            self._xml_bar_header_rect = (0, 0, 0, 0)
+            self._xml_bar_tab_rects   = []
             return
         # 2D setup -- mirrors the status-overlay path.
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -9182,44 +9419,95 @@ class Viewer:
         ui.shader.use()
         ui.shader.set_mat4('projection', ui._ortho(width, height))
         glBindVertexArray(ui.quad_vao)
-        # Bar background (slightly transparent dark slate).
+        # Bar background.
         ui.shader.set_int('u_use_tex', 0)
         ui.shader.set_vec4('u_color',
                            0.12, 0.14, 0.18, 0.92)
         ui._draw_quad(scene_x, 0, scene_w, bar_h)
-        # Header row -- chevron + "The Xml Files" title.
-        hdr_h = self._XML_BAR_HEADER_H
-        # Subtle separator under the header.
+        # Subtle separator at the bottom edge.
         ui.shader.set_vec4('u_color',
                            0.30, 0.34, 0.42, 0.90)
-        ui._draw_quad(scene_x, hdr_h - 1, scene_w, 1)
-        # Chevron glyph (cached).
-        if self._xml_bar_chevron_d is None:
-            self._xml_bar_chevron_d = ui._make_tex(
-                'v', (220, 225, 235))
-            self._xml_bar_chevron_r = ui._make_tex(
-                '>', (220, 225, 235))
-        ch = (self._xml_bar_chevron_d
-              if self._xml_bar_expanded
-              else self._xml_bar_chevron_r)
-        if ch is not None and ch[0]:
-            tid, tw, th = ch
-            ui._draw_tex(tid, scene_x + 8,
-                          (hdr_h - th) // 2, tw, th)
-        # Title.
-        if self._xml_bar_title_tex is None:
-            self._xml_bar_title_tex = ui._make_tex(
-                'The Xml Files', (240, 245, 255))
-        if (self._xml_bar_title_tex is not None
-                and self._xml_bar_title_tex[0]):
-            tid, tw, th = self._xml_bar_title_tex
-            ui._draw_tex(tid, scene_x + 26,
-                          (hdr_h - th) // 2, tw, th)
+        ui._draw_quad(scene_x, bar_h - 1, scene_w, 1)
         # Update header hit rect for click handling.
-        self._xml_bar_header_rect = (scene_x, 0, scene_w, hdr_h)
-        # Tab row + content area (only when expanded).
+        self._xml_bar_header_rect = (scene_x, 0, scene_w, bar_h)
+        # Build the per-button rects + draw each button.
         self._xml_bar_tab_rects = []
-        if self._xml_bar_expanded:
+        btn_h    = self._XML_BAR_BTN_H
+        btn_pad  = self._XML_BAR_BTN_PAD
+        btn_y    = (bar_h - btn_h) // 2
+        spacer_w = 16
+        cx       = scene_x + 8
+        for idx, entry in enumerate(self._XML_BAR_TABS):
+            if entry is None:
+                cx += spacer_w
+                continue
+            label, comp_label, kind = entry
+            # Mark unavailable buttons (file missing) so it's
+            # visually obvious which slot has nothing to edit.
+            path = ((getattr(self, '_xml_bar_paths',
+                              None) or {})
+                    .get(comp_label, {})
+                    .get(kind))
+            is_dirty   = idx in self._xml_bar_dirty_tabs
+            has_file   = bool(path)
+            is_active  = (idx == self._xml_bar_active_idx)
+            # Compute button width from label text -- single-
+            # row UI fonts vary, so size to the texture.
+            lbl_text  = (label + ' *') if is_dirty else label
+            if is_dirty:
+                lbl_color = (255, 210, 130)
+            elif not has_file:
+                lbl_color = (120, 125, 135)
+            else:
+                lbl_color = (220, 225, 235)
+            lbl = self._xml_bar_make_tex(lbl_text, lbl_color)
+            tw = lbl[1] if (lbl and lbl[0]) else 60
+            th = lbl[2] if (lbl and lbl[0]) else 12
+            btn_w = tw + btn_pad * 2
+            # Button background.  Active = last-opened tab gets
+            # a slightly brighter fill so the user can see which
+            # button the imgui editor was launched from.
+            if not has_file:
+                ui.shader.set_vec4(
+                    'u_color', 0.13, 0.15, 0.18, 1.0)
+            elif is_active:
+                ui.shader.set_vec4(
+                    'u_color', 0.25, 0.38, 0.55, 1.0)
+            else:
+                ui.shader.set_vec4(
+                    'u_color', 0.18, 0.22, 0.28, 1.0)
+            ui._draw_quad(cx, btn_y, btn_w, btn_h)
+            # Hover outline for affordance.
+            try:
+                mx, my = pygame.mouse.get_pos()
+                hovered = (cx <= mx < cx + btn_w
+                           and btn_y <= my < btn_y + btn_h)
+            except Exception:
+                hovered = False
+            if hovered and has_file:
+                ui.shader.set_vec4(
+                    'u_color', 0.55, 0.72, 0.95, 0.95)
+                # 1px outline around the button.
+                ui._draw_quad(cx, btn_y, btn_w, 1)
+                ui._draw_quad(cx, btn_y + btn_h - 1,
+                               btn_w, 1)
+                ui._draw_quad(cx, btn_y, 1, btn_h)
+                ui._draw_quad(cx + btn_w - 1, btn_y,
+                               1, btn_h)
+            # Draw the label.
+            if lbl is not None and lbl[0]:
+                tid, _tw, _th = lbl
+                ui._draw_tex(
+                    tid, cx + (btn_w - _tw) // 2,
+                    btn_y + (btn_h - _th) // 2,
+                    _tw, _th)
+            # Record the hit rect (always, even for missing
+            # files; the click handler logs a clear "no file"
+            # message instead of silently doing nothing).
+            self._xml_bar_tab_rects.append(
+                ((cx, btn_y, btn_w, btn_h), idx))
+            cx += btn_w + 4
+        if False:
             tab_y = hdr_h
             tab_h = self._XML_BAR_TAB_H
             tab_w = 88
@@ -9239,9 +9527,15 @@ class Viewer:
                         'u_color', 0.18, 0.22, 0.28, 1.0)
                 ui._draw_quad(cx, tab_y + 2,
                                tab_w, tab_h - 4)
-                # Tab label.
+                # Tab label.  Dirty tabs (unsaved edits) get a
+                # trailing "*" + a warm color so the user can
+                # see at a glance which tabs need Ctrl+S.
+                is_dirty = idx in self._xml_bar_dirty_tabs
+                lbl_text  = (name + ' *') if is_dirty else name
+                lbl_color = ((255, 210, 130) if is_dirty
+                             else (220, 225, 235))
                 lbl = self._xml_bar_make_tex(
-                    name, (220, 225, 235))
+                    lbl_text, lbl_color)
                 if lbl is not None and lbl[0]:
                     tid, tw, th = lbl
                     ui._draw_tex(
@@ -9270,7 +9564,12 @@ class Viewer:
             line_h = self._XML_BAR_LINE_H
             line_y = content_y + 2
             line_color   = (210, 218, 228)
+            edit_color   = (255, 240, 200)
             divider_rgba = (0.40, 0.50, 0.66, 0.95)
+            active_tab = int(self._xml_bar_active_idx)
+            edit_row = (self._xml_bar_edit_row
+                        if self._xml_bar_edit_tab == active_tab
+                        else None)
             for row_idx in range(scroll,
                                   min(len(rows),
                                        scroll + n_lines)):
@@ -9282,22 +9581,63 @@ class Viewer:
                                    line_y + line_h // 2,
                                    scene_w - 12, 1)
                 else:
-                    if txt:
+                    is_editing = (edit_row == row_idx)
+                    if is_editing:
+                        # Highlight strip behind the editing row
+                        # so it reads as the active field.
+                        ui.shader.set_int('u_use_tex', 0)
+                        ui.shader.set_vec4(
+                            'u_color', 0.18, 0.22, 0.30, 0.95)
+                        ui._draw_quad(scene_x + 2, line_y - 1,
+                                       scene_w - 4, line_h)
+                        # Source the live buffer + caret position
+                        # for this row.
+                        display_txt = self._xml_bar_edit_text
+                        caret_col   = self._xml_bar_edit_cursor
+                    else:
+                        display_txt = txt
+                        caret_col   = None
+                    if display_txt or is_editing:
                         # Trim long lines so we don't blow up
                         # the texture cache or scroll off the
                         # right edge.  Visible content area is
                         # roughly (scene_w / 7) characters wide
                         # at the current font.
                         max_chars = max(40, scene_w // 7)
-                        if len(txt) > max_chars:
-                            txt = txt[:max_chars - 1] + '…'
+                        # Scroll the displayed slice horizontally
+                        # so the caret stays visible while typing
+                        # past the right edge.
+                        h_off = 0
+                        if is_editing and caret_col > max_chars - 4:
+                            h_off = caret_col - (max_chars - 4)
+                        clipped = display_txt[h_off:]
+                        if len(clipped) > max_chars:
+                            clipped = clipped[:max_chars - 1] + '…'
                         tex = self._xml_bar_make_tex(
-                            txt, line_color)
+                            clipped,
+                            edit_color if is_editing else line_color)
                         if tex is not None and tex[0]:
                             tid, tw, th = tex
                             ui._draw_tex(
                                 tid, scene_x + 10,
                                 line_y, tw, th)
+                        if is_editing and caret_col is not None:
+                            # Approximate monospace caret X via
+                            # the same scene_w / 7 heuristic the
+                            # trim uses.  Good enough for the UI
+                            # font; we don't have per-glyph
+                            # metrics handy.
+                            char_w = 7
+                            caret_x = (scene_x + 10
+                                       + (caret_col - h_off) * char_w)
+                            ui.shader.set_int('u_use_tex', 0)
+                            ui.shader.set_vec4(
+                                'u_color', 1.0, 0.95, 0.55, 0.95)
+                            ui._draw_quad(caret_x, line_y,
+                                           1, line_h - 2)
+                            # Restore tex sampling for the next
+                            # row's texture draw.
+                            ui.shader.set_int('u_use_tex', 1)
                 line_y += line_h
             # Footer: scroll indicator + file path hint.
             mapping = self._XML_BAR_TAB_TO_KIND.get(
@@ -10682,6 +11022,20 @@ class Viewer:
                     over_ui = True
             except Exception:
                 pass
+        # Per Coffee 2026-05-20 ("i must have a cursor when in
+        # the editors window"): the imgui XML editor lives over
+        # the 3D viewport but is its own modal-ish window.  Any
+        # time at least one editor window is open AND imgui is
+        # capturing the mouse (i.e. the cursor is inside the
+        # editor window's chrome), force the OS cursor visible.
+        if not over_ui:
+            try:
+                xed = getattr(self, 'xml_editor', None)
+                if (xed is not None and xed.is_active()
+                        and xed.wants_mouse()):
+                    over_ui = True
+            except Exception:
+                pass
         if over_ui:
             want_visible = True
         else:
@@ -11063,13 +11417,24 @@ class Viewer:
         target_yaw_rad   = math.atan2(-dx_n, -dz_n)
         ty_deg = math.degrees(target_yaw_rad)
         tp_deg = math.degrees(target_pitch_rad)
-        if not self._aim_yaw_locked:
-            self._target_turret_yaw_deg = max(
-                self._aim_yaw_min_deg,
-                min(self._aim_yaw_max_deg, ty_deg))
-        self._target_gun_pitch_deg = max(
-            self._aim_pitch_min_deg,
-            min(self._aim_pitch_max_deg, tp_deg))
+        # Per Coffee 2026-06-04 ("add a button to the model
+        # panel that locks the motion of the turret and gun...
+        # work regardless of cam selection"): `self.aim_locked`
+        # gates BOTH targets.  This is the single choke point
+        # -- `_drive_aim_from_aim_state` is called every frame
+        # regardless of which camera mode is active (orbit /
+        # aim / ortho-left), so gating here catches every
+        # possible input path.  The older `_aim_yaw_locked`
+        # debug stub still gates yaw-only for the legacy
+        # "block turret rotation so we can debug aiming" flow.
+        if not self.aim_locked:
+            if not self._aim_yaw_locked:
+                self._target_turret_yaw_deg = max(
+                    self._aim_yaw_min_deg,
+                    min(self._aim_yaw_max_deg, ty_deg))
+            self._target_gun_pitch_deg = max(
+                self._aim_pitch_min_deg,
+                min(self._aim_pitch_max_deg, tp_deg))
 
     def _aim_yaw_pitch_matrices(self):
         """Return (yaw_mat, pitch_mat) -- two 4x4 row-major numpy
@@ -11460,29 +11825,28 @@ class Viewer:
         Safe to call when no tank is loaded -- silently does
         nothing if pivots haven't been captured yet.
         """
-        # Per Coffee 2026-05-14 ("use our console for output.. clear
-        # it each shot before writing to it"): every fire wipes the
-        # in-app console and writes a fresh report.  Keeps the
-        # output focused on the just-fired round so distance /
-        # budget / spawn-density numbers are easy to read.
-        self.log_clear(status='Fire')
-        # Per Coffee 2026-05-14 ("multiple tracers showing.  its
-        # like i am firing 3-4 times. are we starting more than
-        # one emitter for some reason?"): list active slots BEFORE
-        # the new shot is dispatched so we can distinguish
-        # "1 click but 4 trails appeared" (a real bug -- a single
-        # fire is starting multiple PS systems) from "4 clicks
-        # accumulated, each slot legitimately draining" (expected,
-        # since slots stay rented while particles fade).  If you
-        # see N>0 at the top of every click's report, those are
-        # leftover trails from prior fires, not duplicates of
-        # this one.
+        # Per Coffee 2026-06-04 ("If a FBX has been loaded,
+        # disable firing the gun"): the imported-FBX path
+        # doesn't carry the live gun rig (per-shell speed
+        # data, HP_gunFire hardpoint metadata, recoil bone
+        # offsets, etc.) the rest of this method expects.
+        # Bail early -- silent (no log spam) since the user
+        # asked for the simple version.
+        if bool(getattr(self._fbx_set, 'meshes', None)):
+            return
+        # Per Coffee 2026-05-24 ("remove writes to the in app
+        # console for particle debugging"): the per-fire
+        # `log_clear(status='Fire')` + the pre-fire-active-slots
+        # write used to live here and lit up the in-app console
+        # with particle stats on every shot.  Removed.  Active
+        # slot snapshot is still computed because the on-disk
+        # debug_screens/fire_log.txt dump below references it,
+        # and the file dump is gated by DEBUG_FILE_DUMPS so it
+        # stays quiet in production.
         _pre_active = [
             i for i, sh in enumerate(self.shots.shots)
             if sh.active
         ]
-        self.log(f"pre-fire active slots: "
-                 f"{_pre_active if _pre_active else 'none'}")
         if (self._gun_pivot_chassis is None
                 or self.tank_physics is None):
             return None
@@ -11613,37 +11977,27 @@ class Viewer:
                 t_hit = dome_radius
             target_world = (_m + t_hit * _f).astype(np.float32)
 
-        # Per Coffee 2026-05-14 ("i want to see how many particles
-        # should fit in from gun to impact"): the ideal particle
-        # count = engagement distance * spawn_per_meter.  Compare
-        # to a trail PS's `max_particles` to see whether the budget
-        # is enough to keep the trail continuous all the way from
-        # gun to impact.  Numbers go to the in-app console (already
-        # cleared at top of this method) so each shot's report
-        # stands alone.
+        # Ideal particle count for the trail = engagement
+        # distance * spawn_per_meter.  Feeds the per-shot
+        # `ps.max` clamp below so the trail emits exactly
+        # enough particles to span gun -> impact.
+        #
+        # Per Coffee 2026-05-24 ("remove writes to the in app
+        # console for particle debugging"): the muzzle / target
+        # / dist / spawn_per_meter / ideal / budget block + the
+        # "trail will exhaust X% before impact" amber warning
+        # that lived here used to fire on every shot.  Removed.
+        # `_budget` (= the trail PS's `max` cap) was only ever
+        # consumed by those writes -- the runtime doesn't need
+        # it, so it's gone too.
         _spm = 15.0   # mirror of trail PS spawn_per_meter
-        _budget = '?'
         if self.shot_trail_systems:
             _spm = float(getattr(
                 self.shot_trail_systems[0], 'spawn_per_meter', _spm))
-            _budget = self.shot_trail_systems[0].max
         _dist = float(np.linalg.norm(
             np.asarray(target_world, dtype=np.float32)
             - np.asarray(muzzle,      dtype=np.float32)))
         _ideal = int(round(_dist * _spm))
-        self.log(f"muzzle  ({muzzle[0]:+.2f}, "
-                 f"{muzzle[1]:+.2f}, {muzzle[2]:+.2f})")
-        self.log(f"target  ({target_world[0]:+.2f}, "
-                 f"{target_world[1]:+.2f}, {target_world[2]:+.2f})")
-        self.log(f"dist            {_dist:7.2f} m")
-        self.log(f"spawn_per_meter {_spm:7.1f}")
-        self.log(f"ideal particles {_ideal:7d}")
-        self.log(f"budget          {_budget!s:>7}")
-        if isinstance(_budget, int) and _ideal > _budget:
-            self.log(f"  -> trail will exhaust "
-                     f"{(1.0 - _budget/max(_ideal,1))*100:.0f}% before "
-                     f"impact",
-                     color=(255, 180, 90))
 
         # Look up the default shell's speed in m/s from the parsed
         # gun XML.  `_active_set.tank_info['shells']` is the list
@@ -11730,9 +12084,12 @@ class Viewer:
                 # frame-fractions of `lifetime` so they auto-scale.
                 _flight_time = _dist / max(0.1, vis_speed)
                 ps.lifetime = max(0.5, float(_flight_time))
-                self.log(f"slot            {slot_idx:7d}")
-                self.log(f"cap             {ps.max:7d}")
-                self.log(f"lifetime        {ps.lifetime:7.2f} s")
+                # Per Coffee 2026-05-24 ("remove writes to the
+                # in app console for particle debugging"): the
+                # per-slot slot / cap / lifetime triple-log used
+                # to print here on every shot.  Removed.  Values
+                # are still computed and applied to the PS above;
+                # only the console echo is gone.
                 # Per Coffee 2026-05-14 ("multiple tracers showing"):
                 # append every fire to a persistent log file so the
                 # full click history is preserved across runs.  Even
@@ -15787,6 +16144,14 @@ class Viewer:
             # alongside primitives (same dir, just swap the
             # extension).
             self._xml_bar_paths = {}
+            # Per Coffee 2026-05-20 ("Add one to open the tanks
+            # def file as well"): the vehicle XML driving this
+            # load is itself useful to edit in the bar.  Stash
+            # it under a synthetic 'tank'/'def' slot so the
+            # bar's button resolver finds it the same way as
+            # the per-component visual/model files.
+            if os.path.isfile(xml_path):
+                self._xml_bar_paths['tank'] = {'def': xml_path}
             for _comp in components:
                 _lab = _comp.get('label')
                 if not _lab:
@@ -15807,10 +16172,19 @@ class Viewer:
                     'visual': _vis,
                     'model':  _model,
                 }
+            # Per Coffee 2026-05-20 ("where does it save it to?
+            # it should be our res_mods/version/path"): stash
+            # the resolved res_mods_root so the XML editor's
+            # save callback can land edits at
+            # <res_mods_root>/<vehicles/...>/<filename>.
+            self._xml_bar_res_mods_root = res_mods_root
             # Invalidate any cached content so the next render
-            # picks up the new tank.
+            # picks up the new tank.  Also drop any unsaved edit
+            # state / dirty markers from the prior tank.
             self._xml_bar_content_cache = {}
             self._xml_bar_scroll = 0
+            self._xml_bar_edit_cancel()
+            self._xml_bar_dirty_tabs.clear()
             # Per Coffee 2026-05-13: invalidate aim pivots so the new
             # tank captures its own turret / gun rotation centres and
             # XML pitch / yaw limits via `_capture_aim_pivots`.  Yaw /
@@ -16984,6 +17358,24 @@ class Viewer:
             # an overlay pass on top of the solid render, not a global
             # rasteriser-mode replacement.
             pass
+        elif attr == 'aim_locked' and btn.active:
+            # Per Coffee 2026-06-04 ("Can we reset the turret
+            # and gun rotations when we click lock aim?"): on
+            # engage, snap BOTH current pose AND target back to
+            # neutral (yaw=0, pitch=0) so the turret faces
+            # forward and the gun is level.  The per-frame slew
+            # integrator sees target == current, so nothing
+            # animates; the gun just teleports to neutral.
+            #
+            # Turning the lock OFF is a no-op here -- the next
+            # frame's `_drive_aim_from_aim_state` picks up fresh
+            # targets from the cursor, and the slew rediscovers
+            # them at the tank's authored turretYaw / gunPitch
+            # rate.
+            self._turret_yaw_deg        = 0.0
+            self._gun_pitch_deg         = 0.0
+            self._target_turret_yaw_deg = 0.0
+            self._target_gun_pitch_deg  = 0.0
 
     # ------------------------------------------------------------------
     def _layout_widgets(self):
@@ -17079,6 +17471,7 @@ class Viewer:
                 (_('Compare'),   2, 1),
                 (_('Wireframe'), 0, 1),
                 (_('Shaded'),    1, 1),
+                (_('Lock Aim'),  2, 1),
             ]),
             (_('IO'), [
                 (_('Set Paths'), 0, 3),
@@ -17580,6 +17973,17 @@ class Viewer:
         # binding the name before any reference.
         from . import viewer_input
         for event in pygame.event.get():
+            # Per Coffee 2026-05-20 (imgui XML editor): feed
+            # every event to the imgui editor first.  When the
+            # editor wants the mouse / keyboard (window focused,
+            # cursor over the editor), it consumes the event and
+            # the rest of the viewer's event handlers see nothing
+            # for this iteration.  No-op when no editor window is
+            # open.
+            if (getattr(self, 'xml_editor', None) is not None
+                    and self.xml_editor.is_active()):
+                if self.xml_editor.process_event(event):
+                    continue
             if event.type == QUIT:
                 self.running = False
 
@@ -18444,8 +18848,16 @@ class Viewer:
                 f"speed_step={ss}")
             self._drive_gate_logged = True
 
+        # Per Coffee 2026-05-20: don't drive the tank while the
+        # imgui XML editor wants keyboard input -- otherwise
+        # typing 'w' / 'a' / 's' / 'd' / number keys in the
+        # editor would steer the tank in the background.
+        _editor_typing = (
+            getattr(self, 'xml_editor', None) is not None
+            and self.xml_editor.wants_keyboard())
         if (self.tank_physics_enabled and self.tank_physics
-                and self.terrain):
+                and self.terrain
+                and not _editor_typing):
             keys = pygame.key.get_pressed()
             dt   = max(1e-3, getattr(self, '_frame_dt', 1.0 / 60.0))
             # Stepped speed selector.  `_speed_yards_per_sec()`
@@ -19160,9 +19572,51 @@ class Viewer:
                     m.model_matrix = (chassis_pose @ _yaw_mat
                                        @ m.bind_model_matrix).astype(np.float32)
                 elif comp == 'gun':
+                    # Per Coffee 2026-06-04 ("the entire loader
+                    # gun section doesn't tilt"): pitch stays
+                    # in the model matrix so EVERY gun-mesh
+                    # vert pitches by default (barrel, mantlet,
+                    # loader mechanism, mounts).  The fabric-
+                    # skirt stretch is delivered separately by
+                    # OVERRIDING the cloth palette slot
+                    # (bones[2], byte 6 -> palette idx 2) with
+                    # `inv(pitch_meshlocal)` inside
+                    # `_upload_skinning`.  For a pure-cloth
+                    # vert (iii=(6,6,6,0), ww=(1,0,0,0)) the
+                    # skin becomes bones[2] = inv_pitch, and
+                    # then `model @ inv_pitch @ pos = chassis
+                    # @ yaw @ pitch @ bind @ inv(pitch_meshlocal)
+                    # @ pos = chassis @ yaw @ bind @ pos`
+                    # (algebraic identity, pitch cancels).
+                    # Weight-blended cloth verts (e.g.
+                    # (3, 6, 6, 0)) get partial inv-pitch, so
+                    # they land between fully-pitched and
+                    # unpitched positions -> visible fabric
+                    # stretch proportional to the pitch angle.
                     m.model_matrix = (chassis_pose @ _yaw_mat
                                        @ _pitch_mat
                                        @ m.bind_model_matrix).astype(np.float32)
+                    # `pitch_meshlocal = bind_inv @ pitch @ bind`
+                    # = pitch rotation in gun-mesh-local frame.
+                    # `_gun_inv_pitch_meshlocal` is its inverse
+                    # -- inv(bind_inv @ pitch @ bind) =
+                    # bind_inv @ inv(pitch) @ bind.  Uploaded
+                    # per-draw into bones[2] so cloth verts
+                    # can "cancel out" the model-matrix pitch
+                    # via standard skinning.
+                    try:
+                        _bm = m.bind_model_matrix
+                        _bm_inv = np.linalg.inv(_bm)
+                        _pm_ml = _bm_inv @ _pitch_mat @ _bm
+                        m._gun_pitch_meshlocal = _pm_ml.astype(
+                            np.float32)
+                        m._gun_inv_pitch_meshlocal = (
+                            np.linalg.inv(_pm_ml).astype(np.float32))
+                    except Exception:
+                        m._gun_pitch_meshlocal = np.eye(
+                            4, dtype=np.float32)
+                        m._gun_inv_pitch_meshlocal = np.eye(
+                            4, dtype=np.float32)
                 else:
                     m.model_matrix = (chassis_pose
                                        @ m.bind_model_matrix).astype(np.float32)
@@ -19701,6 +20155,44 @@ class Viewer:
             recoil_translation = (0.0, 0.0, 0.0)
             if has_skin_data and is_gun_mesh:
                 bones = self.gun_recoil.bone_matrix_array(palette)
+                # Per Coffee 2026-06-04 ("the entire loader
+                # gun section doesn't tilt"): pitch is back in
+                # the model matrix so EVERY gun vert pitches
+                # by default.  The stretch is delivered by
+                # overriding bones[2] (byte 6 -> palette idx
+                # 2 -> the cloth slot per WoT convention)
+                # with the INVERSE mesh-local pitch matrix.
+                # Weighted skinning
+                # `sum(ww[i] * bones[iii[i]/3])` then LINEAR-
+                # INTERPOLATES between the model-matrix pitch
+                # (default) and its inverse (cloth), so:
+                #   * pure barrel (3,3,3,0): skin=identity,
+                #     model applies pitch -> full pitch.
+                #   * pure cloth (6,6,6,0): skin=inv_pitch,
+                #     model applies pitch, they cancel ->
+                #     vert stays at bind pose = anchored
+                #     to the mantlet, not pitching with the
+                #     gun.
+                #   * weight-blended (3,6,6,0): skin =
+                #     partial inv_pitch, verts land between
+                #     fully-pitched and unpitched -> visible
+                #     fabric stretch proportional to pitch
+                #     angle.
+                # Recoil translation still goes through the
+                # shader's `u_gun_recoil_translation` uniform
+                # so it stacks on top AFTER skinning per
+                # Coffee "stretch should be in the gun render
+                # call before recoil is applied."
+                try:
+                    n_bones = int(bones.shape[0])
+                    if n_bones > 2:
+                        _ipm = getattr(
+                            mesh, '_gun_inv_pitch_meshlocal', None)
+                        if _ipm is not None:
+                            bones = bones.copy()
+                            bones[2] = _ipm.astype(np.float32)
+                except Exception:
+                    pass
                 active.set_mat4_array('u_bones', bones)
                 active.set_int('u_skinned', 1)
                 recoil_byte = 3
@@ -19731,6 +20223,66 @@ class Viewer:
             # can't accidentally apply recoil to a hull / turret /
             # chassis vert.
             if is_gun_mesh:
+                # Per Coffee 2026-06-04 ("A100_T49 still
+                # moving the parts backwards on the gun"):
+                # resolve the fallback recoil mask by GEOMETRY,
+                # not by bone name.  The name-based
+                # `gun_recoil.pick_recoil_bone` assumes the
+                # Tiger convention `Gun_BlendBone = barrel,
+                # G_BlendBone = root`, but A100_T49 (both base
+                # skin and every _skin/*, including
+                # A100_T49_3Dst_HW20) inverts it -- the barrel
+                # verts are weighted to G_BlendBone and the
+                # breech / mantlet verts to Gun_BlendBone.
+                # Whichever palette idx owns the most-negative-
+                # Z-average dominant-weight cluster IS the
+                # barrel (chassis convention: gun points -Z).
+                # That's ground truth regardless of authoring
+                # naming choices.  Deferred path fires only
+                # when the tank wasn't in _gun_palette_table;
+                # table entries are trusted verbatim.
+                if (self._palette_recoil_needs_resolve
+                        and palette
+                        and mesh.bone_indices is not None
+                        and mesh.bone_weights is not None
+                        and mesh.positions is not None):
+                    try:
+                        _bi  = mesh.bone_indices
+                        _bw  = mesh.bone_weights
+                        _pos = mesh.positions
+                        # Dominant-weight palette idx per vert
+                        # (SC_UBYTE4 -> byte / 3 palette lookup).
+                        _dom_slot = np.argmax(_bw, axis=1)
+                        _dom_pidx = (
+                            _bi[np.arange(len(_bi)), _dom_slot]
+                            // 3)
+                        _uniq = np.unique(_dom_pidx)
+                        _best_pidx = -1
+                        _best_z    = float('inf')
+                        for _p in _uniq:
+                            _z = float(
+                                _pos[_dom_pidx == _p, 2].mean())
+                            if _z < _best_z:
+                                _best_z    = _z
+                                _best_pidx = int(_p)
+                        self._palette_recoil_flags = [0] * 64
+                        if 0 <= _best_pidx < 64:
+                            self._palette_recoil_flags[_best_pidx] = 1
+                    except Exception:
+                        # Geometric detection can't run: fall
+                        # back to name-based pick as a
+                        # last-resort so at least SOMETHING
+                        # is flagged.
+                        try:
+                            from .gun_recoil import pick_recoil_bone
+                            _recoil_idx = pick_recoil_bone(palette)
+                        except Exception:
+                            _recoil_idx = None
+                        self._palette_recoil_flags = [0] * 64
+                        if (_recoil_idx is not None
+                                and 0 <= _recoil_idx < 64):
+                            self._palette_recoil_flags[_recoil_idx] = 1
+                    self._palette_recoil_needs_resolve = False
                 active.set_int_array('u_palette_recoil',
                                       self._palette_recoil_flags)
             else:
@@ -21013,6 +21565,34 @@ class Viewer:
         # over anything the standard UI pass laid down in the
         # top strip.
         self._render_xml_bar(self.width, self.height)
+        # Per Coffee 2026-05-20: imgui editor windows draw last
+        # so they float on top of every other UI pass.  No-op
+        # when no editor window is open.  Also mirror the
+        # editor's dirty set onto `_xml_bar_dirty_tabs` so the
+        # tab labels show the "*" marker.
+        if (getattr(self, 'xml_editor', None) is not None
+                and self.xml_editor.is_active()):
+            try:
+                self._xml_bar_dirty_tabs = (
+                    self.xml_editor.dirty_tab_indices())
+                self.xml_editor.render(
+                    self.width, self.height,
+                    dt=float(getattr(
+                        self, '_frame_dt', 1.0 / 60.0)))
+            except Exception as _exc:
+                import traceback as _tb
+                _tb.print_exc()
+                # Take the editor offline so we don't loop on a
+                # broken state every frame.
+                self.xml_editor._failed = True
+                try:
+                    self.log(
+                        f"XML editor render crashed -- "
+                        f"editor disabled: "
+                        f"{type(_exc).__name__}: {_exc}",
+                        color=(255, 120, 120))
+                except Exception:
+                    pass
         self._frame_timers['ui'] = (
             (_time.perf_counter() - _t_ui0) * 1000.0)
 
@@ -21609,6 +22189,7 @@ class Viewer:
             self._cfg['debug']         = bool(self._debug)
             self._cfg['show_terrain']  = bool(self.show_terrain)
             self._cfg['suspension_test'] = bool(self._suspension_test)
+            self._cfg['aim_locked']    = bool(self.aim_locked)
             self._cfg.pop('show_hardpoints', None)
             self._cfg.pop('show_fire_cards', None)
             _config.save(self._cfg)

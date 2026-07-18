@@ -73,9 +73,41 @@ def collect_payload(viewer, output_path):
     meshes_out = []
 
     for i, mesh in enumerate(viewer.meshes):
-        # Skip hidden meshes -- user toggled them off in the mesh window
+        # Skip hidden meshes -- user toggled them off in the mesh window.
+        #
+        # EXCEPT for the two track-ribbon classes the viewer hides
+        # BY DEFAULT at load time (per the runtime's "the chain pad
+        # system covers the visible role" reasoning):
+        #
+        #   * `_MAT` / `_mat` rubber-band meshes -- the static track-
+        #     wrap geometry every WoT chassis ships alongside the
+        #     skinned ribbons (`track_mat_L`, `track_mat_R`, etc.).
+        #     The viewer hides these unconditionally (viewer.py
+        #     ~4713-4719); without the override here they'd never
+        #     ship to FBX, which broke the "FBX has the rubber-band
+        #     tracks" behaviour TEPY had prior to the v1.230.x
+        #     hide-by-default change.
+        #
+        #   * `Track_*Shape*` skinned ribbons -- the bottom-run
+        #     deforming track segments that ride the road-wheel
+        #     bones.  The viewer hides these on tanks that have a
+        #     pad-system model (viewer.py ~4681-4690).  An FBX
+        #     consumer wants the static rubber-band silhouette
+        #     visible so the exported file SHOWS a tank, not a
+        #     wheel-only chassis.
+        #
+        # Per Coffee 2026-06-04 ("i want the ribbons exported to
+        # the fbx").  Hull / turret / gun / armor / etc. continue
+        # to honour the visibility checkbox so the user can still
+        # hide a part to omit it from the export.
         if not getattr(mesh, 'visible', True):
-            continue
+            mn    = (getattr(mesh, 'name',       '') or '').lower()
+            mn_id = (getattr(mesh, 'identifier', '') or '').lower()
+            is_mat_ribbon  = ('_mat' in mn) or ('_mat' in mn_id)
+            is_skin_ribbon = (mn.startswith('track_') and 'shape' in mn) \
+                          or (mn_id.startswith('track_') and 'shape' in mn_id)
+            if not (is_mat_ribbon or is_skin_ribbon):
+                continue
 
         # Preserve the original WoT identifier / mesh name as-is.  We
         # used to append '_{i}' for guaranteed uniqueness, but that
@@ -114,6 +146,26 @@ def collect_payload(viewer, output_path):
         display_name = (getattr(mesh, 'identifier', '')
                         or getattr(mesh, 'name', '')
                         or f'mesh_{i}')
+        # Export the BIND model matrix (static hardpoint placement
+        # snapshot at load time), NOT the per-frame `mesh.model_matrix`.
+        # Per Coffee 2026-06-04 ("turret and gun rotated wrong"):
+        # viewer.py:~19477-19488 rewrites `mesh.model_matrix` every
+        # frame as `chassis_pose @ _yaw_mat @ _pitch_mat @
+        # bind_model_matrix` (gun) or `chassis_pose @ _yaw_mat @ bind`
+        # (turret) so the runtime pose follows physics + mouse aim.
+        # If the user has driven the tank or moved the mouse before
+        # hitting Export, those compositions get baked into the FBX
+        # and the turret/gun lands at whatever angle it happened to
+        # be at click-time.  `bind_model_matrix` is the canonical
+        # "tank at origin, gun forward at pitch=0, turret at yaw=0"
+        # transform -- which is the static-asset shape every FBX
+        # consumer expects.  Fallback to live `model_matrix` only if
+        # bind isn't populated (very-early-load race or a
+        # standalone-prim path that didn't go through the chassis
+        # composition).
+        export_mat = getattr(mesh, 'bind_model_matrix', None)
+        if export_mat is None:
+            export_mat = mesh.model_matrix
         out = {
             'name':         display_name,
             'positions':    _arr_to_list(mesh.positions),
@@ -127,18 +179,40 @@ def collect_payload(viewer, output_path):
             # so static-hull-only exports stay clean.
             'uvs2':         _arr_to_list(getattr(mesh, 'uv1', None)),
             'indices':      _arr_to_list(mesh.indices.astype(np.int32).reshape(-1)),
-            'model_matrix': _arr_to_list(mesh.model_matrix.reshape(-1)),
+            'model_matrix': _arr_to_list(export_mat.reshape(-1)),
             'material':     material,
         }
 
-        # Optional skinning data (None for non-skinned meshes; the
-        # runner only adds the color attributes when both arrays exist).
-        if mesh.bone_indices is not None and mesh.bone_weights is not None:
-            out['bone_indices'] = _arr_to_list(mesh.bone_indices.astype(np.int32))
-            out['bone_weights'] = _arr_to_list(mesh.bone_weights)
-        else:
-            out['bone_indices'] = None
-            out['bone_weights'] = None
+        # Skinning data is intentionally NOT exported.  Per Coffee
+        # 2026-06-04 ("drop exporting bones.. just use the transforms
+        # from the xml file as we did before"): the FBX path is
+        # rigid-mesh-only now.  Each mesh ships its `model_matrix`
+        # (= the per-mesh transform the chassis XML's hardpoint
+        # placement produced at load time); consuming apps see a
+        # static-pose tank with hull / turret / gun / chassis at the
+        # right world positions, no armature, no skin clusters, no
+        # vertex-group binding required.
+        #
+        # The v1.243.0 attempt to also export the bone palette +
+        # vertex-group binding so wheels could deform in Blender
+        # broke the FBX export (`_attach_armature_modifiers`
+        # attached an Armature modifier to every mesh -- skinned or
+        # not -- without populating the vertex groups, so FBX
+        # writers emitted skin clusters with no bindings; consumer
+        # apps then collapsed or relocated those meshes per their
+        # own broken-skin recovery).  Reverted at v1.242.2, then
+        # this `None`-out lands at v1.242.3 to make sure no future
+        # change accidentally re-enables the same path.
+        #
+        # If a future workstream wants to ship skinned meshes
+        # again, the gate is: (a) only set these for meshes that
+        # actually carry skinning, (b) ship the bone palette + bind
+        # poses alongside, (c) apply the GL->Blender coordinate
+        # swizzle to every transform consistently, (d) validate
+        # round-trip through a real Blender + consumer (Max / Maya
+        # / Unity / Unreal) before merging.
+        out['bone_indices'] = None
+        out['bone_weights'] = None
 
         meshes_out.append(out)
 
