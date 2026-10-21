@@ -217,6 +217,12 @@ class MeshSet:
         'extract_tank_root',
         'extract_variant_dir',
         'extract_damaged',
+        # Import-dialog "Hide tracks" choice (marker-pin task 5/6).
+        # Lives on the SET, not a transient render flag, so Save Prim
+        # still sees it when it decides whether to write the dummy
+        # (empty) track-segment primitives.  Always False for native
+        # WoT loads.
+        'hide_tracks',
     )
 
     def __init__(self):
@@ -227,6 +233,7 @@ class MeshSet:
         self.exhaust_pixie    = None
         self.armor_color      = None
         self.scene_bbox       = None
+        self.hide_tracks      = False
         # Cached info-panel payload from VehicleXMLLoader.parse_info
         # (populated by load_vehicle).  Held on the set so flipping
         # back to a previously-loaded tank can rebuild the left info
@@ -264,6 +271,7 @@ class MeshSet:
         self.extract_tank_root   = None
         self.extract_variant_dir = None
         self.extract_damaged     = False
+        self.hide_tracks         = False
 
     def is_loaded(self):
         return bool(self.meshes)
@@ -1039,6 +1047,13 @@ class Viewer:
         # stays at bind, so the snapshot doubles as the
         # bind-pose dict for the no-op path).
         self._track_chassis_bones_bind = {}
+        # Wheel-node position overrides harvested from moved WoTPin_*
+        # markers on FBX import ({bone_name: (x,y,z) in the VISUAL's
+        # frame}).  Consumed by Save Prim, which binary-patches the
+        # chassis .visual_processed in res_mods.  Cleared on every
+        # native load and at the start of every import processing
+        # pass so stale overrides never leak across tanks.
+        self._imported_pin_overrides = {}
         # Rigid (no-residual) per-side pad chassis-local positions
         # cached at tank load.  Used by the spline render block to
         # clamp deflected pads against the four golden rules:
@@ -4640,6 +4655,8 @@ class Viewer:
     # any real `enumerate(self.meshes)` index.
     _MESH_ROW_TRACK_SEGS    = -1
     _MESH_ROW_TRACK_SPLINES = -2
+    _MESH_ROW_TRACK_RIBBONS = -3
+    _MESH_ROW_MARKERS       = -4
 
     def _populate_mesh_window(self):
         """Refresh the mesh-window's row list to match self.meshes plus
@@ -4658,17 +4675,92 @@ class Viewer:
         """
         mw = self.ui.mesh_window
         mw.on_toggle = self._on_mesh_visibility_toggled
+
+        # ---- Classify track-ribbon meshes up front -------------------
+        # Per Coffee 2026-10-19 ("Visibility should hide all track
+        # segments, not one at a time"): every rubber-band / skinned
+        # track-ribbon mesh collapses into ONE 'Track Ribbons' row --
+        # a single checkbox drives the whole set.  Two classes:
+        #
+        #   * skinned ribbons -- `track_<L|R>Shape*` primitive groups
+        #     (and split variants).  Default visibility gated on the
+        #     chassis shipping `track_segment_models`: when the
+        #     instanced pad chain exists it covers the visible role,
+        #     so the ribbon hides (per Coffee 2026-05-11); when the
+        #     tank has NO pad models (850/1215 tanks per the
+        #     scan_all_chassis_tracks sweep) the ribbon is the only
+        #     chassis track and stays visible.
+        #
+        #   * `_mat` rubber bands -- hidden unconditionally (per
+        #     Coffee 2026-05-16); the name can live on
+        #     `mesh.identifier` rather than `mesh.name`, so check
+        #     both, case-insensitive.
+        ci_check = (getattr(self, '_pending_chassis_info', None)
+                    or {})
+        has_pads = bool(
+            (ci_check.get('track_segment_models')
+             or {}).get('segmentModelLeft'))
+        # Import-dialog "Hide tracks" (marker-pin task 5): when the
+        # ACTIVE set is an import flagged hide_tracks, every ribbon
+        # defaults to hidden regardless of the native rules.
+        hide_tracks_import = (
+            self._active_set_name == 'fbx'
+            and bool(getattr(self._fbx_set, 'hide_tracks', False)))
+        ribbon_idx = []       # all grouped mesh indices
+        for i, mesh in enumerate(self.meshes):
+            mn    = (getattr(mesh, 'name',       '') or '').lower()
+            mn_id = (getattr(mesh, 'identifier', '') or '').lower()
+            is_skin_ribbon = (
+                (mn.startswith('track_') and 'shape' in mn)
+                or (mn_id.startswith('track_') and 'shape' in mn_id))
+            is_mat_ribbon = ('_mat' in mn) or ('_mat' in mn_id)
+            if not (is_skin_ribbon or is_mat_ribbon):
+                continue
+            ribbon_idx.append(i)
+            # Default state, same rules as the old per-row logic.
+            if hide_tracks_import or is_mat_ribbon:
+                mesh.visible = False
+            elif is_skin_ribbon and has_pads:
+                mesh.visible = False
+            else:
+                mesh.visible = True
+        self._track_ribbon_mesh_indices = ribbon_idx
+
+        # ---- Classify marker meshes (wheel pins / bone balls) --------
+        # Per Coffee 2026-10-19 ("make the[m] visible and add check box
+        # to the visibility panel"): the synthetic markers spawned at
+        # load time (`_spawn_marker_meshes`) collapse into ONE
+        # 'Markers' row, same pattern as the ribbons.  Covers both
+        # native loads and FBX imports that carry WoTPin_*/WoTBall_*
+        # meshes back in.
+        from .exporters.markers import is_marker_name
+        marker_idx = [
+            i for i, mesh in enumerate(self.meshes)
+            if is_marker_name(getattr(mesh, 'name', '')
+                              or getattr(mesh, 'identifier', ''))]
+        self._marker_mesh_indices = marker_idx
+
         rows = []
         for i, mesh in enumerate(self.meshes):
+            if i in ribbon_idx or i in marker_idx:
+                continue        # grouped under a virtual row below
             label = (mesh.identifier
                      or getattr(mesh, 'name', '')
                      or f'mesh_{i}')
             rows.append((i, f'#{i:>2}  {label}'))
-        # Virtual rows for the track system -- segments + splines.
+        # Virtual rows for the track system -- segments + splines +
+        # the grouped ribbon set (only when this tank has ribbons) +
+        # the grouped marker set (only when markers exist).
         rows.append(
             (self._MESH_ROW_TRACK_SEGS,    'Track Segments'))
         rows.append(
             (self._MESH_ROW_TRACK_SPLINES, 'Track Splines'))
+        if ribbon_idx:
+            rows.append(
+                (self._MESH_ROW_TRACK_RIBBONS, 'Track Ribbons'))
+        if marker_idx:
+            rows.append(
+                (self._MESH_ROW_MARKERS, 'Markers'))
         mw.populate(rows, self.ui._make_tex)
         # populate() always reset visible=True; sync the virtual
         # rows back to their flag values so the checkbox state
@@ -4680,83 +4772,17 @@ class Viewer:
             elif row.mesh_index == self._MESH_ROW_TRACK_SPLINES:
                 row.visible = bool(
                     getattr(self, '_show_track_spline', True))
-            else:
-                # Per Coffee 2026-05-11 ("un check the
-                # track_mat_r/l_skinned on the meshes visibility
-                # panel"): skinned-track ribbon meshes default
-                # to UNCHECKED on tanks that ALSO have the
-                # instanced pad-mesh chain (= the new chain
-                # path).  Pattern matches the
-                # `track_<L|R>Shape*` / `track_<L|R>_Shape`
-                # primitive groups as well as their split
-                # variants (Tiger I, etc.).
-                #
-                # Per Coffee 2026-05-16 ("Move on to finding why
-                # we [are] missing some chassis tracks being
-                # missed"): the `scan_all_chassis_tracks.py`
-                # sweep flagged 850 / 1215 tanks with ALLSHP --
-                # every chassis-track section matches the
-                # ribbon SKIP pattern.  That includes a long
-                # tail of low-tier and Czech tanks whose ONLY
-                # chassis-track mesh is the ribbon (no separate
-                # pad meshes authored).  Auto-hiding the
-                # ribbon on those tanks leaves them with no
-                # visible chassis track at all -- the chain
-                # just disappears.
-                #
-                # Gate the auto-hide on whether this tank ships
-                # `track_segment_models` (= the pad-mesh
-                # references) in the chassis XML.  If present,
-                # the new pad system can stand in for the
-                # ribbon and we hide it as before.  If absent,
-                # the ribbon stays visible (no replacement
-                # available).
-                idx = row.mesh_index
-                if 0 <= idx < len(self.meshes):
-                    mn = (getattr(self.meshes[idx], 'name',
-                                   '') or '')
-                    is_ribbon = (
-                        mn.startswith('track_')
-                        and 'Shape' in mn)
-                    if is_ribbon:
-                        ci_check = (getattr(
-                            self, '_pending_chassis_info', None)
-                            or {})
-                        has_pads = bool(
-                            (ci_check.get('track_segment_models')
-                             or {}).get('segmentModelLeft'))
-                        if has_pads:
-                            row.visible = False
-                            self.meshes[idx].visible = False
-                    # Per Coffee 2026-05-16 ("make all _MAT
-                    # rubber band invisible when you populate
-                    # the Visible window.. unchecked default
-                    # for rubber bands"): WoT chassis primitives
-                    # ship `track_mat_<L|R>` rubber-band meshes
-                    # alongside the skinned ribbon.  In TEPY
-                    # the instanced-pad chain + spline overlay
-                    # cover that role, so the static rubber
-                    # band shouldn't render by default.
-                    #
-                    # Per Coffee 2026-05-16 ("trank_mat_l/r is
-                    # still being created cheked on the
-                    # visivlity panel"): the rubber-band name
-                    # actually lives on `mesh.identifier`
-                    # (= the WoT material identifier shown as
-                    # the visibility row label) -- NOT on
-                    # `mesh.name` (= primitive-group name).
-                    # Check both attrs for the `_mat` substring,
-                    # case-insensitive.  Unconditional (not
-                    # gated on pad-system presence) -- the
-                    # static rubber band doesn't deform with
-                    # suspension on any tank that ships it.
-                    mn_id = (getattr(
-                        self.meshes[idx], 'identifier',
-                        '') or '')
-                    if ('_mat' in mn.lower()
-                            or '_mat' in mn_id.lower()):
-                        row.visible = False
-                        self.meshes[idx].visible = False
+            elif row.mesh_index == self._MESH_ROW_TRACK_RIBBONS:
+                # Checked when ANY grouped mesh renders (the mixed
+                # default -- skinned ribbon visible, _mat hidden --
+                # reads as "tracks are on").  Toggling it sets the
+                # WHOLE set, so after one off+on cycle every ribbon
+                # (incl. _mat) shows -- user-driven, acceptable.
+                row.visible = any(
+                    self.meshes[i].visible for i in ribbon_idx)
+            elif row.mesh_index == self._MESH_ROW_MARKERS:
+                row.visible = any(
+                    self.meshes[i].visible for i in marker_idx)
 
     def _on_mesh_visibility_toggled(self, mesh_index, new_visible):
         """Mesh-window callback: dispatch the checkbox state onto the
@@ -4786,8 +4812,287 @@ class Viewer:
                 print(f"[viewer] config save "
                       f"(show_track_spline) failed: {exc}")
             return
+        if mesh_index == self._MESH_ROW_TRACK_RIBBONS:
+            # One checkbox, whole ribbon set (skinned ribbons +
+            # _mat rubber bands) -- per Coffee 2026-10-19
+            # ("Visibility should hide all track segments, not
+            # one at a time").
+            for i in getattr(self, '_track_ribbon_mesh_indices',
+                             None) or []:
+                if 0 <= i < len(self.meshes):
+                    self.meshes[i].visible = bool(new_visible)
+            return
+        if mesh_index == self._MESH_ROW_MARKERS:
+            # One checkbox, every wheel pin + bone ball.
+            for i in getattr(self, '_marker_mesh_indices',
+                             None) or []:
+                if 0 <= i < len(self.meshes):
+                    self.meshes[i].visible = bool(new_visible)
+            return
         if 0 <= mesh_index < len(self.meshes):
             self.meshes[mesh_index].visible = bool(new_visible)
+
+    def _spawn_marker_meshes(self):
+        """Build the synthetic wheel-pin / bone-ball marker meshes as
+        REAL renderable meshes and append them to `self.meshes`.
+
+        Per Coffee 2026-10-19 ("i cant see the ma[r]kers when I load a
+        tank"): the markers aren't just an export artifact any more --
+        they render in the viewer so the user can check pin placement
+        before exporting.  Geometry + colors come from the same
+        `exporters.markers.build_marker_meshes` the export path uses,
+        so what you see in the viewer is exactly what lands in the FBX.
+
+        The export path (`collect_payload`) SKIPS these live meshes and
+        regenerates its own set from the bone data, so no duplicates
+        ship.  Save-Prim ignores them too (`component`/`primitives_zip`
+        stay empty).  Visibility is driven by the grouped 'Markers'
+        row in the Visible window.
+        """
+        try:
+            from .exporters.markers import build_marker_meshes
+            marker_defs = build_marker_meshes(self)
+        except Exception as exc:
+            print(f"[markers] generation failed: {exc}")
+            return
+        if not marker_defs:
+            return
+        made = 0
+        for md in marker_defs:
+            try:
+                parsed = {
+                    'name':   md['name'],
+                    'format': 'marker',
+                    'vertices': {
+                        'positions': np.asarray(md['positions'],
+                                                dtype=np.float32),
+                        'normals':   np.asarray(md['normals'],
+                                                dtype=np.float32),
+                        'tangents':  None,
+                        'binormals': None,
+                        'uv0':       np.asarray(md['uvs'],
+                                                dtype=np.float32),
+                    },
+                    'indices': np.asarray(md['indices'],
+                                          dtype=np.uint32),
+                }
+                mesh = Mesh(parsed)
+                mesh.identifier = md['name']
+                mm = np.asarray(md['model_matrix'],
+                                dtype=np.float32).reshape(4, 4)
+                mesh.model_matrix      = mm
+                mesh.bind_model_matrix = mm.copy()
+                col = ((md.get('material') or {}).get('base_color')
+                       or (0.7, 0.7, 0.7, 1.0))
+                mesh.diffuse_tex_id = TextureLoader.create_solid_color(
+                    col[:3])
+                mesh.build_vao()
+                self.meshes.append(mesh)
+                made += 1
+            except Exception as exc:
+                print(f"[markers] {md.get('name', '?')}: {exc}")
+        if made:
+            print(f"[markers] {made} marker meshes spawned "
+                  f"(wheel pins + bone balls)")
+
+    def _process_imported_markers(self):
+        """Marker-pin automation after an FBX/GLB/OBJ import.
+
+        Pins are identified BY NAME -- `WoTPin_<roleToken>_<boneName>`
+        (role has no underscores, so the bone name is everything after
+        the second '_'; Blender's '.001' collision suffix is peeled
+        off).  Per Coffee 2026-10-19 ("pins need a name to know what
+        thet are on import").
+
+        * Pins present: compare each pin's position against the game
+          visual's wheel-node position (PKG twin's
+          `_track_chassis_bones_bind`).  Any pin moved more than 5 mm
+          is recorded in `self._imported_pin_overrides`
+          {bone_name: target pos, VISUAL frame}; Save Prim then writes
+          a patched Chassis.visual_processed to res_mods alongside the
+          primitives (binary patch, see tankExporterPy/visual_patch.py).
+          Only the BARE wheel node is moved -- its `*_BlendBone` child
+          rides along through the node hierarchy.
+
+        * No pins: spawn markers from the game visual so the user can
+          see the wheel locations, and pop up a message saying the
+          import carried no wheel-location pins.
+        """
+        from .exporters.markers import PIN_PREFIX
+        self._imported_pin_overrides = {}
+
+        fbx = self._fbx_set
+        if not fbx.is_loaded():
+            return
+
+        # ---- 1. Collect pins from the imported set -------------------
+        pins = []    # (bone_name, role_token, world_pos viewer frame)
+        for m in fbx.meshes:
+            nm = (getattr(m, 'name', '') or '').split('.')[0]
+            if not nm.startswith(PIN_PREFIX):
+                continue
+            rest = nm[len(PIN_PREFIX):]
+            role, _, bone = rest.partition('_')
+            if not bone:
+                continue
+            try:
+                c = np.asarray(m.positions,
+                               dtype=np.float64).mean(axis=0)
+                w = (np.asarray(m.model_matrix, dtype=np.float64)
+                     @ np.array([c[0], c[1], c[2], 1.0]))[:3]
+            except Exception:
+                continue
+            pins.append((bone, role, w))
+
+        bones = getattr(self, '_track_chassis_bones_bind', None) or {}
+
+        # ---- 2. No pins: create them + tell the user -----------------
+        if not pins:
+            msg = ("This model has no wheel-location pins "
+                   "(WoTPin_* meshes).")
+            if bones:
+                self._spawn_marker_meshes()
+                self._populate_mesh_window()
+                msg += ("  Pins have been created from the game "
+                        "visual's wheel positions.")
+            self.log_error("Import: no wheel-location pins in the "
+                           "file -- markers created from game visual."
+                           if bones else
+                           "Import: no wheel-location pins in the "
+                           "file (and no game visual to build them "
+                           "from).")
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                _root = tk.Tk()
+                _root.withdraw()
+                try:
+                    _root.attributes('-topmost', True)
+                except Exception:
+                    pass
+                messagebox.showinfo("No wheel pins", msg, parent=_root)
+                _root.destroy()
+            except Exception as exc:
+                print(f"[markers] popup failed: {exc}")
+            return
+
+        # ---- 3. Pins present: compare against the game visual --------
+        if not bones:
+            self.log_error(
+                f"Import: {len(pins)} wheel pins found, but no game "
+                f"visual bone data to compare against (PKG twin load "
+                f"failed?) -- pin positions NOT applied.")
+            return
+
+        # Pin world (viewer frame) -> chassis-local -> VISUAL frame.
+        # The chassis component matrix comes off the PKG twin; the
+        # visual frame has Z opposite the chassis mesh-vertex frame
+        # (same negation rule the export side applies in reverse).
+        chassis_mm = np.eye(4, dtype=np.float64)
+        for pm in self._pkg_set.meshes:
+            if (getattr(pm, 'component', '') or '').lower() == 'chassis':
+                bm = getattr(pm, 'bind_model_matrix', None)
+                if bm is None:
+                    bm = pm.model_matrix
+                chassis_mm = np.asarray(bm, dtype=np.float64)
+                break
+        try:
+            inv_mm = np.linalg.inv(chassis_mm)
+        except np.linalg.LinAlgError:
+            inv_mm = np.eye(4, dtype=np.float64)
+
+        PIN_MATCH_EPS = 0.005    # 5 mm
+        overrides = {}
+        n_matched = 0
+        for bone, role, w in pins:
+            local = (inv_mm @ np.array([w[0], w[1], w[2], 1.0]))[:3]
+            target_visual = np.array(
+                [local[0], local[1], -local[2]], dtype=np.float64)
+            cur = bones.get(bone)
+            if cur is None:
+                self.log_error(
+                    f"pin {bone} ({role}): no such node in the game "
+                    f"visual -- skipped")
+                continue
+            d = float(np.linalg.norm(target_visual
+                                     - np.asarray(cur, np.float64)))
+            if d > PIN_MATCH_EPS:
+                overrides[bone] = tuple(float(v) for v in target_visual)
+                self.log(
+                    f"pin {bone} ({role}): moved {d:.3f} m",
+                    color=(255, 220, 140))
+            else:
+                n_matched += 1
+
+        self._imported_pin_overrides = overrides
+        if overrides:
+            self.log(
+                f"Import: {len(overrides)} wheel pin(s) moved, "
+                f"{n_matched} unchanged.  Save Prim will write a "
+                f"patched Chassis.visual_processed with the new "
+                f"wheel positions.", color=(255, 220, 140))
+        else:
+            self.log(
+                f"Import: all {n_matched} wheel pins match the game "
+                f"visual -- no visual rewrite needed.",
+                color=(180, 220, 255))
+
+    def _write_patched_chassis_visual(self, prim_zip_path, res_mods):
+        """Write a chassis .visual_processed to res_mods with the
+        wheel nodes moved to `self._imported_pin_overrides` positions.
+
+        Source bytes come from the pkg (vanilla visual, BWXML); the
+        patch is a 12-byte-per-node in-place translation rewrite
+        (`visual_patch.patch_visual_node_positions`), so everything
+        else in the file -- renderSets, geometry refs, materials --
+        stays byte-identical to the original.
+
+        Args:
+            prim_zip_path: canonical pkg path of the chassis
+                .primitives_processed being saved (already /crash/-
+                swapped when the damaged variant is loaded).
+            res_mods: destination res_mods/<version>/ root.
+        """
+        from .visual_patch import patch_visual_node_positions
+
+        overrides = self._imported_pin_overrides or {}
+        if not overrides:
+            return
+        visual_zip = prim_zip_path.replace('.primitives_processed',
+                                           '.visual_processed')
+        if self._pkg_extractor is None:
+            self.log_error("visual patch: no PkgExtractor -- skipped")
+            return
+        local = self._pkg_extractor.extract(visual_zip)
+        if not local:
+            self.log_error(f"visual patch: could not extract "
+                           f"{visual_zip}")
+            return
+        with open(local, 'rb') as fh:
+            raw = fh.read()
+
+        patched, applied, missing = patch_visual_node_positions(
+            raw, overrides)
+        for nm in missing:
+            self.log_error(f"visual patch: node {nm!r} not found in "
+                           f"{os.path.basename(visual_zip)} -- skipped")
+        if not applied:
+            self.log_error("visual patch: nothing applied -- "
+                           "no file written")
+            return
+
+        rel = visual_zip.replace('/', os.sep).lstrip(os.sep)
+        out_path = os.path.join(res_mods, rel)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, 'wb') as fh:
+            fh.write(patched)
+        for nm, (old, new) in applied.items():
+            d = float(np.linalg.norm(
+                np.asarray(new, np.float64) - np.asarray(old, np.float64)))
+            print(f"[save-prim]   visual node {nm}: moved {d:.3f} m")
+        self.log(f"Chassis visual: {len(applied)} wheel node(s) "
+                 f"patched -> {os.path.basename(out_path)}")
+        print(f"[save-prim] patched visual -> {out_path}")
 
     def _show_paths_dialog(self):
         """Open the modal Set-Paths dialog with current config as initial."""
@@ -5378,6 +5683,10 @@ class Viewer:
 
         from . import io_formats
 
+        # Default each time the dialog opens -- never inherit the
+        # previous import's choice.
+        self._import_hide_tracks = False
+
         title = ('Export tank -- pick format' if direction == 'export'
                  else 'Import tank -- pick format')
 
@@ -5388,7 +5697,10 @@ class Viewer:
         except Exception:
             pass
         win.resizable(False, False)
-        win.geometry('360x420')
+        # Import needs extra height for the Hide-tracks checkbox row;
+        # 13 format rows + header + buttons already fill 420.
+        win.geometry('380x470' if direction == 'import'
+                     else '360x420')
 
         # Header label
         hdr = ('Pick the format to write.'
@@ -5407,6 +5719,63 @@ class Viewer:
         # one click before hitting Continue.
         key = 'export' if direction == 'export' else 'import_'
         choice_var = tk.StringVar(value='fbx')
+
+        # Result holder -- _confirm() and _cancel() write into this
+        chosen = []
+        hide_tracks_var = None
+
+        def _confirm():
+            chosen.clear()
+            ext = choice_var.get()
+            if ext:
+                chosen.append(ext)
+            self._import_hide_tracks = bool(
+                hide_tracks_var.get()) if hide_tracks_var else False
+            win.destroy()
+
+        def _cancel():
+            chosen.clear()
+            win.destroy()
+
+        # Bottom-anchored widgets are packed FIRST with side='bottom'
+        # so the FIXED-SIZE window always reserves their space.  Tk
+        # pack hands out space in pack order; v1.251.0 packed the
+        # Continue/Cancel row LAST, after an expand=True rows frame
+        # plus the new Hide-tracks checkbox -- the checkbox consumed
+        # the slack the buttons used to fit in and the buttons fell
+        # off the bottom edge of the 420px window (per Coffee
+        # 2026-10-20: "no ok on import screen").  side='bottom'
+        # stacks upward in pack order: buttons bottom-most, then the
+        # checkbox, then its separator.
+        btn_frame = tk.Frame(win, padx=12, pady=8)
+        btn_frame.pack(fill='x', side='bottom')
+        tk.Button(btn_frame, text='Cancel', width=10,
+                  command=_cancel).pack(side='right', padx=4)
+        tk.Button(btn_frame, text='Continue', width=10,
+                  command=_confirm).pack(side='right', padx=4)
+
+        # Import-only option: "Hide tracks".  Per Coffee 2026-10-19
+        # (marker-pin task 5/6): when ticked, the imported tank's
+        # rubber-band track meshes don't render, AND Save Prim writes
+        # EMPTY (dummy) track-segment primitives so the in-game mod
+        # ships without the track chain (monster-truck-wheels use
+        # case).  The choice lands on `self._import_hide_tracks`,
+        # which `_on_import_clicked` persists onto the imported
+        # MeshSet so the writer still sees it at Save Prim time.
+        if direction == 'import':
+            hide_tracks_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                win,
+                text='Hide tracks (Save Prim writes empty track '
+                     'segments)',
+                variable=hide_tracks_var,
+                anchor='w', justify='left',
+                padx=12).pack(fill='x', anchor='w', side='bottom')
+            ttk.Separator(win, orient='horizontal').pack(
+                fill='x', padx=8, side='bottom')
+
+        # Format radio rows last -- the expanding frame gets whatever
+        # vertical space is left after the reserved bottom widgets.
         rows_frame = tk.Frame(win, padx=12, pady=8)
         rows_frame.pack(fill='both', expand=True)
         for f in io_formats.FORMATS:
@@ -5420,28 +5789,6 @@ class Viewer:
                 anchor='w', justify='left',
                 state=('normal' if supported else 'disabled'))
             rb.pack(fill='x', anchor='w')
-
-        # Result holder -- _confirm() and _cancel() write into this
-        chosen = []
-
-        def _confirm():
-            chosen.clear()
-            ext = choice_var.get()
-            if ext:
-                chosen.append(ext)
-            win.destroy()
-
-        def _cancel():
-            chosen.clear()
-            win.destroy()
-
-        # Buttons row
-        btn_frame = tk.Frame(win, padx=12, pady=8)
-        btn_frame.pack(fill='x', side='bottom')
-        tk.Button(btn_frame, text='Cancel', width=10,
-                  command=_cancel).pack(side='right', padx=4)
-        tk.Button(btn_frame, text='Continue', width=10,
-                  command=_confirm).pack(side='right', padx=4)
 
         # Window close (X) treated as Cancel
         win.protocol('WM_DELETE_WINDOW', _cancel)
@@ -5655,7 +6002,12 @@ class Viewer:
         out = {key: [] for key, _label in self._COMPONENT_ORDER}
         out[''] = []
         for m in self.meshes:
-            comp = getattr(m, 'component', '') or ''
+            # Native loads tag `component` directly.  Imported meshes
+            # keep component '' (so the render pose loop leaves them
+            # alone -- no turret/gun aim-follow on imports) and carry
+            # the adopted WoT grouping on `wot_component` instead.
+            comp = (getattr(m, 'component', '')
+                    or getattr(m, 'wot_component', '') or '')
             if comp not in out:
                 out[''].append(m)
             else:
@@ -5711,7 +6063,13 @@ class Viewer:
         except Exception:
             pass
         win.resizable(False, False)
-        win.geometry('360x340')
+        # +40px when the wheel-positions row shows (moved pins from an
+        # import) -- the window is fixed-size, so the extra row needs
+        # reserved space or the bottom buttons clip (same trap as the
+        # 1.251.1 format-picker fix).
+        pin_overrides = getattr(self, '_imported_pin_overrides',
+                                None) or {}
+        win.geometry('360x380' if pin_overrides else '360x340')
 
         tk.Label(win,
                  text='Tick the components to write back as\n'
@@ -5737,6 +6095,27 @@ class Viewer:
                 anchor='w', justify='left',
                 state=('normal' if present else 'disabled'))
             cb.pack(fill='x', anchor='w')
+
+        # ---- wheel-position (moved pin) checkbox ----------------------
+        # Shown only when the import pass detected moved WoTPin_*
+        # markers.  Per Coffee 2026-10-20 ("need to check if pins
+        # changed when importing and enabling that to be saved"):
+        # the moved-pin visual patch is its own save option now,
+        # independent of whether the Chassis primitives are ticked.
+        pin_var = None
+        if pin_overrides:
+            ttk.Separator(win, orient='horizontal').pack(
+                fill='x', padx=8)
+            pin_var = tk.BooleanVar(value=True)
+            _n = len(pin_overrides)
+            tk.Checkbutton(
+                win,
+                text=(f"Wheel positions    ({_n} moved pin"
+                      f"{'s' if _n != 1 else ''} -> "
+                      f"Chassis.visual_processed)"),
+                variable=pin_var,
+                anchor='w', justify='left',
+                padx=12).pack(fill='x', anchor='w')
 
         # ---- separator + texture-mode radios --------------------------
         ttk.Separator(win, orient='horizontal').pack(fill='x', padx=8)
@@ -5792,6 +6171,8 @@ class Viewer:
             result['components']   = chosen
             result['texture_mode'] = mode
             result['custom_dir']   = custom_dir
+            result['wheel_positions'] = bool(
+                pin_var.get()) if pin_var is not None else False
             win.destroy()
 
         def _cancel():
@@ -5876,11 +6257,15 @@ class Viewer:
         chosen      = picked.get('components', [])
         texture_mode = picked.get('texture_mode', 'extract')
         custom_dir   = picked.get('custom_dir')
-        if not chosen:
+        save_wheel_positions = bool(picked.get('wheel_positions'))
+        if not chosen and not save_wheel_positions:
             self.log("Save Prim: cancelled.")
             return
-        self.log_status(f"Save Prim: {', '.join(chosen)}")
-        self.log(f"components: {', '.join(chosen)}  "
+        _summary = list(chosen)
+        if save_wheel_positions:
+            _summary.append('wheel positions')
+        self.log_status(f"Save Prim: {', '.join(_summary)}")
+        self.log(f"components: {', '.join(_summary)}  "
                  f"textures={texture_mode}")
 
         opts = PrimitivesWriteOptions()
@@ -5938,6 +6323,23 @@ class Viewer:
             out_path = os.path.join(res_mods, rel)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
+            # Boneless-chassis guard, per Coffee 2026-10-20 ("wtf it
+            # wont load"): a WoT chassis is skinned -- if none of the
+            # meshes carry bone data here, the source was almost
+            # certainly a BROKEN res_mods override loaded back in
+            # (prefer_res_mods default) or a pre-1.254 FBX.  The game
+            # rejects a boneless chassis (visual renderSet declares a
+            # skinned stream), so flag it loudly before writing.
+            if key == 'chassis' and not any(
+                    getattr(m, 'bone_indices', None) is not None
+                    for m in meshes_for_comp):
+                self.log_error(
+                    f"{label}: WARNING -- no bone data on any chassis "
+                    f"mesh.  The game will likely REJECT this file.  "
+                    f"Did the tank load from a broken res_mods "
+                    f"override, or was the FBX exported before "
+                    f"v1.254?")
+
             print(f"[save-prim] {label}: writing -> {out_path}")
             ok, msg = write_primitives(meshes_for_comp, out_path,
                                         options=opts)
@@ -5966,6 +6368,149 @@ class Viewer:
             self._save_component_textures(
                 label, visual_zip, res_mods,
                 texture_mode, custom_dir)
+
+        # Moved wheel pins (FBX import): binary-patch the chassis
+        # visual so the game's wheel nodes land where the user put
+        # the WoTPin_* markers in Blender.  Its OWN save option (the
+        # "Wheel positions" checkbox in the picker, default ticked
+        # when moved pins exist) -- independent of whether the
+        # Chassis primitives were written, per Coffee 2026-10-20
+        # ("need to check if pins changed when importing and
+        # enabling that to be saved").
+        if (save_wheel_positions
+                and getattr(self, '_imported_pin_overrides', None)):
+            chassis_zip = ''
+            for m in groups.get('chassis', []):
+                p = (getattr(m, 'primitives_zip', '') or '').strip()
+                if p:
+                    chassis_zip = p
+                    break
+            if not chassis_zip:
+                # Imported set without adopted tags (align miss) --
+                # fall back to the PKG twin's chassis path.
+                for m in getattr(self._pkg_set, 'meshes', None) or []:
+                    if ((getattr(m, 'component', '') or '').lower()
+                            == 'chassis'):
+                        p = (getattr(m, 'primitives_zip', '')
+                             or '').strip()
+                        if p:
+                            chassis_zip = p
+                            break
+            if not chassis_zip:
+                self.log_error("Wheel positions: no chassis source "
+                               "path found -- visual patch skipped")
+            else:
+                if (getattr(self, '_loaded_damaged', False)
+                        and '/normal/' in chassis_zip):
+                    chassis_zip = chassis_zip.replace('/normal/',
+                                                      '/crash/')
+                try:
+                    self._write_patched_chassis_visual(chassis_zip,
+                                                       res_mods)
+                except Exception as exc:
+                    self.log_error(f"Wheel positions: visual patch "
+                                   f"FAILED -- {exc}")
+                    print(f"[save-prim] visual patch failed: {exc}")
+
+        # Marker-pin task 6: when the import was loaded with "Hide
+        # tracks" ticked, also write EMPTY (dummy) track-segment
+        # primitives so the in-game mod ships without the track chain.
+        # Fires once per Save Prim, after the component loop.
+        if bool(getattr(self._fbx_set, 'hide_tracks', False)):
+            try:
+                self._write_dummy_track_segments(res_mods)
+            except Exception as exc:
+                self.log_error(f"dummy track segments FAILED -- {exc}")
+                print(f"[save-prim] dummy segments failed: {exc}")
+
+    def _write_dummy_track_segments(self, res_mods):
+        """Write structurally-valid but EMPTY copies of every track
+        segment `.primitives_processed` to res_mods.
+
+        "Empty" = the original file re-encoded with every vertex
+        position zeroed: section layout, group counts, vertex counts,
+        formats and names all match the original byte-structure the
+        engine expects, but every triangle is degenerate at the
+        origin so nothing renders.  Use case (per Coffee 2026-10-19):
+        modders replace the wheels (monster-truck style), move the
+        pins, and ship the tank with NO rubber-band track.
+
+        Segment paths come from the chassis XML's
+        `track_segment_models` (same source Extract uses); the
+        damaged-variant /normal/ -> /crash/ swap applies when
+        relevant (segment files usually live outside the variant
+        tree, so the swap is a no-op guard).
+        """
+        from .loaders import MeshParser
+        from .writers import write_primitives, PrimitivesWriteOptions
+
+        seg_paths = self._enumerate_track_segment_pkg_paths()
+        if not seg_paths:
+            self.log("dummy segments: this tank declares no track "
+                     "segment models -- nothing to write")
+            return
+        if self._pkg_extractor is None:
+            self.log_error("dummy segments: PkgExtractor not "
+                           "configured -- skipped")
+            return
+
+        loaded_damaged = bool(getattr(self, '_loaded_damaged', False))
+        opts = PrimitivesWriteOptions()
+        seen = set()
+        written = 0
+        for seg_key, model_zip in seg_paths:
+            prim_zip = model_zip.replace('.model',
+                                         '.primitives_processed')
+            if loaded_damaged and '/normal/' in prim_zip:
+                prim_zip = prim_zip.replace('/normal/', '/crash/')
+            if prim_zip in seen:
+                continue        # L/R often share one segment file
+            seen.add(prim_zip)
+
+            local = self._pkg_extractor.extract(prim_zip)
+            if not local or not os.path.isfile(local):
+                self.log_error(f"dummy segments [{seg_key}]: "
+                               f"{prim_zip} not found in pkg")
+                continue
+            try:
+                parsed_groups = MeshParser.parse_primitives_processed(
+                    local)
+            except Exception as exc:
+                self.log_error(f"dummy segments [{seg_key}]: parse "
+                               f"failed -- {exc}")
+                continue
+            if not parsed_groups:
+                self.log_error(f"dummy segments [{seg_key}]: no "
+                               f"groups parsed -- skipped")
+                continue
+
+            # Build writer-side Mesh objects (no VAO upload -- the
+            # writer only reads the arrays) and zero every position.
+            # Winding / Z conventions don't matter: a triangle whose
+            # three corners are all (0,0,0) renders nothing whichever
+            # way it faces.
+            dummies = []
+            for g in parsed_groups:
+                m = Mesh(g)
+                m.positions = np.zeros_like(m.positions)
+                dummies.append(m)
+
+            rel = prim_zip.replace('/', os.sep).lstrip(os.sep)
+            out_path = os.path.join(res_mods, rel)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            ok, msg = write_primitives(dummies, out_path, options=opts)
+            if ok:
+                written += 1
+                self.log(f"dummy segments [{seg_key}]: "
+                         f"{os.path.basename(out_path)} written (all "
+                         f"verts zeroed)")
+                print(f"[save-prim] dummy segment -> {out_path}")
+            else:
+                self.log_error(f"dummy segments [{seg_key}]: write "
+                               f"FAILED -- {msg}")
+        if written:
+            self.log(f"Hide tracks: {written} empty track-segment "
+                     f"file(s) written to res_mods")
 
     def _save_component_textures(self, label, visual_zip,
                                   res_mods, texture_mode, custom_dir):
@@ -13211,6 +13756,18 @@ class Viewer:
         # `result` is the payload dict
         n = self.load_imported_payload(result)
 
+        # Persist the dialog's "Hide tracks" choice on the imported
+        # set (marker-pin task 5/6): drives both the render-side hide
+        # (grouped 'Track Ribbons' row defaults off) and the Save-Prim
+        # dummy-segment write.
+        self._fbx_set.hide_tracks = bool(
+            getattr(self, '_import_hide_tracks', False))
+        if self._fbx_set.hide_tracks:
+            self.log("Import: Hide tracks ON -- rubber-band tracks "
+                     "hidden; Save Prim will write EMPTY track "
+                     "segments.", color=(255, 220, 140))
+            self._populate_mesh_window()
+
         # Recover damaged-variant flag from the filename suffix.  The
         # exporter writes `<tank>_damaged.<ext>` for crashed variants
         # (see `_on_export_clicked`); detect that here so a later
@@ -15301,13 +15858,30 @@ class Viewer:
 
         Match strategy
         --------------
-        Our exporter writes mesh names as f"{display}_{i}", where
-        display = (mesh.identifier or mesh.name or 'mesh') and i is
-        the original index.  After a Blender round-trip, the FBX
+        Our exporter names meshes `display` = (mesh.identifier or
+        mesh.name or f'mesh_{i}') -- NO index suffix since the
+        "don't rename the parts" change in collect_payload.  Legacy
+        exports (pre-suffix-removal) used f"{display}_{i}"; both
+        forms are accepted.  After a Blender round-trip, the FBX
         importer hands the string back verbatim (sometimes with a
-        '.001' duplicate-name suffix).  For every PKG slot we look up
-        the FBX mesh whose name -- with .001 stripped -- matches the
-        expected `f"{display}_{i}"` exactly.  Case insensitive.
+        '.001' duplicate-name suffix, which is stripped).  Case
+        insensitive.  Duplicate display names pair up in list order,
+        which matches export order on both sides.
+
+        Attribute adoption (the actual write-back enabler)
+        --------------------------------------------------
+        Imported meshes carry none of the WoT-side bookkeeping, so
+        for every matched slot the FBX mesh ADOPTS from its PKG twin:
+        `component` + `primitives_zip` (Save Prim grouping + output
+        path), `name` (the SOURCE section name the primitives
+        encoder keys its layout off -- the display name the FBX
+        carried is the IDENTIFIER, which must never be used as a
+        section name), `identifier`, and `bone_palette`.  Without
+        this, Save Prim on an imported set found zero meshes per
+        component and the picker came up empty (per Coffee
+        2026-10-20: "it is not changing the visual to new bone
+        locations" -- the chassis write, and with it the pin-override
+        visual patch, never ran).
 
         Unmatched PKG slots are reported (so the user can fix names
         in Blender and re-import).  Unmatched FBX meshes are appended
@@ -15324,15 +15898,16 @@ class Viewer:
             print("[align] need both FBX and PKG sets loaded -- skipped")
             return (0, len(fbx.meshes), len(pkg.meshes))
 
-        # Build the expected-prefix list from the PKG side, mirroring
-        # exporters/common.py exactly.  identifier-or-name-or-fallback,
-        # then "_<original index>".
+        # Expected display names from the PKG side, mirroring
+        # exporters/common.py: identifier-or-name-or-fallback.  The
+        # legacy "_<original index>" suffixed form is kept as an
+        # alternate so old FBX exports still align.
         expected = []
         for i, m in enumerate(pkg.meshes):
             display = (getattr(m, 'identifier', '')
                        or getattr(m, 'name', '')
                        or f'mesh_{i}')
-            expected.append(f"{display}_{i}")
+            expected.append((display, f"{display}_{i}"))
 
         fbx_list = list(fbx.meshes)
         consumed = [False] * len(fbx_list)
@@ -15344,20 +15919,41 @@ class Viewer:
 
         ordered = []
         misses  = []
-        for slot, prefix in enumerate(expected):
-            target = prefix.lower()
+        for slot, (display, legacy) in enumerate(expected):
+            targets = (display.lower(), legacy.lower())
             hit = None
             for j, fm in enumerate(fbx_list):
                 if consumed[j]:
                     continue
-                if _norm(getattr(fm, 'name', '')) == target:
+                if _norm(getattr(fm, 'name', '')) in targets:
                     hit = j
                     break
             if hit is None:
-                misses.append((slot, prefix))
+                misses.append((slot, display))
             else:
                 consumed[hit] = True
-                ordered.append(fbx_list[hit])
+                fm = fbx_list[hit]
+                pm = pkg.meshes[slot]
+                # Adopt the WoT bookkeeping the writer needs (see
+                # docstring).  Geometry stays the imported data.
+                #
+                # The component tag goes on `wot_component`, NOT
+                # `mesh.component` -- the render pose loop keys
+                # turret-yaw / gun-pitch (with the native rotation
+                # limits) off `mesh.component`, and tagging imported
+                # meshes made them aim-follow like a native tank,
+                # which imports never did (per Coffee 2026-10-20:
+                # "fix the rotation limits on imported models...
+                # you changed something i didnt as[k] for").
+                # `_classify_meshes_by_component` reads the fallback
+                # so Save Prim still groups them.
+                fm.wot_component  = getattr(pm, 'component', '') or ''
+                fm.primitives_zip = (getattr(pm, 'primitives_zip', '')
+                                     or '')
+                fm.identifier     = (getattr(pm, 'identifier', '')
+                                     or fm.identifier)
+                fm.name           = pm.name
+                ordered.append(fm)
 
         leftover = [m for j, m in enumerate(fbx_list) if not consumed[j]]
         ordered.extend(leftover)
@@ -15842,8 +16438,19 @@ class Viewer:
             # Diffuse texture (best-effort).  Other materials default
             # to grey placeholders -- enough to render and verify
             # geometry / UVs are intact.
+            #
+            # Marker meshes (WoTPin_* / WoTBall_*) carry no texture;
+            # their color IS their meaning (wheel role).  FBX round-
+            # trips drop untextured flat materials, so restore the
+            # color from the reserved NAME instead -- per Coffee
+            # 2026-10-19 ("no color on pins after import").
+            from .exporters.markers import marker_color_for_name
+            marker_col = marker_color_for_name(mesh.name)
             diffuse_path = m.get('diffuse_path')
-            if diffuse_path and os.path.isfile(diffuse_path):
+            if marker_col is not None:
+                mesh.diffuse_tex_id = TextureLoader.create_solid_color(
+                    marker_col[:3])
+            elif diffuse_path and os.path.isfile(diffuse_path):
                 mesh.diffuse_tex_id = TextureLoader.load_texture(diffuse_path)
                 mesh.diffuse_path   = diffuse_path
             else:
@@ -15884,8 +16491,26 @@ class Viewer:
         # remains the active set on screen; we only briefly flip to
         # 'pkg' for the load_vehicle call.  Failures are non-fatal --
         # the import view still works without a paired PKG load.
-        if (self.source_tank_name and self._pkg_extractor is not None
-                and not self._pkg_set.is_loaded()):
+        #
+        # When the PKG set ALREADY holds this same tank (the typical
+        # flow: load tank -> Export -> edit in Blender -> Import), skip
+        # the reload but still run the align-and-adopt pass -- that's
+        # what tags the imported meshes with component/primitives_zip/
+        # section names so Save Prim can write them.  Per Coffee
+        # 2026-10-20: this path used to skip alignment entirely, so
+        # Save Prim's component picker came up empty after an import.
+        _twin_ok = False
+        if (self.source_tank_name and self._pkg_set.is_loaded()):
+            _pkg_tank = (self._pkg_set.source_tank_name or '').strip()
+            _twin_ok = (_pkg_tank.lower()
+                        == str(self.source_tank_name).strip().lower())
+        if _twin_ok:
+            try:
+                self._align_fbx_to_pkg_order()
+            except Exception as exc:
+                print(f"[viewer] auto-align failed: {exc}")
+            self._populate_mesh_window()
+        elif (self.source_tank_name and self._pkg_extractor is not None):
             nation, tank_basename = self._resolve_tank_nation(self.source_tank_name)
             if nation:
                 xml_zip = f'scripts/item_defs/vehicles/{nation}/{tank_basename}.xml'
@@ -15893,6 +16518,12 @@ class Viewer:
                 if xml_local:
                     print(f"[viewer] auto-loading PKG twin for "
                           f"'{tank_basename}' from {xml_zip}")
+                    # Guard: this load_vehicle call is the import's OWN
+                    # twin-load -- it must NOT trigger the "new native
+                    # load clears the imported set" reset below in
+                    # _load_vehicle_impl (it would wipe the import we
+                    # just built).
+                    self._loading_pkg_twin = True
                     try:
                         # load_vehicle flips active->'pkg' internally and
                         # populates self._pkg_set.  We then flip back to
@@ -15907,6 +16538,7 @@ class Viewer:
                     except Exception as exc:
                         print(f"[viewer] auto-load PKG twin failed: {exc}")
                     finally:
+                        self._loading_pkg_twin = False
                         self._active_set_name = 'fbx'
                         # With both sets now populated, re-order the
                         # FBX side so its mesh indices line up with
@@ -15941,6 +16573,15 @@ class Viewer:
                             self.smoke_particles.reset()
                             self.smoke_particles.set_emitters(
                                 self._fbx_set.exhaust_points)
+
+        # Marker-pin automation: read WoTPin_* meshes by name, compare
+        # against the game visual, stash wheel-node overrides for the
+        # Save-Prim visual rewrite -- or create pins + pop a message
+        # when the import has none.  Soft-fails.
+        try:
+            self._process_imported_markers()
+        except Exception as exc:
+            print(f"[markers] import-side processing failed: {exc}")
 
         return n_imported
 
@@ -16017,6 +16658,32 @@ class Viewer:
         # Wipe the console so the next-load output is uncluttered
         os.system('cls' if os.name == 'nt' else 'clear')
         _status("Parsing vehicle XML...")
+
+        # Stale-override guard: pin overrides belong to the import
+        # that produced them.  A fresh native load invalidates them
+        # (load_imported_payload re-derives its own set AFTER its
+        # internal PKG-twin load lands back here).
+        self._imported_pin_overrides = {}
+
+        # Per Coffee 2026-10-19 ("when a tank has been imported and we
+        # load a new tank. it should remove all the imported tank data
+        # and reset anything in the UI that was set for imported
+        # tank"): a USER-initiated native load drops the whole
+        # imported (FBX) set -- meshes, GPU buffers, source-tank tag,
+        # exhaust points, bbox -- so Flip / Compare / Save Prim can't
+        # act on stale import data from a different tank.  The one
+        # exception is the import's own internal PKG-twin load
+        # (guarded by `_loading_pkg_twin` in load_imported_payload),
+        # which must leave the just-built import alone.
+        if (not getattr(self, '_loading_pkg_twin', False)
+                and self._fbx_set.is_loaded()):
+            prev = self._fbx_set.source_tank_name or 'imported scene'
+            print(f"[viewer] new native load -- clearing imported "
+                  f"set ({prev!r}, {len(self._fbx_set.meshes)} meshes)")
+            try:
+                self._fbx_set.cleanup()
+            except Exception as exc:
+                print(f"[viewer] imported-set cleanup failed: {exc}")
 
         # Reset PkgExtractor timing counters so the summary at the end
         # shows JUST this load (instead of cumulative across the session).
@@ -17213,6 +17880,11 @@ class Viewer:
                         color=(180, 220, 255))
             except Exception as exc:
                 print(f"[viewer] info-panel build failed: {exc}")
+
+            # Spawn the wheel-pin / bone-ball marker meshes now that
+            # chassis bones + wheel roles are settled, BEFORE the mesh
+            # window populates so the grouped 'Markers' row sees them.
+            self._spawn_marker_meshes()
 
             # Refresh the mesh-visibility window so its rows match the
             # newly-loaded meshes (all reset to visible).  Window stays
@@ -22016,8 +22688,233 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] borderless toggle failed: {exc}")
 
+    # ------------------------------------------------------------------
+    # TEMPORARY automation harness -- per Coffee 2026-10-21 ("add code
+    # temporarily so you can go ahead and automate loading that T92
+    # exporting it importing it and then writing it and then testing
+    # it").  Runs the REAL app code paths end-to-end with no dialogs:
+    #
+    #   load vanilla tank -> export FBX (Blender) -> import FBX
+    #   (Blender) -> write chassis primitives -> verify against the
+    #   pkg original -> simulate a pin move -> verify visual patch.
+    #
+    # Trigger: set env TEPY_AUTO_RT=<tank_xml_basename> (e.g.
+    # A38_T92) before launch.  Window starts MINIMIZED in this mode
+    # (per Coffee: "Open the window minimize... It'll not mess with
+    # me then").  All verification artifacts land in %TEMP%; nothing
+    # is written to res_mods.  DELETE THIS BLOCK when the round-trip
+    # work is finished.
+    # ------------------------------------------------------------------
+
+    def _auto_roundtrip(self, tank):
+        import tempfile
+        from .writers import write_primitives, PrimitivesWriteOptions
+        from .loaders import MeshParser
+        from .visual_patch import patch_visual_node_positions, \
+            read_node_worlds
+        from .exporters import export_vehicle
+        from .importers import import_vehicle
+
+        failures = []
+
+        def _pass(msg):
+            print(f"[AUTO-RT] PASS  {msg}")
+
+        def _fail(msg):
+            print(f"[AUTO-RT] FAIL  {msg}")
+            failures.append(msg)
+
+        scratch = os.path.join(tempfile.gettempdir(), 'tepy_auto_rt')
+        os.makedirs(scratch, exist_ok=True)
+        print(f"[AUTO-RT] scratch: {scratch}")
+
+        # ---- 1. Load the tank from VANILLA pkg (never res_mods) ----
+        nation, base = self._resolve_tank_nation(tank)
+        if not nation:
+            _fail(f"could not resolve nation for {tank!r}")
+            return failures
+        xml_local = self._pkg_extractor.extract(
+            f'scripts/item_defs/vehicles/{nation}/{base}.xml')
+        self.load_vehicle(xml_local, prefer_res_mods=False)
+        groups = self._classify_meshes_by_component()
+        chass = groups.get('chassis', [])
+        if not chass:
+            _fail("no chassis meshes after load")
+            return failures
+        chassis_zip = next((m.primitives_zip for m in chass
+                            if m.primitives_zip), '')
+        vanilla_local = self._pkg_extractor.extract(chassis_zip)
+        with open(vanilla_local, 'rb') as fh:
+            vanilla_raw = fh.read()
+        n_boned = sum(1 for m in chass if m.bone_indices is not None)
+        if n_boned == len(chass):
+            _pass(f"load: {len(chass)} chassis meshes, all skinned")
+        else:
+            _fail(f"load: only {n_boned}/{len(chass)} chassis meshes "
+                  f"carry bone data")
+
+        # ---- 2. Export FBX through the real Blender bridge ---------
+        out_fbx = os.path.join(scratch, f'{base}.fbx')
+        blender_exe = (self._cfg.get('blender_exe') or '').strip() or None
+        ok, msg = export_vehicle(self, out_fbx, blender_exe=blender_exe,
+                                 on_log=lambda s: print(f"[AUTO-RT:exp] {s}"))
+        if not ok:
+            _fail(f"export: {msg}")
+            return failures
+        _pass(f"export: {os.path.basename(out_fbx)}")
+
+        # ---- 3. Import it back through the real Blender bridge -----
+        ok, payload = import_vehicle(out_fbx, blender_exe=blender_exe,
+                                     on_log=lambda s: print(f"[AUTO-RT:imp] {s}"))
+        if not ok:
+            _fail(f"import: {payload}")
+            return failures
+        n = self.load_imported_payload(payload)
+        _pass(f"import: {n} meshes loaded")
+        if getattr(self, '_imported_pin_overrides', None):
+            _fail(f"identity import reported moved pins: "
+                  f"{self._imported_pin_overrides}")
+        else:
+            _pass("identity import: no pins reported moved")
+
+        # ---- 4. Write the chassis from the imported set ------------
+        groups = self._classify_meshes_by_component()
+        imp_chass = groups.get('chassis', [])
+        if len(imp_chass) != len(chass):
+            _fail(f"align/adopt: {len(imp_chass)} imported chassis "
+                  f"meshes vs {len(chass)} native")
+            return failures
+        out_prim = os.path.join(scratch, 'Chassis.primitives_processed')
+        ok, msg = write_primitives(imp_chass, out_prim,
+                                   options=PrimitivesWriteOptions())
+        if not ok:
+            _fail(f"write: {msg}")
+            return failures
+        with open(out_prim, 'rb') as fh:
+            written_raw = fh.read()
+        if len(written_raw) == len(vanilla_raw):
+            _pass(f"write: size {len(written_raw)} matches vanilla")
+        else:
+            _fail(f"write: size {len(written_raw)} != vanilla "
+                  f"{len(vanilla_raw)}")
+
+        # ---- 5. Field-level verify vs vanilla ----------------------
+        try:
+            g_v = MeshParser.parse_primitives_processed(vanilla_local)
+            g_w = MeshParser.parse_primitives_processed(out_prim)
+        except Exception as exc:
+            _fail(f"re-parse of written file failed: {exc}")
+            return failures
+        for gv, gw in zip(g_v, g_w):
+            tagn = gv['name'] or '<bare>'
+            vv, vw = gv['vertices'], gw['vertices']
+            if gv['name'] != gw['name']:
+                _fail(f"{tagn}: section name changed to {gw['name']!r}")
+                continue
+            if len(vv['positions']) != len(vw['positions']):
+                _fail(f"{tagn}: vertex count "
+                      f"{len(vw['positions'])} != {len(vv['positions'])}")
+                continue
+            checks = []
+            p = float(np.abs(np.asarray(vv['positions'])
+                             - np.asarray(vw['positions'])).max())
+            checks.append(('positions', p, 1e-6))
+            i = int((np.asarray(gv['indices']).reshape(-1)
+                     != np.asarray(gw['indices']).reshape(-1)).sum())
+            checks.append(('indices', float(i), 0.5))
+            nrm = float(np.abs(np.asarray(vv['normals'])
+                               - np.asarray(vw['normals'])).max())
+            checks.append(('normals', nrm, 0.016))
+            tan = float(np.abs(np.asarray(vv['tangents'])
+                               - np.asarray(vw['tangents'])).max())
+            checks.append(('tangents', tan, 0.016))
+            u = float(np.abs(np.asarray(vv['uv0'])
+                             - np.asarray(vw['uv0'])).max())
+            checks.append(('uv0', u, 1e-6))
+            if vv.get('bone_indices') is not None:
+                if vw.get('bone_indices') is None:
+                    _fail(f"{tagn}: BONES LOST in write")
+                else:
+                    bd = int((np.asarray(vv['bone_indices'])
+                              != np.asarray(vw['bone_indices'])).sum())
+                    checks.append(('bone_indices', float(bd), 0.5))
+                    bw = float(np.abs(
+                        np.asarray(vv['bone_weights'])
+                        - np.asarray(vw['bone_weights'])).max())
+                    checks.append(('bone_weights', bw, 1e-6))
+            bad = [f"{nm}={val:.6g}(>{lim:g})"
+                   for nm, val, lim in checks if val > lim]
+            if bad:
+                _fail(f"{tagn}: {'  '.join(bad)}")
+            else:
+                _pass(f"{tagn}: all fields within tolerance")
+
+        # ---- 6. Simulated pin move + visual patch ------------------
+        pin = next((m for m in self.meshes
+                    if (getattr(m, 'name', '')
+                        or '').startswith('WoTPin_roadwheel_')), None)
+        if pin is None:
+            _fail("no road-wheel pin in imported set")
+        else:
+            bone = pin.name.split('.')[0][len('WoTPin_'):].partition('_')[2]
+            mm = pin.model_matrix.copy()
+            mm[2, 3] += 0.30          # +0.3 viewer-Z
+            pin.model_matrix = mm
+            self._process_imported_markers()
+            ov = getattr(self, '_imported_pin_overrides', {}) or {}
+            if list(ov.keys()) != [bone]:
+                _fail(f"pin move: expected override for {bone!r}, "
+                      f"got {list(ov.keys())}")
+            else:
+                visual_zip = chassis_zip.replace(
+                    '.primitives_processed', '.visual_processed')
+                vraw = open(self._pkg_extractor.extract(visual_zip),
+                            'rb').read()
+                patched, applied, missing = \
+                    patch_visual_node_positions(vraw, ov)
+                worlds = read_node_worlds(patched)
+                err = float(np.linalg.norm(
+                    worlds[bone] - np.asarray(ov[bone])))
+                if missing or err > 1e-4:
+                    _fail(f"visual patch: missing={missing} "
+                          f"err={err:.6f}")
+                else:
+                    _pass(f"pin move: {bone} override detected + "
+                          f"visual patch lands within {err:.2e} m")
+
+        print(f"[AUTO-RT] {'=' * 50}")
+        if failures:
+            print(f"[AUTO-RT] {len(failures)} FAILURE(S):")
+            for f in failures:
+                print(f"[AUTO-RT]   - {f}")
+        else:
+            print("[AUTO-RT] ALL CHECKS PASSED")
+        return failures
+
     def run(self):
         """Enter the main event loop; returns after the window is closed."""
+        # TEMPORARY: automation harness entry (see _auto_roundtrip).
+        # Minimized window, no maximize, runs the cycle, exits.
+        if os.environ.get('TEPY_AUTO_RT'):
+            try:
+                pygame.display.iconify()
+            except Exception:
+                pass
+            if self.splash is not None:
+                try:
+                    self.splash.cleanup()
+                except Exception:
+                    pass
+                self.splash = None
+            try:
+                self._auto_roundtrip(os.environ['TEPY_AUTO_RT'])
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                print("[AUTO-RT] CRASHED")
+            finally:
+                self.running = False
+            return
         # Tear down the startup splash (if any) -- from this point on
         # render() draws the real scene + UI.  Does nothing if Splash
         # construction failed earlier.

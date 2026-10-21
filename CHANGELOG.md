@@ -7,6 +7,450 @@ available at the time this file was written).
 
 ---
 
+## 2026-10-21
+
+### IN-GAME CONFIRMED: visual-node wheel moves still work
+
+First live mod shipped through the new pipeline: T92 front
+tensioners (WD_L7 / WD_R7) moved forward one wheel diameter
+(0.696 m) via `visual_patch.patch_visual_node_positions` --
+a 6-byte binary patch of Chassis.visual_processed in
+res_mods, vanilla primitives untouched.  Coffee confirmed it
+renders correctly in the WoT 2.4.1.0 client ("that works!").
+The chassis XML carries only wheel NAMES + RADII (no
+positions), so the visual skeleton remains the game's single
+source of truth for wheel placement -- same contract as the
+VB-era modding workflow.
+
+### TEMPORARY auto round-trip harness (1.255.0)
+
+Per Coffee 2026-10-21 ("add code temporarily so you can go
+ahead and automate loading that T92 exporting it importing
+it and then writing it and then testing it").  New
+`Viewer._auto_roundtrip()` + hook at the top of `run()`:
+launch with env `TEPY_AUTO_RT=<xml_basename>` (e.g.
+A38_T92) and the app starts MINIMIZED (per Coffee: doesn't
+take over the screen), then drives the REAL code paths with
+no dialogs:
+
+  load vanilla (prefer_res_mods=False) -> export FBX via
+  Blender -> import FBX via Blender -> align/adopt ->
+  write chassis primitives -> field-level verify vs the pkg
+  original -> simulate a +0.3 m pin move -> verify override
+  detection + binary visual patch -> print [AUTO-RT]
+  PASS/FAIL lines -> exit.
+
+Nothing is written to res_mods; all artifacts land in
+%TEMP%/tepy_auto_rt.  DELETE the harness when the round-trip
+workstream is finished.
+
+**Result on A38_T92 (two consecutive runs, v1.254 pipeline):
+ALL CHECKS PASSED** -- 171/171 meshes aligned, written
+chassis 848,616 bytes (= vanilla, skinned), positions /
+indices / bone bytes / weights exact, normals + tangents
+within one 8-bit step, no false pin moves on an identity
+import, simulated W_L0 move detected and patched into the
+visual to 9e-9 m.  Confirms yesterday's "wont load" was
+purely the poisoned res_mods source, not the pipeline.
+
+## 2026-10-20
+
+### Boneless-chassis warning on Save Prim (1.254.1)
+
+Root-caused Coffee's "wtf it wont load": the tank was LOADED
+FROM THE USER'S OWN BROKEN res_mods OVERRIDE (the pre-1.254
+boneless chassis), because `prefer_res_mods` defaults True --
+so even with the 1.254 pipeline fixed, the in-memory chassis
+had no bone data to round-trip, and Save Prim faithfully
+wrote the boneless file back over the freshly-extracted
+vanilla one.  (Confirmed by the FBX: the gun -- loaded from
+pkg -- carried WoTBoneIdx; the chassis -- loaded from
+res_mods -- didn't.)
+
+Save Prim now logs a loud WARNING when it is about to write
+a chassis component where NO mesh carries bone data, naming
+the two likely causes (broken res_mods override loaded back
+in, or a pre-1.254 FBX).  Vanilla chassis restored to
+res_mods from the user's `_gamedata` copy.
+
+### Loss-less FBX round trip: bones restored, sRGB codec, tangent frame fix (1.254.0)
+
+Per Coffee 2026-10-20 ("fix what ever is changing the it..
+walk the code from export to import to writing").  The walk
+found THREE defects; all fixed and the full chain
+(viewer load -> export -> Blender FBX -> import -> Save Prim
+write) now verified on the real A38_T92 chassis:
+
+1. **Bone data dropped at export.**  v1.242.3's
+   belt-and-braces `bone_indices = None` in collect_payload
+   (aimed at the reverted armature experiment) also killed
+   the inert `WoTBoneIdx`/`WoTBoneWeight` color-attribute
+   carrier.  Every import->Save-Prim chassis came back
+   BONELESS (stride-32 'BPVTxyznuvtb' instead of stride-40
+   'BPVTxyznuviiiwwtb') AND Z-MIRRORED on disk, because the
+   encoder keys its Z-flip off `want_bones`.  The raw bone
+   bytes now pass through again as pure data -- the FBX
+   stays rigid (no armature, no skin clusters).
+
+2. **Blender's FBX color path quantises on the sRGB byte
+   grid.**  BYTE_COLOR attributes store sRGB bytes while
+   the Python API speaks linear floats; measured end-to-end
+   transfer (256-value sweep, matched to 3e-7):
+   `c_out = srgb2lin(round(lin2srgb(c_in)*255)/255)`.  The
+   old direct [0,1] encoding wobbled by up to a full byte
+   step (observed 230->231 on weights).  All four WoT*
+   attributes now carry their data byte AS the sRGB byte
+   (`encode c = srgb2lin(b/255)`, `decode b =
+   round(lin2srgb(c)*255)`) -- verified LOSSLESS for all 256
+   byte values in indices, weights, tangents and binormals
+   through a real Blender 4.2 FBX round trip.
+
+3. **Tangent/binormal frame mismatch.**  The runner stored
+   tangents/binormals in the color attrs UNSWIZZLED (viewer
+   Y-up frame) while load_imported_payload un-swizzles
+   everything it reads back -- every imported tangent frame
+   was rotated 90 degrees about X (full-chain test showed
+   tanErr 1.42).  The runner now applies the same
+   (x,-z,y) swizzle positions and normals get.
+
+Full-chain result on A38_T92 Chassis (848,616 bytes both
+sides, skinned format preserved): positions, indices, bone
+indices and bone weights EXACT; normals / tangents /
+binormals within one step of the on-disk 8-bit formats
+(0.008-0.011), now stable across repeated round trips
+instead of drifting.
+
+### Imported models no longer aim-follow (1.253.1)
+
+Regression fix, per Coffee 2026-10-20 ("fix the rotation
+limits on imported models. the[y] never did before. you
+changed something i didnt as[k] for").  The 1.252.0 align
+pass adopted `mesh.component` onto imported meshes so Save
+Prim could group them -- but the render pose loop ALSO keys
+turret-yaw / gun-pitch (with the native tank's rotation
+limits) off `mesh.component`, so imported turrets/guns
+started following mouse aim.  Imports never did that.
+
+Fix: the adopted tag now lands on `wot_component` (write-
+side bookkeeping only); `mesh.component` stays '' on
+imports so the pose loop composes the plain
+`chassis_pose @ bind` like it always did.
+`_classify_meshes_by_component` falls back to
+`wot_component`, so Save Prim grouping keeps working.  The
+speculative `bone_palette` adoption was dropped too -- the
+primitives encoder never needed it, and a palette on an
+imported mesh could flip it onto the skinning path.
+
+### "Wheel positions" save option in the Save Prim picker (1.253.0)
+
+Per Coffee 2026-10-20 ("need to check if pins changed when
+importing and enabling that to be saved"): the moved-pin
+visual patch is now a VISIBLE, independent save option
+instead of a side effect of the Chassis primitives write.
+
+* Save Prim's component picker shows a **"Wheel positions
+  (N moved pins -> Chassis.visual_processed)"** checkbox
+  whenever the import pass detected moved WoTPin_* markers.
+  Default ticked.  Window grows 40px when the row shows
+  (fixed-size window; same reserved-space lesson as 1.251.1).
+* The patch write moved out of the chassis-component branch
+  to its own post-loop step: it runs when the box is ticked
+  regardless of which components were chosen -- saving ONLY
+  wheel positions (no components ticked) is now a valid Save
+  Prim.  Chassis source path comes from the adopted
+  `primitives_zip`, falling back to the PKG twin's chassis
+  mesh when alignment missed; /normal/ -> /crash/ swap
+  applies for damaged variants.
+* The status line + console summary list 'wheel positions'
+  alongside the chosen components.
+
+### Save Prim now works on imported sets -- visual patch unblocked (1.252.0)
+
+Per Coffee 2026-10-20 ("it is not changing the visual to new
+bone locations").  The debug log showed the import DID detect
+the moved pin ("pin W_R0 (roadwheel): moved 0.456 m") but
+every Save Prim attempt ended "cancelled" -- the component
+picker was empty because imported meshes carried NO
+`component` / `primitives_zip` / source-section-name
+bookkeeping, so `_classify_meshes_by_component` bucketed
+everything under '' and the chassis write (and with it the
+pin-override visual patch) never ran.  Two root causes, both
+in `_align_fbx_to_pkg_order` / `load_imported_payload`:
+
+* **Stale name matching.**  Align expected the legacy
+  `f"{display}_{i}"` export names, but collect_payload
+  dropped the index suffix ages ago ("don't rename the
+  parts") -- so ZERO meshes ever matched.  Align now matches
+  the current plain `display` form (legacy suffixed form
+  still accepted), '.001' Blender suffixes stripped, case
+  insensitive, duplicates paired in list order.
+
+* **No attribute adoption.**  Align reordered but never
+  tagged.  On every matched slot the FBX mesh now ADOPTS
+  from its PKG twin: `component`, `primitives_zip`,
+  `name` (the SOURCE section name the encoder keys layout
+  off -- never the identifier), `identifier`, and
+  `bone_palette`.  Pins/balls/unmatched meshes stay
+  untagged and invisible to Save Prim.
+
+* **Align never ran in the typical flow.**  The twin-load
+  block was gated on `not _pkg_set.is_loaded()`, so with the
+  tank already loaded natively (load -> Export -> Blender ->
+  Import), alignment was skipped entirely.  Now: same tank
+  already in the PKG set -> run align+adopt directly;
+  different tank -> reload the correct twin (guarded by
+  `_loading_pkg_twin` so it doesn't wipe the import).
+
+Verified headlessly: stub align adopts hull ('' bare-shared
+section name) + chassis (named section, bone palette) and
+leaves the WoTPin leftover untagged.
+
+### Import picker Continue button clipped off (1.251.1)
+
+Per Coffee 2026-10-20 ("no ok on import screen"): the format
+picker is a FIXED 420px-tall window and packed its widgets
+top-down, buttons LAST -- the 1.251.0 Hide-tracks checkbox
+consumed the slack the Continue/Cancel row used to fit in,
+pushing the buttons below the window edge.  Tk pack hands
+out space in pack order, so the fix is structural: the
+button row and the Hide-tracks checkbox now pack FIRST with
+side='bottom' (reserved space, stacking upward), and the
+expanding format-rows frame packs last, taking only what's
+left.  Import picker also grew to 380x470 so all 13 format
+rows + the checkbox fit without clipping.  Layout verified
+headlessly: buttons mapped at y=428..470 inside the 470px
+window.
+
+### "Hide tracks" import checkbox + dummy track segments (1.251.0)
+
+Tasks 5 + 6 of the marker-pin modding workflow (per Coffee:
+"add a check box to the importer to hide tracks. if that box
+checked, we don't [render] the rubber band tracks" and "when
+we write the primitives, if that box was checked, we write
+the dummy segments").
+
+* Import format picker gains a **"Hide tracks"** checkbox
+  (import mode only, defaults off each open).  The choice
+  persists on the imported MeshSet (`hide_tracks` slot --
+  NOT a transient render flag), reset by `cleanup()` and
+  always False for native loads.
+* Render side: when the active set is an import flagged
+  `hide_tracks`, every rubber-band / skinned track ribbon
+  defaults to hidden in `_populate_mesh_window` (the grouped
+  'Track Ribbons' checkbox can still bring them back).
+* Save Prim: after the component loop, if the import was
+  flagged, `_write_dummy_track_segments()` writes an EMPTY
+  copy of every `track_segment_models` `.primitives_processed`
+  to res_mods -- the original file parsed via MeshParser and
+  re-encoded with every vertex position zeroed.  Structure,
+  counts, formats and size match the original byte-for-byte
+  in shape (verified on G78_Panther_M10 `track/segment.
+  primitives_processed`: 7444 bytes in, 7444 bytes out, same
+  groups, positions all 0), so the engine loads it fine and
+  renders nothing.  L/R entries sharing one segment file are
+  deduped; /normal/ -> /crash/ swap applies when the import
+  was a damaged variant.
+
+Use case: replace the wheels in Blender (monster-truck
+style), move the pins, import with Hide tracks ticked, Save
+Prim -- the game shows the tank with no track chain.
+
+## 2026-10-19
+
+### New native load clears the imported set (1.250.0)
+
+Per Coffee 2026-10-19 ("when a tank has been imported and we
+load a new tank. it should remove all the imported tank data
+and reset anything in the UI that was set for imported
+tank"): `_load_vehicle_impl` now calls `_fbx_set.cleanup()`
+at the top of every USER-initiated native load -- frees the
+imported meshes' GPU buffers and resets source-tank tag,
+exhaust points, bbox, tank_info and extract paths, so Flip /
+Compare / Save Prim can't act on stale import data from a
+different tank.  `_imported_pin_overrides` is cleared in the
+same breath (was already in place since 1.249.0).
+
+Guard: the import pipeline's own internal PKG-twin
+`load_vehicle` call (inside `load_imported_payload`) sets
+`self._loading_pkg_twin` around itself so it does NOT wipe
+the import it just built; the flag is cleared in the same
+`finally` that flips the active set back to 'fbx'.  The mesh
+window, info panel and thumbnail are all rebuilt by the
+native load itself, so no extra UI work is needed after the
+cleanup.
+
+### Pin colors restored on import (1.249.1)
+
+Per Coffee 2026-10-19 ("no color on pins after import"): FBX
+round-trips drop untextured flat materials, so imported
+WoTPin_*/WoTBall_* meshes rendered with the grey placeholder.
+New `markers.marker_color_for_name(name)` derives the RGBA
+purely from the reserved mesh name (role token for pins,
+grey for balls, magenta for an unknown role token);
+`load_imported_payload` now feeds that through
+`TextureLoader.create_solid_color` instead of the placeholder.
+Names are the ONLY thing the round trip is guaranteed to
+keep, so color-from-name works for FBX, GLB, GLTF and OBJ
+alike.
+
+### Import reads wheel pins by name + visual rewrite (1.249.0)
+
+Tasks 3 + 4 of the marker-pin modding workflow, per Coffee
+2026-10-19 ("can u automate this. pins need a name to know
+what thet are on import").  Pins are identified purely by
+their reserved names: `WoTPin_<roleToken>_<boneName>`
+(roleToken has no underscores; Blender '.001' suffixes are
+peeled before parsing).
+
+* New `tankExporterPy/visual_patch.py` -- moves node
+  TRANSLATIONS inside a `.visual_processed`.  BWXML files
+  get a true BINARY PATCH: the packed stream is walked with
+  the same traversal `decode_bwxml` uses, the file offset of
+  each `<transform>` 12-float block is recorded, and only
+  row3 (12 bytes per moved node) is rewritten in place --
+  every other byte stays identical, so there is no re-encode
+  risk.  Plain-XML visuals get an ElementTree rewrite.
+  `read_node_worlds()` verified against
+  `parse_chassis_bone_world_positions` on the real Panther
+  M10 chassis (worst delta 1.8e-7).
+
+* New `Viewer._process_imported_markers()` runs at the end
+  of `load_imported_payload`:
+  - Pins found: each pin's centroid x object matrix is
+    mapped viewer-world -> chassis-local (PKG twin's chassis
+    bind matrix) -> visual frame (Z negation), compared to
+    the game visual's node position.  Moves > 5 mm land in
+    `self._imported_pin_overrides`; matches are logged.
+  - No pins: markers are created from the game visual
+    (`_spawn_marker_meshes`, chassis matrix fallback to the
+    PKG twin set) and a tkinter popup tells the user the
+    model carried no wheel-location pins (task 4 spec).
+
+* Save Prim: when the chassis component is written and pin
+  overrides exist, `_write_patched_chassis_visual()` pulls
+  the vanilla visual from pkg, patches ONLY the bare wheel
+  nodes (`W_L0` etc. -- the `*_BlendBone` children ride
+  along through the hierarchy, confirmed on real data), and
+  writes it to res_mods next to the primitives.  Same
+  /normal/ -> /crash/ path swap as the primitives write.
+  Overrides are cleared on every native load so they never
+  leak across tanks.
+
+End-to-end verified headlessly on G78_Panther_M10: pin moved
+(0, +0.10, +0.30) in viewer frame -> visual node lands at the
+exact target, W_L0_BlendBone rides along by exactly that
+delta, sibling wheels byte-identical.
+
+### Markers render in the viewer + 'Markers' checkbox (1.248.0)
+
+Per Coffee 2026-10-19 ("i cant see the ma[r]kers when I load
+a tank.  make the[m] visible and add check box to the
+visibility panel"): the wheel pins + bone balls are no
+longer export-only.
+
+* New `Viewer._spawn_marker_meshes()` runs at the end of
+  every tank load (before the mesh-window refresh): builds
+  real `Mesh` objects from the SAME
+  `exporters.markers.build_marker_meshes` geometry the
+  export uses, so viewer == FBX.  Each marker gets a 1x1
+  solid-colour diffuse via new
+  `TextureLoader.create_solid_color(rgb)` and the chassis
+  bind matrix, so markers ride the chassis pose (component
+  '' -> plain `chassis_pose @ bind` in the per-frame pose
+  apply).
+* Visible window gains a grouped **'Markers'** virtual row
+  (sentinel `_MESH_ROW_MARKERS = -4`, same pattern as Track
+  Ribbons) -- one checkbox shows/hides every pin + ball.
+  Classification by the reserved `WoTPin_`/`WoTBall_` name
+  prefixes, so markers that come back in through an FBX
+  import group the same way.
+* `collect_payload` skips the live marker meshes and keeps
+  regenerating a fresh set from bone data at export time --
+  no duplicate markers in the FBX.
+* Save-Prim is untouched: markers carry empty `component` /
+  `primitives_zip`, so the writer never sees them.
+
+### Visible pins + one-checkbox track hiding (1.247.0)
+
+Two fixes per Coffee 2026-10-19 after live-testing 1.246.0:
+
+* **"i cant see the pins"** -- the spec'd 1 mm pin diameter
+  was invisible next to a ~1.5 m wheel.  Pins are now real
+  2 cm-diameter cylinders (12 segments, still 0.6 m long on
+  the wheel axle).  `markers.PIN_RADIUS` 0.0005 -> 0.01.
+
+* **"Visibility should hide all track segments, not one at
+  a time"** -- the Visible window listed every skinned
+  ribbon (`track_*Shape*`) and `_mat` rubber-band mesh as
+  its own row.  They now collapse into ONE virtual 'Track
+  Ribbons' row (sentinel `_MESH_ROW_TRACK_RIBBONS = -3`);
+  its checkbox drives the whole set via
+  `self._track_ribbon_mesh_indices`.  Default states are
+  unchanged (_mat always hidden; skinned ribbon hidden only
+  when the tank ships `track_segment_models`); the group
+  checkbox starts checked when ANY member renders.  The row
+  only appears on tanks that have ribbon meshes.
+
+### Grey bone-marker balls in every export (1.246.0)
+
+Task 2 of the marker-pin modding workflow.  Alongside the
+wheel pins (1.245.0), every export now carries one small
+grey UV sphere (2 cm diameter, `WoTBall_<boneName>`) per
+chassis animation bone from
+`parse_chassis_bone_world_positions` -- same Z-negation into
+the chassis mesh-vertex frame, same chassis
+`bind_model_matrix` ride-along as the pins.  Bare /
+`_BlendBone` name pairs sitting at the SAME position
+collapse to one ball (the `_BlendBone` form, the skin-
+palette name) so no coincident duplicate spheres ship.
+Wheel bones get BOTH a pin (role) and a ball (bone) by
+design.  Sphere verified outward-CCW + closed-manifold by
+the same numeric checks as the cylinder.
+
+### Wheel-location marker pins in every export (1.245.0)
+
+Task 1 of the marker-pin modding workflow (spec in
+`hand_off/SESSION_LOG_2026-05-16_v1.230.5_handoff.md`,
+"NEW TASKS queued 2026-10-19").
+
+New `tankExporterPy/exporters/markers.py`: every FBX / GLB /
+GLTF / OBJ export now carries one thin cylindrical rod
+("pin", 1 mm diameter x 0.6 m, axis along the wheel axle /
+chassis +X) per wheel bone, so a modder editing the file in
+Blender can SEE -- and in a later task MOVE -- the WoT wheel
+locations.  Pin COLOR encodes the `wheel_roles` class:
+
+* road wheel -> green, drive sprocket -> red,
+  idler -> blue, return roller -> yellow
+  (grey is reserved for the upcoming bone marker balls).
+
+Mesh names are reserved: `WoTPin_<roleToken>_<boneName>`
+(roleToken never contains `_`, so the bone name is
+unambiguous).  `markers.is_marker_name()` is the one gate
+the importer / Save-Prim writer will use to keep these
+synthetic meshes out of the real-section pipeline.
+
+Positions come from `viewer._track_chassis_bones_bind`
+(`parse_chassis_bone_world_positions`) with the usual
+Z-negation into the chassis mesh-vertex frame, and the pins
+ride the chassis component's `bind_model_matrix` so they
+land exactly on the rendered wheels.  Soft-fails: a tank
+with no chassis-bone data (standalone prim load) exports
+with no pins and no error.
+
+`_blender_runner._build_material` learned an optional
+`base_color` material key -- flat RGBA onto the Principled
+BSDF AND `mat.diffuse_color` so the role color shows in
+Blender's Solid viewport mode too.
+
+Verified: cylinder winding is outward-CCW (one real inverted-
+wall-winding bug caught + fixed by the test), watertight by
+positional edge pairing, JSON-serialisable payload, pins
+present for roles sourced via both bare and `_BlendBone`
+bone-name forms.
+
+---
+
 ## 2026-06-04
 
 ### Tank-rig sidecar JSON next to every Blender export (1.243.0)

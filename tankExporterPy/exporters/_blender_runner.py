@@ -311,10 +311,21 @@ def _build_mesh_object(bpy, mdef, tex_dir, img_cache):
     # FLOAT_COLOR (vs BYTE_COLOR) gives full float precision -- no
     # clamping to [0,1] and no quantisation, so unit-length tangents
     # and 0..255 bone indices both survive untouched.
+    # Tangents / binormals get the SAME Y-up -> Z-up swizzle as the
+    # positions and normals above -- the viewer-side importer
+    # (load_imported_payload) un-swizzles every vector it reads back,
+    # color-attribute ones included.  Storing these unswizzled (as
+    # this runner did before 2026-10-20) left every imported tangent
+    # frame rotated 90 degrees about X after the importer's
+    # un-swizzle.
+    _tan_bl = ([(t[0], -t[2], t[1]) for t in mdef['tangents']]
+               if mdef.get('tangents') else None)
+    _bin_bl = ([(b[0], -b[2], b[1]) for b in mdef['binormals']]
+               if mdef.get('binormals') else None)
     _add_float_color(bpy, me, 'WoTTangent',
-                     _vec3_to_vec4(mdef.get('tangents'),  pad=1.0))
+                     _vec3_to_vec4(_tan_bl,  pad=1.0))
     _add_float_color(bpy, me, 'WoTBinormal',
-                     _vec3_to_vec4(mdef.get('binormals'), pad=1.0))
+                     _vec3_to_vec4(_bin_bl, pad=1.0))
     _add_float_color(bpy, me, 'WoTBoneIdx',
                      _ints_to_vec4(mdef.get('bone_indices')))
     _add_float_color(bpy, me, 'WoTBoneWeight',
@@ -374,56 +385,78 @@ def _add_float_color(bpy, me, name, vec4_per_vertex):
 
 # ---- Encoders ---------------------------------------------------------------
 #
-# Blender's FBX *exporter* writes our FLOAT_COLOR attributes as float
-# RGBA in the FBX file.  Blender's FBX *importer*, however, reads them
-# back as BYTE_COLOR (8-bit, clamped to [0, 1]).  To survive that
-# round-trip we encode every value into [0, 1] before storage and
-# document how an importer should reverse it.
+# Blender's FBX *exporter* writes our FLOAT_COLOR attributes into the
+# FBX converted LINEAR -> sRGB; the FBX *importer* reads them back and
+# stores a BYTE_COLOR attribute whose bytes live in sRGB space, while
+# the Python API exposes LINEAR floats again.  Measured end-to-end
+# (Blender 4.2, 256-value sweep, matches to 3e-7):
 #
-# Channel layouts and decoders:
+#     c_out = srgb_to_linear( round(linear_to_srgb(c_in) * 255) / 255 )
 #
-#   WoTTangent     pack: (v + 1) * 0.5         decode: v = c*2 - 1
-#   WoTBinormal    pack: (v + 1) * 0.5         decode: v = c*2 - 1
-#   WoTBoneIdx     pack: i / 255.0             decode: i = round(c * 255)
-#   WoTBoneWeight  pack: w (already in [0,1])  decode: w = c
+# So the quantisation grid is the sRGB BYTE grid, and a value is
+# round-trip-stable iff linear_to_srgb(c_in)*255 is an integer.  We
+# therefore carry each data byte b AS the sRGB byte:
 #
-# Quantisation: byte-color storage gives 1/255 precision per channel.
-# For tangents/binormals (unit vectors), that's about 0.5 degrees of
-# angular error -- visually invisible.  Bone indices are integer 0..255
-# in WoT, so /255 + round() recovers them exactly.  Bone weights are
-# already byte-quantised in the source (uint8 / 255 at parse time),
-# so byte-color storage is lossless for them.
+#     encode:  c = srgb_to_linear(b / 255)
+#     decode:  b = round(linear_to_srgb(c) * 255)
+#
+# Per-channel byte meanings:
+#
+#   WoTTangent     byte = round((v + 1) * 127.5)   decode v = b/127.5 - 1
+#   WoTBinormal    byte = round((v + 1) * 127.5)   decode v = b/127.5 - 1
+#   WoTBoneIdx     byte = i  (raw WoT palette byte, already 0..255)
+#   WoTBoneWeight  byte = round(w * 255)           decode w = b/255
+#
+# Bone weights are byte-quantised in the source (uint8/255 at parse
+# time) so this is lossless for them; tangent/binormal quantisation
+# (~0.45 deg) matches the on-disk BPVT 8-bit format anyway, and being
+# byte-STABLE means repeated export->import->SavePrim cycles no longer
+# drift.  Decoders live in importers/_blender_importer.py and MUST
+# mirror this scheme.
+
+def _srgb_to_linear(s):
+    if s <= 0.04045:
+        return s / 12.92
+    return ((s + 0.055) / 1.055) ** 2.4
+
+
+def _byte_enc(b):
+    """Linear-float encoding for data byte `b` (see module comment)."""
+    return _srgb_to_linear(int(b) / 255.0)
+
+
+def _q255(x):
+    """Clamp + quantise a [0,1] float to its uint8."""
+    return max(0, min(255, int(round(float(x) * 255.0))))
+
 
 def _vec3_to_vec4(arr, pad=1.0):
-    """Tangent / binormal encoder.  Unit vectors [-1, +1] -> [0, 1].
-    Returns [(R, G, B, pad), ...] suitable for a FLOAT_COLOR attribute.
-    """
+    """Tangent / binormal encoder: component [-1,+1] -> byte
+    round((v+1)*127.5) -> sRGB-stable linear float."""
     if not arr:
         return None
-    return [((v[0] + 1.0) * 0.5,
-             (v[1] + 1.0) * 0.5,
-             (v[2] + 1.0) * 0.5,
-             pad) for v in arr]
+    def _c(v):
+        b = max(0, min(255, int(round((float(v) + 1.0) * 127.5))))
+        return _byte_enc(b)
+    return [(_c(v[0]), _c(v[1]), _c(v[2]), pad) for v in arr]
 
 
 def _ints_to_vec4(arr):
-    """Bone-index encoder.  uint8 [0, 255] -> [0, 1].  Integer values
-    survive byte-color quantisation exactly (the storage IS 8-bit).
-    """
+    """Bone-index encoder: raw WoT palette byte -> sRGB-stable linear
+    float."""
     if not arr:
         return None
-    return [(r[0] / 255.0,
-             r[1] / 255.0,
-             r[2] / 255.0,
-             r[3] / 255.0) for r in arr]
+    return [(_byte_enc(r[0]), _byte_enc(r[1]),
+             _byte_enc(r[2]), _byte_enc(r[3])) for r in arr]
 
 
 def _floats_to_vec4(arr):
-    """Bone-weight encoder.  Already in [0, 1] from MeshParser, so this
-    is just a tuple-cast for the bpy color slot."""
+    """Bone-weight encoder: [0,1] float (byte-quantised at parse
+    time) -> its uint8 -> sRGB-stable linear float."""
     if not arr:
         return None
-    return [(float(r[0]), float(r[1]), float(r[2]), float(r[3]))
+    return [(_byte_enc(_q255(r[0])), _byte_enc(_q255(r[1])),
+             _byte_enc(_q255(r[2])), _byte_enc(_q255(r[3])))
             for r in arr]
 
 
@@ -456,6 +489,20 @@ def _build_material(bpy, mat_def, tex_dir, img_cache):
         except Exception as exc:
             print(f"[blender-runner] image load failed {path}: {exc}")
             return None
+
+    # Flat base color (synthetic marker meshes -- wheel pins / bone
+    # balls -- carry no textures, just an RGBA that encodes the wheel
+    # role).  Set on the BSDF for rendered view AND on diffuse_color
+    # so Blender's Solid viewport mode shows it too.
+    bc = mat_def.get('base_color')
+    if bc and len(bc) >= 3:
+        col = (float(bc[0]), float(bc[1]), float(bc[2]),
+               float(bc[3]) if len(bc) > 3 else 1.0)
+        try:
+            bsdf.inputs['Base Color'].default_value = col
+            mat.diffuse_color = col
+        except Exception as exc:
+            print(f"[blender-runner] base_color failed for {name}: {exc}")
 
     # Base Color from diffuse (AM)
     am = _load_image(mat_def.get('diffuse'))

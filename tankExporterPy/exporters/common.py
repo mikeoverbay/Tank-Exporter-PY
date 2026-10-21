@@ -72,7 +72,17 @@ def collect_payload(viewer, output_path):
     tex_dedupe = {}    # source abspath -> destination basename
     meshes_out = []
 
+    from .markers import is_marker_name
+
     for i, mesh in enumerate(viewer.meshes):
+        # Skip the LIVE marker meshes the viewer spawned at load time
+        # (wheel pins / bone balls) -- a fresh synthetic set is
+        # regenerated from the bone data below, so exporting the live
+        # ones too would ship duplicates.
+        if is_marker_name(getattr(mesh, 'name', '')
+                          or getattr(mesh, 'identifier', '')):
+            continue
+
         # Skip hidden meshes -- user toggled them off in the mesh window.
         #
         # EXCEPT for the two track-ribbon classes the viewer hides
@@ -183,38 +193,53 @@ def collect_payload(viewer, output_path):
             'material':     material,
         }
 
-        # Skinning data is intentionally NOT exported.  Per Coffee
-        # 2026-06-04 ("drop exporting bones.. just use the transforms
-        # from the xml file as we did before"): the FBX path is
-        # rigid-mesh-only now.  Each mesh ships its `model_matrix`
-        # (= the per-mesh transform the chassis XML's hardpoint
-        # placement produced at load time); consuming apps see a
-        # static-pose tank with hull / turret / gun / chassis at the
-        # right world positions, no armature, no skin clusters, no
-        # vertex-group binding required.
+        # Bone bytes ride through as INERT DATA -- `WoTBoneIdx` /
+        # `WoTBoneWeight` FLOAT_COLOR vertex attributes in the Blender
+        # runner, exactly like tangents/binormals.  No armature, no
+        # skin clusters, no vertex groups: the FBX stays rigid-mesh-
+        # only per Coffee 2026-06-04 ("drop exporting bones.. just
+        # use the transforms from the xml file as we did before").
+        # The color attributes exist purely so a Save-Prim after an
+        # FBX round trip can write the chassis back in its original
+        # SKINNED vertex format.
         #
-        # The v1.243.0 attempt to also export the bone palette +
-        # vertex-group binding so wheels could deform in Blender
-        # broke the FBX export (`_attach_armature_modifiers`
-        # attached an Armature modifier to every mesh -- skinned or
-        # not -- without populating the vertex groups, so FBX
-        # writers emitted skin clusters with no bindings; consumer
-        # apps then collapsed or relocated those meshes per their
-        # own broken-skin recovery).  Reverted at v1.242.2, then
-        # this `None`-out lands at v1.242.3 to make sure no future
-        # change accidentally re-enables the same path.
-        #
-        # If a future workstream wants to ship skinned meshes
-        # again, the gate is: (a) only set these for meshes that
-        # actually carry skinning, (b) ship the bone palette + bind
-        # poses alongside, (c) apply the GL->Blender coordinate
-        # swizzle to every transform consistently, (d) validate
-        # round-trip through a real Blender + consumer (Max / Maya
-        # / Unity / Unreal) before merging.
-        out['bone_indices'] = None
-        out['bone_weights'] = None
+        # History: the v1.243.0 armature experiment
+        # (`_attach_armature_modifiers`) broke FBX consumers and was
+        # reverted at v1.242.2; v1.242.3 then None'd these fields as
+        # a belt-and-braces -- which ALSO killed the color-attribute
+        # carrier.  Per Coffee 2026-10-20 ("fix what ever is changing
+        # the it.. walk the code from export to import to writing"):
+        # that None-out made every import->Save-Prim chassis come
+        # back BONELESS -- the writer picked the stride-32
+        # 'BPVTxyznuvtb' format instead of the original stride-40
+        # 'BPVTxyznuviiiwwtb', AND (because the encoder keys its
+        # Z-flip off `want_bones`) mirrored the vertex stream in Z
+        # relative to the skinned original.  Passing the raw bytes
+        # through again fixes both; meshes that never carried
+        # skinning still emit None and stay boneless.
+        out['bone_indices'] = _arr_to_list(mesh.bone_indices)
+        out['bone_weights'] = _arr_to_list(mesh.bone_weights)
 
         meshes_out.append(out)
+
+    # Synthetic marker meshes: wheel-location pins (color = wheel role)
+    # + grey bone balls, so a modder editing the export in Blender can
+    # see / move the WoT wheel + bone positions.  See
+    # exporters/markers.py for the full contract (reserved 'WoTPin_*'
+    # / 'WoTBall_*' names, frame conventions).  Soft-fails -- a tank
+    # with no chassis-bone data just exports without markers.
+    try:
+        from .markers import build_marker_meshes
+        markers = build_marker_meshes(viewer)
+        if markers:
+            meshes_out.extend(markers)
+            n_pins  = sum(1 for m in markers
+                          if m['name'].startswith('WoTPin_'))
+            n_balls = len(markers) - n_pins
+            print(f"[export] added {n_pins} wheel pins + "
+                  f"{n_balls} bone balls")
+    except Exception as exc:
+        print(f"[export] marker-mesh generation failed: {exc}")
 
     # If the live viewer knows the WoT tank XML name (set by
     # load_vehicle), pass it through so a future Import can re-resolve

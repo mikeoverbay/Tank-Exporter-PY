@@ -320,3 +320,101 @@ output.
 5. With populated data, run the pad-rotation comparison again
    (see "open item 2" above) -- this is where the user wants
    to land next.
+
+---
+
+## NEW TASKS queued 2026-10-19 (user request -- takes priority over the old pickup checklist above)
+
+Repo has moved on since this handoff was written (master is at
+v1.237.0 -- spider easter egg, "The Xml Files" bar, gun cloth
+fix).  The items below are the user's next workstream:
+**wheel-location marker pins for the export / re-import modding
+loop.**
+
+### 1. Wheel marker pins (export side)
+
+* Generate a small cylindrical rod ("pin") mesh, ~1 mm diameter,
+  at EACH wheel's location on the loaded tank.
+* Pins ride along with the tank on Export (FBX / GLB / etc.) --
+  they are real meshes in the exported scene.
+* Pin color encodes WHEEL TYPE (use the existing `wheel_roles`
+  classification: road wheel / drive sprocket / idler / return
+  roller / rigid hub...).  Pick distinct colors per role.
+
+### 2. Bone marker balls (export side)
+
+* Same treatment for ANIMATION BONES: a small sphere ("ball")
+  marker at each bone's location.
+* All bone balls are GREY (single color, no per-type coding).
+* Also exported with the tank.
+
+### 3. Import side -- pins drive the visual
+
+* On import, read the pin positions back out of the model data.
+* Wheel locations live in the VISUAL (`.visual_processed` node
+  positions).  Compare imported pin positions against the game's
+  visual.
+* If they DON'T match: **rewrite the visual** so the wheel nodes
+  move to the pin positions.  Net effect: the user can move
+  wheels in Blender by moving the pins, and TEPY patches the
+  visual so the game picks up the new wheel placement.
+  (Note: this is node-POSITION rewrite, not the unimplemented
+  PG_ID mesh-splicing -- different, smaller problem.)
+
+### 4. Import side -- missing pins
+
+* If an imported model has NO wheel-location pins: create them
+  (from the game visual's wheel positions) and POP UP A MESSAGE
+  telling the user the model had no wheel pins.
+
+### Implementation notes for whoever picks this up
+
+* Wheel positions + roles: `parse_chassis_bone_world_positions`
+  + the `wheel_roles` post-pass in loaders (see the v1.227-230
+  Archer work above).  Remember the Z-sign subtlety between
+  mesh-vertex frame and the visual-walk positions.
+* Marker meshes need stable, identifiable names so the importer
+  can find them (e.g. `WoTPin_<role>_<boneName>` /
+  `WoTBall_<boneName>`).  NEVER collide with real pkg mesh
+  names; "don't rename the parts" applies to REAL meshes only.
+* Export bridge: `tankExporterPy/exporters/_blender_runner.py`
+  (runs inside Blender, keep imports minimal).  Color can ride
+  as a material or a `FLOAT_COLOR` attribute like the WoT*
+  channels.
+* Import bridge: `tankExporterPy/importers/_blender_importer.py`.
+* Tracks/physics files are LOCKED per memory rule (track_homie,
+  track_chain_pbd, track_sag, tank_physics, chain code in
+  viewer.py) -- pin work must not touch them; ask first if a
+  change seems to need it.
+
+### 5. Empty track primitives + "hide tracks" import checkbox
+
+* Generate an EMPTY `.primitives_processed` copy of the track
+  segment mesh(es) -- a valid file with no renderable geometry.
+  Purpose: written out so the game renders no rubber-band track
+  (modder is replacing / hiding the stock ribbon).
+  Encoder notes: must still be a structurally valid file (section
+  table, correct layout flavor for the source -- bare-shared vs
+  named-per-mesh per CLAUDE.md); verify with
+  `cust_tools/dump_sections.py` and in-game.
+* Add a CHECKBOX to the IMPORTER dialog: "Hide tracks".
+* When checked, TEPY does NOT render the rubber-band track
+  meshes (`track_*Shape*` ribbon) for the imported tank.
+  There is existing hide machinery from v1.230.x (`_MAT` bands
+  hidden by default; ribbon hidden on tanks with
+  `<trackPair><segmentModelLeft>`) -- reuse that visibility
+  path, do not touch the locked track-physics files.
+
+### 6. Hide-tracks checkbox drives the primitives WRITE
+
+* When "Hide tracks" was checked at import, Save Prim / the
+  primitives writer emits the DUMMY (empty) track-segment
+  primitives in place of the real track geometry.
+* Use case spelled out by the user: modders replace the wheels
+  (e.g. monster-truck wheels), move the wheel pins, and ship the
+  tank with NO rubber-band track in-game -- the empty segment
+  file suppresses the stock ribbon while the relocated wheel
+  nodes (task 3's visual rewrite) place the new wheels.
+* So the checkbox state must persist on the imported mesh set
+  (not just a transient render flag) and be consulted by the
+  writer at Save Prim time.

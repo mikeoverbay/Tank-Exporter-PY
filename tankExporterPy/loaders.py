@@ -1559,6 +1559,23 @@ class TextureLoader:
         glBindTexture(GL_TEXTURE_2D, 0)
         return tex_id
 
+    @staticmethod
+    def create_solid_color(rgb):
+        """Create a 1x1 solid-colour RGB texture.  Used as the diffuse
+        map for synthetic marker meshes (wheel pins / bone balls) whose
+        colour encodes meaning -- same recipe as create_placeholder but
+        with independent channels."""
+        color = np.uint8([int(max(0.0, min(1.0, float(c))) * 255)
+                          for c in rgb[:3]])
+        img_data = color.tobytes()
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        return tex_id
+
 
 # ============================================================================
 # PkgExtractor - extract files from WoT .pkg ZIP archives

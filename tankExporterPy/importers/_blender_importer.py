@@ -264,25 +264,37 @@ def _extract_mesh(bpy, obj, me):
     raw_bid = _read_color('WoTBoneIdx')
     raw_bwt = _read_color('WoTBoneWeight')
 
-    # Decoder formulas mirror _blender_runner._vec3_to_vec4 etc.
-    #   tangent / binormal :  v = c * 2 - 1   (only XYZ, alpha is pad)
-    #   bone index         :  i = round(c * 255)
-    #   bone weight        :  w = c           (no transform)
-    tangents  = ([((c[0] * 2.0 - 1.0),
-                   (c[1] * 2.0 - 1.0),
-                   (c[2] * 2.0 - 1.0)) for c in raw_tan]
+    # Decoders mirror _blender_runner's sRGB byte scheme (see the
+    # Encoders comment there): Blender's FBX color path quantises on
+    # the sRGB BYTE grid (BYTE_COLOR stores sRGB bytes, the Python API
+    # exposes linear floats), so each channel carries its data byte AS
+    # the sRGB byte:  b = round(linear_to_srgb(c) * 255).  Byte
+    # meanings:
+    #   tangent / binormal :  v = byte / 127.5 - 1
+    #   bone index         :  i = byte            (raw WoT palette byte)
+    #   bone weight        :  w = byte / 255
+    def _byte(c):
+        c = float(c)
+        if c <= 0.0:
+            return 0
+        s = (c * 12.92 if c <= 0.0031308
+             else 1.055 * (c ** (1.0 / 2.4)) - 0.055)
+        return max(0, min(255, int(round(s * 255.0))))
+
+    tangents  = ([((_byte(c[0]) / 127.5 - 1.0),
+                   (_byte(c[1]) / 127.5 - 1.0),
+                   (_byte(c[2]) / 127.5 - 1.0)) for c in raw_tan]
                  if raw_tan else None)
-    binormals = ([((c[0] * 2.0 - 1.0),
-                   (c[1] * 2.0 - 1.0),
-                   (c[2] * 2.0 - 1.0)) for c in raw_bin]
+    binormals = ([((_byte(c[0]) / 127.5 - 1.0),
+                   (_byte(c[1]) / 127.5 - 1.0),
+                   (_byte(c[2]) / 127.5 - 1.0)) for c in raw_bin]
                  if raw_bin else None)
-    bone_indices = ([(int(round(c[0] * 255.0)),
-                      int(round(c[1] * 255.0)),
-                      int(round(c[2] * 255.0)),
-                      int(round(c[3] * 255.0))) for c in raw_bid]
+    bone_indices = ([(_byte(c[0]), _byte(c[1]),
+                      _byte(c[2]), _byte(c[3])) for c in raw_bid]
                     if raw_bid else None)
-    bone_weights = ([(float(c[0]), float(c[1]),
-                      float(c[2]), float(c[3])) for c in raw_bwt]
+    bone_weights = ([(_byte(c[0]) / 255.0, _byte(c[1]) / 255.0,
+                      _byte(c[2]) / 255.0, _byte(c[3]) / 255.0)
+                     for c in raw_bwt]
                     if raw_bwt else None)
 
     # ---- Diffuse texture path (best-effort, first image-tex node) -----
