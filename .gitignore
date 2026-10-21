@@ -231,3 +231,8 @@ gun_palette_table.txt
 bit_mask_analysis.txt
 bit_combo_analysis.txt
 mask_sweep_results.txt
+
+# Unrelated project folders that live in this working directory --
+# never push them into Tank-Exporter-PY (per Coffee 2026-10-21)
+BleLEDScheduler/
+Wall_Art_Panel_os/
