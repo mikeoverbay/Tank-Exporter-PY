@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-10-21
 
+### Clean release build: harness removed, marker export opt-in (1.256.0)
+
+Per Coffee 2026-10-21 ("don't release versions that have a
+bunch of your hack code in it" / "go to the second version
+without all of that stuff, and that's the one that gets
+committed" / "unless there's a tool to use those in the
+environment, don't export any of your tools"):
+
+* **TEMPORARY TEPY_AUTO_RT harness DELETED** from viewer.py
+  (the 1.255.0 automation scaffolding -- `_auto_roundtrip` +
+  the run() hook).  It served its purpose (two clean full-
+  cycle verifications); releases stay free of debug
+  scaffolding.
+* **Marker export is now OPT-IN.**  The export format picker
+  gains an "Include marker pins & bone balls (for moving
+  wheels in Blender)" checkbox, default OFF each time the
+  dialog opens.  collect_payload only generates WoTPin_*/
+  WoTBall_* meshes when it was ticked -- a plain export is
+  clean of workflow tooling.  TEPY itself still spawns the
+  markers at load (it IS the tool that uses them), with the
+  existing grouped 'Markers' visibility checkbox.
+
 ### IN-GAME CONFIRMED: visual-node wheel moves still work
 
 First live mod shipped through the new pipeline: T92 front

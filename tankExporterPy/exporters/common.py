@@ -226,20 +226,25 @@ def collect_payload(viewer, output_path):
     # + grey bone balls, so a modder editing the export in Blender can
     # see / move the WoT wheel + bone positions.  See
     # exporters/markers.py for the full contract (reserved 'WoTPin_*'
-    # / 'WoTBall_*' names, frame conventions).  Soft-fails -- a tank
-    # with no chassis-bone data just exports without markers.
-    try:
-        from .markers import build_marker_meshes
-        markers = build_marker_meshes(viewer)
-        if markers:
-            meshes_out.extend(markers)
-            n_pins  = sum(1 for m in markers
-                          if m['name'].startswith('WoTPin_'))
-            n_balls = len(markers) - n_pins
-            print(f"[export] added {n_pins} wheel pins + "
-                  f"{n_balls} bone balls")
-    except Exception as exc:
-        print(f"[export] marker-mesh generation failed: {exc}")
+    # / 'WoTBall_*' names, frame conventions).  OPT-IN via the export
+    # dialog's "Include marker pins & bone balls" checkbox (per Coffee
+    # 2026-10-21: markers are TEPY workflow tools and don't belong in
+    # an export unless the destination workflow uses them).
+    # Soft-fails -- a tank with no chassis-bone data just exports
+    # without markers.
+    if getattr(viewer, '_export_include_markers', False):
+        try:
+            from .markers import build_marker_meshes
+            markers = build_marker_meshes(viewer)
+            if markers:
+                meshes_out.extend(markers)
+                n_pins  = sum(1 for m in markers
+                              if m['name'].startswith('WoTPin_'))
+                n_balls = len(markers) - n_pins
+                print(f"[export] added {n_pins} wheel pins + "
+                      f"{n_balls} bone balls")
+        except Exception as exc:
+            print(f"[export] marker-mesh generation failed: {exc}")
 
     # If the live viewer knows the WoT tank XML name (set by
     # load_vehicle), pass it through so a future Import can re-resolve

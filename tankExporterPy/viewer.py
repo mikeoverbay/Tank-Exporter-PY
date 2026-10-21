@@ -5683,9 +5683,10 @@ class Viewer:
 
         from . import io_formats
 
-        # Default each time the dialog opens -- never inherit the
-        # previous import's choice.
+        # Defaults each time the dialog opens -- never inherit the
+        # previous run's choices.
         self._import_hide_tracks = False
+        self._export_include_markers = False
 
         title = ('Export tank -- pick format' if direction == 'export'
                  else 'Import tank -- pick format')
@@ -5731,6 +5732,9 @@ class Viewer:
                 chosen.append(ext)
             self._import_hide_tracks = bool(
                 hide_tracks_var.get()) if hide_tracks_var else False
+            self._export_include_markers = bool(
+                include_markers_var.get()) if include_markers_var \
+                else False
             win.destroy()
 
         def _cancel():
@@ -5753,6 +5757,25 @@ class Viewer:
                   command=_cancel).pack(side='right', padx=4)
         tk.Button(btn_frame, text='Continue', width=10,
                   command=_confirm).pack(side='right', padx=4)
+
+        # Export-only option: "Include markers".  Per Coffee 2026-10-21
+        # ("Unless there's a tool to use those in the environment, no,
+        # don't export any of your tools"): the WoTPin_*/WoTBall_*
+        # marker meshes are TEPY workflow tools -- they only belong in
+        # an FBX when the user intends the move-the-wheels round trip,
+        # so exporting them is OPT-IN, default off.
+        include_markers_var = None
+        if direction == 'export':
+            ttk.Separator(win, orient='horizontal').pack(
+                fill='x', padx=8, side='bottom')
+            include_markers_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                win,
+                text='Include marker pins && bone balls (for moving '
+                     'wheels in Blender)',
+                variable=include_markers_var,
+                anchor='w', justify='left',
+                padx=12).pack(fill='x', anchor='w', side='bottom')
 
         # Import-only option: "Hide tracks".  Per Coffee 2026-10-19
         # (marker-pin task 5/6): when ticked, the imported tank's
@@ -22688,233 +22711,8 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] borderless toggle failed: {exc}")
 
-    # ------------------------------------------------------------------
-    # TEMPORARY automation harness -- per Coffee 2026-10-21 ("add code
-    # temporarily so you can go ahead and automate loading that T92
-    # exporting it importing it and then writing it and then testing
-    # it").  Runs the REAL app code paths end-to-end with no dialogs:
-    #
-    #   load vanilla tank -> export FBX (Blender) -> import FBX
-    #   (Blender) -> write chassis primitives -> verify against the
-    #   pkg original -> simulate a pin move -> verify visual patch.
-    #
-    # Trigger: set env TEPY_AUTO_RT=<tank_xml_basename> (e.g.
-    # A38_T92) before launch.  Window starts MINIMIZED in this mode
-    # (per Coffee: "Open the window minimize... It'll not mess with
-    # me then").  All verification artifacts land in %TEMP%; nothing
-    # is written to res_mods.  DELETE THIS BLOCK when the round-trip
-    # work is finished.
-    # ------------------------------------------------------------------
-
-    def _auto_roundtrip(self, tank):
-        import tempfile
-        from .writers import write_primitives, PrimitivesWriteOptions
-        from .loaders import MeshParser
-        from .visual_patch import patch_visual_node_positions, \
-            read_node_worlds
-        from .exporters import export_vehicle
-        from .importers import import_vehicle
-
-        failures = []
-
-        def _pass(msg):
-            print(f"[AUTO-RT] PASS  {msg}")
-
-        def _fail(msg):
-            print(f"[AUTO-RT] FAIL  {msg}")
-            failures.append(msg)
-
-        scratch = os.path.join(tempfile.gettempdir(), 'tepy_auto_rt')
-        os.makedirs(scratch, exist_ok=True)
-        print(f"[AUTO-RT] scratch: {scratch}")
-
-        # ---- 1. Load the tank from VANILLA pkg (never res_mods) ----
-        nation, base = self._resolve_tank_nation(tank)
-        if not nation:
-            _fail(f"could not resolve nation for {tank!r}")
-            return failures
-        xml_local = self._pkg_extractor.extract(
-            f'scripts/item_defs/vehicles/{nation}/{base}.xml')
-        self.load_vehicle(xml_local, prefer_res_mods=False)
-        groups = self._classify_meshes_by_component()
-        chass = groups.get('chassis', [])
-        if not chass:
-            _fail("no chassis meshes after load")
-            return failures
-        chassis_zip = next((m.primitives_zip for m in chass
-                            if m.primitives_zip), '')
-        vanilla_local = self._pkg_extractor.extract(chassis_zip)
-        with open(vanilla_local, 'rb') as fh:
-            vanilla_raw = fh.read()
-        n_boned = sum(1 for m in chass if m.bone_indices is not None)
-        if n_boned == len(chass):
-            _pass(f"load: {len(chass)} chassis meshes, all skinned")
-        else:
-            _fail(f"load: only {n_boned}/{len(chass)} chassis meshes "
-                  f"carry bone data")
-
-        # ---- 2. Export FBX through the real Blender bridge ---------
-        out_fbx = os.path.join(scratch, f'{base}.fbx')
-        blender_exe = (self._cfg.get('blender_exe') or '').strip() or None
-        ok, msg = export_vehicle(self, out_fbx, blender_exe=blender_exe,
-                                 on_log=lambda s: print(f"[AUTO-RT:exp] {s}"))
-        if not ok:
-            _fail(f"export: {msg}")
-            return failures
-        _pass(f"export: {os.path.basename(out_fbx)}")
-
-        # ---- 3. Import it back through the real Blender bridge -----
-        ok, payload = import_vehicle(out_fbx, blender_exe=blender_exe,
-                                     on_log=lambda s: print(f"[AUTO-RT:imp] {s}"))
-        if not ok:
-            _fail(f"import: {payload}")
-            return failures
-        n = self.load_imported_payload(payload)
-        _pass(f"import: {n} meshes loaded")
-        if getattr(self, '_imported_pin_overrides', None):
-            _fail(f"identity import reported moved pins: "
-                  f"{self._imported_pin_overrides}")
-        else:
-            _pass("identity import: no pins reported moved")
-
-        # ---- 4. Write the chassis from the imported set ------------
-        groups = self._classify_meshes_by_component()
-        imp_chass = groups.get('chassis', [])
-        if len(imp_chass) != len(chass):
-            _fail(f"align/adopt: {len(imp_chass)} imported chassis "
-                  f"meshes vs {len(chass)} native")
-            return failures
-        out_prim = os.path.join(scratch, 'Chassis.primitives_processed')
-        ok, msg = write_primitives(imp_chass, out_prim,
-                                   options=PrimitivesWriteOptions())
-        if not ok:
-            _fail(f"write: {msg}")
-            return failures
-        with open(out_prim, 'rb') as fh:
-            written_raw = fh.read()
-        if len(written_raw) == len(vanilla_raw):
-            _pass(f"write: size {len(written_raw)} matches vanilla")
-        else:
-            _fail(f"write: size {len(written_raw)} != vanilla "
-                  f"{len(vanilla_raw)}")
-
-        # ---- 5. Field-level verify vs vanilla ----------------------
-        try:
-            g_v = MeshParser.parse_primitives_processed(vanilla_local)
-            g_w = MeshParser.parse_primitives_processed(out_prim)
-        except Exception as exc:
-            _fail(f"re-parse of written file failed: {exc}")
-            return failures
-        for gv, gw in zip(g_v, g_w):
-            tagn = gv['name'] or '<bare>'
-            vv, vw = gv['vertices'], gw['vertices']
-            if gv['name'] != gw['name']:
-                _fail(f"{tagn}: section name changed to {gw['name']!r}")
-                continue
-            if len(vv['positions']) != len(vw['positions']):
-                _fail(f"{tagn}: vertex count "
-                      f"{len(vw['positions'])} != {len(vv['positions'])}")
-                continue
-            checks = []
-            p = float(np.abs(np.asarray(vv['positions'])
-                             - np.asarray(vw['positions'])).max())
-            checks.append(('positions', p, 1e-6))
-            i = int((np.asarray(gv['indices']).reshape(-1)
-                     != np.asarray(gw['indices']).reshape(-1)).sum())
-            checks.append(('indices', float(i), 0.5))
-            nrm = float(np.abs(np.asarray(vv['normals'])
-                               - np.asarray(vw['normals'])).max())
-            checks.append(('normals', nrm, 0.016))
-            tan = float(np.abs(np.asarray(vv['tangents'])
-                               - np.asarray(vw['tangents'])).max())
-            checks.append(('tangents', tan, 0.016))
-            u = float(np.abs(np.asarray(vv['uv0'])
-                             - np.asarray(vw['uv0'])).max())
-            checks.append(('uv0', u, 1e-6))
-            if vv.get('bone_indices') is not None:
-                if vw.get('bone_indices') is None:
-                    _fail(f"{tagn}: BONES LOST in write")
-                else:
-                    bd = int((np.asarray(vv['bone_indices'])
-                              != np.asarray(vw['bone_indices'])).sum())
-                    checks.append(('bone_indices', float(bd), 0.5))
-                    bw = float(np.abs(
-                        np.asarray(vv['bone_weights'])
-                        - np.asarray(vw['bone_weights'])).max())
-                    checks.append(('bone_weights', bw, 1e-6))
-            bad = [f"{nm}={val:.6g}(>{lim:g})"
-                   for nm, val, lim in checks if val > lim]
-            if bad:
-                _fail(f"{tagn}: {'  '.join(bad)}")
-            else:
-                _pass(f"{tagn}: all fields within tolerance")
-
-        # ---- 6. Simulated pin move + visual patch ------------------
-        pin = next((m for m in self.meshes
-                    if (getattr(m, 'name', '')
-                        or '').startswith('WoTPin_roadwheel_')), None)
-        if pin is None:
-            _fail("no road-wheel pin in imported set")
-        else:
-            bone = pin.name.split('.')[0][len('WoTPin_'):].partition('_')[2]
-            mm = pin.model_matrix.copy()
-            mm[2, 3] += 0.30          # +0.3 viewer-Z
-            pin.model_matrix = mm
-            self._process_imported_markers()
-            ov = getattr(self, '_imported_pin_overrides', {}) or {}
-            if list(ov.keys()) != [bone]:
-                _fail(f"pin move: expected override for {bone!r}, "
-                      f"got {list(ov.keys())}")
-            else:
-                visual_zip = chassis_zip.replace(
-                    '.primitives_processed', '.visual_processed')
-                vraw = open(self._pkg_extractor.extract(visual_zip),
-                            'rb').read()
-                patched, applied, missing = \
-                    patch_visual_node_positions(vraw, ov)
-                worlds = read_node_worlds(patched)
-                err = float(np.linalg.norm(
-                    worlds[bone] - np.asarray(ov[bone])))
-                if missing or err > 1e-4:
-                    _fail(f"visual patch: missing={missing} "
-                          f"err={err:.6f}")
-                else:
-                    _pass(f"pin move: {bone} override detected + "
-                          f"visual patch lands within {err:.2e} m")
-
-        print(f"[AUTO-RT] {'=' * 50}")
-        if failures:
-            print(f"[AUTO-RT] {len(failures)} FAILURE(S):")
-            for f in failures:
-                print(f"[AUTO-RT]   - {f}")
-        else:
-            print("[AUTO-RT] ALL CHECKS PASSED")
-        return failures
-
     def run(self):
         """Enter the main event loop; returns after the window is closed."""
-        # TEMPORARY: automation harness entry (see _auto_roundtrip).
-        # Minimized window, no maximize, runs the cycle, exits.
-        if os.environ.get('TEPY_AUTO_RT'):
-            try:
-                pygame.display.iconify()
-            except Exception:
-                pass
-            if self.splash is not None:
-                try:
-                    self.splash.cleanup()
-                except Exception:
-                    pass
-                self.splash = None
-            try:
-                self._auto_roundtrip(os.environ['TEPY_AUTO_RT'])
-            except Exception:
-                import traceback
-                traceback.print_exc()
-                print("[AUTO-RT] CRASHED")
-            finally:
-                self.running = False
-            return
         # Tear down the startup splash (if any) -- from this point on
         # render() draws the real scene + UI.  Does nothing if Splash
         # construction failed earlier.
