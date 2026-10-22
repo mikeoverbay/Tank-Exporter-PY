@@ -223,6 +223,13 @@ class MeshSet:
         # (empty) track-segment primitives.  Always False for native
         # WoT loads.
         'hide_tracks',
+        # Import-dialog "Hide chassis" choice (Coffee 2026-10-22:
+        # "tool to make all of chassis gone same as how we do the
+        # segments").  Save Prim then writes an EMPTY chassis
+        # primitives + a parent-stripped single-LOD .model instead
+        # of the imported chassis geometry.  Always False for
+        # native WoT loads.
+        'hide_chassis',
     )
 
     def __init__(self):
@@ -234,6 +241,7 @@ class MeshSet:
         self.armor_color      = None
         self.scene_bbox       = None
         self.hide_tracks      = False
+        self.hide_chassis     = False
         # Cached info-panel payload from VehicleXMLLoader.parse_info
         # (populated by load_vehicle).  Held on the set so flipping
         # back to a previously-loaded tank can rebuild the left info
@@ -272,6 +280,7 @@ class MeshSet:
         self.extract_variant_dir = None
         self.extract_damaged     = False
         self.hide_tracks         = False
+        self.hide_chassis        = False
 
     def is_loaded(self):
         return bool(self.meshes)
@@ -5686,6 +5695,7 @@ class Viewer:
         # Defaults each time the dialog opens -- never inherit the
         # previous run's choices.
         self._import_hide_tracks = False
+        self._import_hide_chassis = False
         self._export_include_markers = False
 
         title = ('Export tank -- pick format' if direction == 'export'
@@ -5698,9 +5708,10 @@ class Viewer:
         except Exception:
             pass
         win.resizable(False, False)
-        # Import needs extra height for the Hide-tracks checkbox row;
-        # 13 format rows + header + buttons already fill 420.
-        win.geometry('380x470' if direction == 'import'
+        # Import needs extra height for the Hide-tracks + Hide-chassis
+        # checkbox rows; 13 format rows + header + buttons already
+        # fill 420.
+        win.geometry('380x500' if direction == 'import'
                      else '360x420')
 
         # Header label
@@ -5724,6 +5735,7 @@ class Viewer:
         # Result holder -- _confirm() and _cancel() write into this
         chosen = []
         hide_tracks_var = None
+        hide_chassis_var = None
 
         def _confirm():
             chosen.clear()
@@ -5732,6 +5744,8 @@ class Viewer:
                 chosen.append(ext)
             self._import_hide_tracks = bool(
                 hide_tracks_var.get()) if hide_tracks_var else False
+            self._import_hide_chassis = bool(
+                hide_chassis_var.get()) if hide_chassis_var else False
             self._export_include_markers = bool(
                 include_markers_var.get()) if include_markers_var \
                 else False
@@ -5792,6 +5806,20 @@ class Viewer:
                 text='Hide tracks (Save Prim writes empty track '
                      'segments)',
                 variable=hide_tracks_var,
+                anchor='w', justify='left',
+                padx=12).pack(fill='x', anchor='w', side='bottom')
+            # "Hide chassis" (Coffee 2026-10-22): Save Prim writes a
+            # structurally-valid EMPTY chassis (every vert collapsed)
+            # plus a parent-stripped single-LOD .model, so the whole
+            # chassis -- wheels AND track ribbons -- is gone in game.
+            # Game-side only: the viewer keeps drawing the chassis so
+            # the user can still see and move the wheel pins.
+            hide_chassis_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                win,
+                text='Hide chassis (Save Prim writes an empty '
+                     'chassis -- game only)',
+                variable=hide_chassis_var,
                 anchor='w', justify='left',
                 padx=12).pack(fill='x', anchor='w', side='bottom')
             ttk.Separator(win, orient='horizontal').pack(
@@ -6346,6 +6374,25 @@ class Viewer:
             out_path = os.path.join(res_mods, rel)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
+            # "Hide chassis" (import option, Coffee 2026-10-22):
+            # instead of writing the imported chassis geometry,
+            # write a structurally-valid EMPTY chassis built from
+            # the PKG original (plus a parent-stripped .model) --
+            # same recipe as the dummy track segments.  Skips the
+            # texture copy too: nothing renders, nothing needs
+            # textures.
+            if (key == 'chassis'
+                    and bool(getattr(self._fbx_set, 'hide_chassis',
+                                     False))):
+                try:
+                    self._write_dummy_chassis(zip_path, out_path,
+                                              res_mods)
+                except Exception as exc:
+                    self.log_error(f"{label}: hide-chassis dummy "
+                                   f"FAILED -- {exc}")
+                    print(f"[save-prim] hide-chassis failed: {exc}")
+                continue
+
             # Boneless-chassis guard, per Coffee 2026-10-20 ("wtf it
             # wont load") and 2026-10-22 (in-game "total mess"): a
             # WoT chassis is skinned -- if none of the meshes carry
@@ -6559,6 +6606,113 @@ class Viewer:
         if written:
             self.log(f"Hide tracks: {written} empty track-segment "
                      f"file(s) written to res_mods")
+
+    def _write_dummy_chassis(self, prim_zip, out_path, res_mods):
+        """Write a structurally-valid but EMPTY chassis to res_mods,
+        plus a parent-stripped plain-XML `.model`, so the whole
+        chassis component is invisible in game.
+
+        Same recipe as `_write_dummy_track_segments`, with two
+        chassis-specific extras:
+
+        * The chassis is SKINNED -- zeroed positions alone are not
+          enough, because the engine moves each vertex to its bone,
+          and a triangle whose corners bind to different bones
+          would stretch into a visible sliver between wheels.  So
+          every vertex is also REBOUND 100% to palette slot 0
+          (iii = 0 0 0 0, ww = 255 0 0 0): each renderSet collapses
+          to a single point, every triangle is degenerate, and the
+          40-byte skinned stride the visual declares stays intact
+          (the 2026-10-22 boneless-write post-mortem is why that
+          stride matters).
+        * Lower LODs would pop the stock chassis back in at
+          distance, so the pkg `.model` is decoded (BWXML -> XML),
+          its `<parent>` element stripped (Coffee's single-LOD
+          trick), and written plain-XML next to the primitives.
+          The engine accepts plain XML -- proven in game by the
+          T92 Goodyear mod.
+
+        Per Coffee 2026-10-22 ("tool to make all of chassis gone
+        same as how we do the segments").
+        """
+        from .loaders import MeshParser
+        from .writers import write_primitives, PrimitivesWriteOptions
+        from .common import is_bwxml, decode_bwxml
+
+        if self._pkg_extractor is None:
+            self.log_error("hide chassis: PkgExtractor not "
+                           "configured -- skipped")
+            return False
+        local = self._pkg_extractor.extract(prim_zip)
+        if not local or not os.path.isfile(local):
+            self.log_error(f"hide chassis: {prim_zip} not found "
+                           f"in pkg -- skipped")
+            return False
+        try:
+            parsed_groups = MeshParser.parse_primitives_processed(
+                local)
+        except Exception as exc:
+            self.log_error(f"hide chassis: parse failed -- {exc}")
+            return False
+        if not parsed_groups:
+            self.log_error("hide chassis: no groups parsed -- "
+                           "skipped")
+            return False
+
+        dummies = []
+        for g in parsed_groups:
+            m = Mesh(g)
+            m.positions = np.zeros_like(m.positions)
+            if (m.bone_indices is not None
+                    and m.bone_weights is not None):
+                m.bone_indices = np.zeros_like(m.bone_indices)
+                bw = np.zeros_like(m.bone_weights)
+                bw[:, 0] = 1.0
+                m.bone_weights = bw
+            dummies.append(m)
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        ok, msg = write_primitives(dummies, out_path,
+                                   options=PrimitivesWriteOptions())
+        if not ok:
+            self.log_error(f"hide chassis: write FAILED -- {msg}")
+            return False
+        self.log(f"Hide chassis: empty "
+                 f"{os.path.basename(out_path)} written (all verts "
+                 f"collapsed to bone 0)")
+        print(f"[save-prim] hide chassis -> {out_path}")
+
+        # Parent-stripped single-LOD .model.
+        model_zip = prim_zip.replace('.primitives_processed',
+                                     '.model')
+        mlocal = self._pkg_extractor.extract(model_zip)
+        if not mlocal or not os.path.isfile(mlocal):
+            self.log_error(f"hide chassis: {model_zip} not found "
+                           f"in pkg -- lower LODs will still show "
+                           f"the stock chassis at distance")
+            return True
+        try:
+            with open(mlocal, 'rb') as fh:
+                raw = fh.read()
+            xml_str = (decode_bwxml(raw) if is_bwxml(raw)
+                       else raw.decode('utf-8', errors='replace'))
+            stripped = re.sub(
+                r'[ \t]*<parent>.*?</parent>[ \t]*\r?\n?', '',
+                xml_str, flags=re.DOTALL)
+            mrel = model_zip.replace('/', os.sep).lstrip(os.sep)
+            mout = os.path.join(res_mods, mrel)
+            os.makedirs(os.path.dirname(mout), exist_ok=True)
+            with open(mout, 'w', encoding='utf-8') as fh:
+                fh.write(stripped)
+            self.log(f"Hide chassis: single-LOD "
+                     f"{os.path.basename(mout)} written (<parent> "
+                     f"stripped)")
+            print(f"[save-prim] hide chassis model -> {mout}")
+        except Exception as exc:
+            self.log_error(f"hide chassis: .model strip failed -- "
+                           f"{exc} (lower LODs will still show the "
+                           f"stock chassis at distance)")
+        return True
 
     def _save_component_textures(self, label, visual_zip,
                                   res_mods, texture_mode, custom_dir):
@@ -13815,6 +13969,18 @@ class Viewer:
                      "hidden; Save Prim will write EMPTY track "
                      "segments.", color=(255, 220, 140))
             self._populate_mesh_window()
+
+        # Same persistence for "Hide chassis" (Coffee 2026-10-22).
+        # Render side is untouched on purpose -- the chassis stays
+        # visible in the viewer so wheel pins can still be placed;
+        # only the Save Prim output goes empty.
+        self._fbx_set.hide_chassis = bool(
+            getattr(self, '_import_hide_chassis', False))
+        if self._fbx_set.hide_chassis:
+            self.log("Import: Hide chassis ON -- Save Prim will "
+                     "write an EMPTY chassis + single-LOD .model "
+                     "(viewer still shows it).",
+                     color=(255, 220, 140))
 
         # Recover damaged-variant flag from the filename suffix.  The
         # exporter writes `<tank>_damaged.<ext>` for crashed variants

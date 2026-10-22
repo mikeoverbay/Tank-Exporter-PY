@@ -9,6 +9,37 @@ available at the time this file was written).
 
 ## 2026-10-22
 
+### "Hide chassis" import option -- empty chassis + single-LOD .model (1.258.0)
+
+Per Coffee ("tool to make all of chassis gone same as how we
+do the segments"): the import format picker gains a **Hide
+chassis** checkbox next to Hide tracks.  When ticked, Save
+Prim writes -- instead of the imported chassis geometry -- a
+structurally-valid EMPTY chassis built from the PKG original
+(`_write_dummy_chassis`), so the whole component (wheels AND
+track ribbons) is invisible in game:
+
+* Every vertex zeroed AND rebound 100% to palette slot 0
+  (iii = 0, ww = 255/0/0).  Zeroing alone isn't enough on a
+  skinned chassis -- the engine moves each vert to its bone,
+  and blend-zone triangles whose corners bind to different
+  bones would stretch into visible slivers.  Collapsing each
+  renderSet to one point keeps every triangle degenerate and
+  preserves the 40-byte skinned stride the visual declares.
+* The pkg `.model` is decoded (BWXML -> plain XML) and its
+  `<parent>` element stripped -- Coffee's single-LOD trick --
+  so lower LODs can't pop the stock chassis back in at
+  distance.  Engine accepts plain XML (proven in game).
+* Component texture copy skipped for the hidden chassis.
+* Viewer rendering is untouched on purpose: the chassis stays
+  visible in TEPY so wheel pins can still be placed; only the
+  written mod goes empty.
+
+Headless-verified on the T92: dummy output is byte-size
+identical to vanilla (848,616; 4 groups, stride 40), every
+vertex at the origin, every binding slot-0/weight-1, .model
+written without `<parent>`.
+
 ### Boneless-chassis write now blocks with a modal; debug log rotates (1.257.0)
 
 Post-mortem of Coffee's in-game "total mess" (flickering,
