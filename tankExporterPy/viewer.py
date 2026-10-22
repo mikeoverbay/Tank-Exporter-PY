@@ -6347,21 +6347,46 @@ class Viewer:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             # Boneless-chassis guard, per Coffee 2026-10-20 ("wtf it
-            # wont load"): a WoT chassis is skinned -- if none of the
-            # meshes carry bone data here, the source was almost
-            # certainly a BROKEN res_mods override loaded back in
-            # (prefer_res_mods default) or a pre-1.254 FBX.  The game
-            # rejects a boneless chassis (visual renderSet declares a
-            # skinned stream), so flag it loudly before writing.
+            # wont load") and 2026-10-22 (in-game "total mess"): a
+            # WoT chassis is skinned -- if none of the meshes carry
+            # bone data here, the source was almost certainly a
+            # BROKEN res_mods override loaded back in
+            # (prefer_res_mods default) or an FBX exported before
+            # v1.254.  The engine then reads the 32-byte boneless
+            # vertex stream against the 40-byte skinned declaration
+            # in the visual and renders scattered, flickering
+            # garbage.  A console-only warning was NOT enough -- the
+            # user hit exactly this and never saw the line (stdout
+            # goes to debug_log.txt, which the next launch used to
+            # wipe) -- so this is now a modal yes/no that defaults
+            # to NOT writing.
             if key == 'chassis' and not any(
                     getattr(m, 'bone_indices', None) is not None
                     for m in meshes_for_comp):
                 self.log_error(
-                    f"{label}: WARNING -- no bone data on any chassis "
-                    f"mesh.  The game will likely REJECT this file.  "
-                    f"Did the tank load from a broken res_mods "
-                    f"override, or was the FBX exported before "
-                    f"v1.254?")
+                    f"{label}: no bone data on any chassis mesh -- "
+                    f"asking before writing.")
+                if not self._confirm_dialog(
+                        "Boneless chassis",
+                        "The chassis about to be written has NO "
+                        "bone data on any mesh.\n\n"
+                        "A WoT chassis is skinned -- in game it "
+                        "will render as scattered, flickering "
+                        "garbage.\n\n"
+                        "Likely cause: the FBX was exported by "
+                        "TEPY v1.253 or older (bone attributes "
+                        "were dropped back then), or the tank was "
+                        "loaded from a broken res_mods override.  "
+                        "Re-export a fresh FBX from this version "
+                        "and redo the edit there.\n\n"
+                        "Write the boneless chassis anyway?",
+                        default_yes=False):
+                    self.log_error(
+                        f"{label}: SKIPPED -- boneless chassis not "
+                        f"written.")
+                    print(f"[save-prim] {label}: SKIPPED -- boneless "
+                          f"chassis (user declined write)")
+                    continue
 
             print(f"[save-prim] {label}: writing -> {out_path}")
             ok, msg = write_primitives(meshes_for_comp, out_path,
@@ -22752,6 +22777,20 @@ class Viewer:
                     'debug_log.txt')
                 print(f"[viewer] stdout -> {os.path.basename(_log_path)} "
                       f"(set TEPY_NO_LOG_REDIRECT=1 to keep on console)")
+                # Keep the PREVIOUS session's log as
+                # debug_log.prev.txt.  Opening with 'w' used to wipe
+                # it on every launch, which destroyed the evidence of
+                # whatever went wrong in the session the user just
+                # restarted away from (2026-10-22: a save-prim
+                # warning vanished exactly this way mid-postmortem).
+                try:
+                    if os.path.exists(_log_path):
+                        os.replace(
+                            _log_path,
+                            os.path.join(os.path.dirname(_log_path),
+                                         'debug_log.prev.txt'))
+                except Exception:
+                    pass
                 try:
                     sys.stdout.flush()
                 except Exception:

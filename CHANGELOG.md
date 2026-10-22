@@ -7,6 +7,32 @@ available at the time this file was written).
 
 ---
 
+## 2026-10-22
+
+### Boneless-chassis write now blocks with a modal; debug log rotates (1.257.0)
+
+Post-mortem of Coffee's in-game "total mess" (flickering,
+geometry everywhere) on the T92: the imported FBX descended
+from a pre-v1.254 export, so its chassis meshes carried no
+`WoTBoneIdx`/`WoTBoneWeight` data, and Save Prim wrote a
+boneless 32-byte-stride chassis against a visual that
+declares a 40-byte skinned stream.  The engine reads the
+stream misaligned and renders garbage.  The existing guard
+only printed a console warning -- which went to
+debug_log.txt and was wiped by the next launch.
+
+* **Save Prim boneless-chassis guard is now a modal
+  yes/no** (`_confirm_dialog`, defaults to NO).  Declining
+  skips the chassis component entirely; nothing is written.
+  The dialog explains the likely cause (old FBX / broken
+  res_mods override loaded back in) and the fix (re-export
+  a fresh FBX from the current version).
+* **debug_log.txt now rotates to debug_log.prev.txt** at
+  launch instead of being truncated, so the previous
+  session's log survives a restart for post-mortems.
+
+---
+
 ## 2026-10-21
 
 ### Clean release build: harness removed, marker export opt-in (1.256.0)
