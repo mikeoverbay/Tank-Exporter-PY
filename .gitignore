@@ -236,3 +236,7 @@ mask_sweep_results.txt
 # never push them into Tank-Exporter-PY (per Coffee 2026-10-21)
 BleLEDScheduler/
 Wall_Art_Panel_os/
+
+# Installer build output -- the exe ships via GitHub Releases, never in git
+installer/*.exe
+installer/*.obj

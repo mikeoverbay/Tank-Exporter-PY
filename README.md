@@ -154,7 +154,37 @@ verified.
 
 ## Install
 
-### 1. Download
+### Easy install (recommended)
+
+Download **[tepy_setup.exe](https://github.com/mikeoverbay/Tank-Exporter-PY/releases/latest/download/tepy_setup.exe)**
+from the latest release and run it.  It does the whole job:
+
+1. Checks for Python -- and if it's missing, downloads and installs
+   Python 3.13 for you (python.org installer, per-user, with the
+   `py` launcher and tcl/tk included, so the
+   [Tkinter gotcha](#tkinter-is-required) can't happen).
+2. Downloads the latest TEPY snapshot straight from GitHub.
+3. Extracts it to the folder you pick (default
+   `C:\Users\<you>\TankExporterPY`).
+4. Puts a **Tank Exporter PY** shortcut on your Desktop and offers
+   to launch right away.
+
+The first launch installs the Python packages it needs (one-time,
+about a minute) and opens the viewer -- then use **Set Paths** to
+point it at your World of Tanks folder.
+
+> **SmartScreen note.**  The exe is unsigned, so Windows may show
+> "Windows protected your PC" on first run -- click **More info ->
+> Run anyway**.  If you'd rather not, use the manual install below;
+> it ends up in exactly the same place.
+
+The installer's source is `installer/tepy_setup.c` (plain C, no
+dependencies); `installer\build.bat` rebuilds it with any Visual
+Studio.
+
+### Manual install
+
+#### 1. Download
 
 Pick whichever you're comfortable with -- both produce the same
 working tree.
@@ -197,7 +227,7 @@ git clone https://github.com/mikeoverbay/Tank-Exporter-PY.git
 > from the old install -- the first preserves your WoT paths,
 > the second saves the requirements re-download.
 
-### 2. Where to put it
+#### 2. Where to put it
 
 TEPY reads and writes inside its own project folder
 (`TheItemList.xml`, the requirements backup, your saved
@@ -224,7 +254,7 @@ the game via the path you pick in the **Set Paths** dialog (or
 the `--pkg-dir` / `--res-mods` CLI flags).  Anywhere on any drive
 you can write to is fine.
 
-### 3. Install Python (if you haven't already)
+#### 3. Install Python (if you haven't already)
 
 TEPY needs Python 3.10+.  Grab the latest from
 <https://www.python.org/downloads/>.
@@ -241,7 +271,7 @@ TEPY needs Python 3.10+.  Grab the latest from
 
 You can leave the rest of the installer at its defaults.
 
-### 4. Run it -- Windows just double-click
+#### 4. Run it -- Windows just double-click
 
 ```
 go.bat
@@ -270,7 +300,7 @@ Companion bats:
 - `reinstall.bat` -- restores `requirements/` from the backup and
   force-reinstalls everything.
 
-### Manual install
+#### Bare-metal (pip by hand)
 
 ```bash
 python -m pip install pygame PyOpenGL numpy Pillow

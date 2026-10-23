@@ -9,6 +9,31 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### One-file Windows installer (1.260.0)
+
+Per Coffee ("write out a simple little Windows install program
+that will download this and install it ... I'd like to publish
+that as the go-to app to install it"):
+
+* **`installer/tepy_setup.c`** -- a single static Win32 console
+  exe (plain C, `/MT`, no runtime deps) that: finds Python
+  (`py -3` first, same WindowsApps-stub reasoning as go.bat) or
+  downloads + runs the python.org 3.13 installer (/passive,
+  per-user, PATH + py launcher, tcl/tk included by default);
+  downloads the master-branch zip from GitHub (purging the URLMon
+  cache first so re-runs can't install a stale snapshot);
+  extracts with Windows' built-in tar.exe; creates a Desktop
+  shortcut to go.bat (go.bat keeps sole ownership of dependency
+  install + launch); offers to launch.  Flags: `[install_dir]
+  /noshortcut /nolaunch /yes` for unattended runs.
+  Verified end-to-end against the live GitHub zip.
+* **`installer/build.bat`** -- rebuilds the exe with any Visual
+  Studio (checks 18/2022/2019, all editions).
+* The exe itself is gitignored -- it ships attached to GitHub
+  Releases; README's new "Easy install (recommended)" section
+  links `releases/latest/download/tepy_setup.exe`.  The old
+  install walkthrough is preserved under "Manual install".
+
 ### Fresh-install startup crash fixed; imgui-bundle floor (1.259.0)
 
 A friend's fresh install (no reachable WoT path, so
