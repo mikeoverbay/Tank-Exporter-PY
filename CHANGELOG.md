@@ -9,6 +9,16 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### Release also ships tepy_setup.exe, auto-built (1.265.0)
+
+Per the owner: the compiled installer must be in the release too, not
+just the scripts.  The release workflow now runs on a Windows runner,
+builds tepy_setup.exe with MSVC, and attaches all three installers
+(tepy_setup.exe + install.bat + install.ps1).  The exe carries the
+known unsigned-Defender caveat (it may be quarantined); the scripts
+stay as the fallback.  README and the tepy_setup.c banner updated to
+match -- the exe is offered again, with the caveat stated.
+
 ### Installer is now a script, not an exe (Defender deleted the exe) (1.264.0)
 
 Windows Defender quarantined `tepy_setup.exe` on the owner's machine:

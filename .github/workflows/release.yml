@@ -1,15 +1,18 @@
 # ============================================================================
 #  Auto-publish the installer with every tagged release.
 #
-#  On a version-tag push (vX.Y.Z) this creates the GitHub Release for that
-#  tag and attaches the installer files, so
-#  releases/latest/download/install.bat always resolves to the newest
+#  On a version-tag push (vX.Y.Z) this builds tepy_setup.exe on a Windows
+#  runner and creates the GitHub Release for that tag with the installer
+#  attached, so releases/latest/download/... always resolves to the newest
 #  version -- no manual upload.
 #
-#  The installer is now plain scripts (install.bat + install.ps1), not a
-#  compiled exe, so there is nothing to build: we just attach them.  (The
-#  old unsigned C exe was dropped because Windows Defender quarantines an
-#  unsigned download-and-run exe on sight -- see installer/install.bat.)
+#  THREE installer files ship, at the owner's request:
+#    * tepy_setup.exe  -- the one-double-click compiled installer.  NOTE:
+#      unsigned, so Windows Defender may quarantine it (download-and-run
+#      exe heuristic).  Shipped anyway because the owner wants it; the
+#      scripts below are the fallback when AV eats the exe.
+#    * install.bat + install.ps1 -- readable-script installer that Defender
+#      does not auto-delete.
 # ============================================================================
 name: Release installer
 
@@ -23,15 +26,28 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Check out the tagged commit
         uses: actions/checkout@v4
+
+      - name: Set up the MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build tepy_setup.exe
+        shell: cmd
+        # Mirrors installer\build.bat's compile line.  The step above put
+        # cl + the x64 toolchain on PATH, so we call cl directly instead of
+        # build.bat's VsDevCmd path lookup.
+        run: cl /nologo /W3 /O1 /MT installer\tepy_setup.c urlmon.lib wininet.lib /Fe:installer\tepy_setup.exe
 
       - name: Create the release and attach the installer
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            installer/tepy_setup.exe
             installer/install.bat
             installer/install.ps1
           generate_release_notes: true

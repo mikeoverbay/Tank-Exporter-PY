@@ -181,14 +181,16 @@ then opens the viewer.  In the app, click **Set Paths** and point it
 at your World of Tanks folder.  From then on, just use the Desktop
 shortcut.
 
-> **Why a `.bat` and not a `.exe`?**  A plain downloadable `.exe`
-> that installs other programs looks, to antivirus, exactly like a
-> virus downloader, so Windows Defender deletes it on sight.  The
-> `.bat` is a short, readable script that does the same job without
-> being quarantined.  You can open it in Notepad and read every line.
+**Prefer a single `.exe`?**  There's also
+**[tepy_setup.exe](https://github.com/mikeoverbay/Tank-Exporter-PY/releases/latest/download/tepy_setup.exe)**
+in the release -- same installer, one double-click.  Heads-up: it's
+unsigned, so Windows Defender may **quarantine or delete it** (a
+download-and-run `.exe` looks like a virus downloader to antivirus).
+If that happens, use `install.bat` above instead -- it's a readable
+script that does the exact same job and isn't auto-deleted.
 
-The installer is `installer/install.bat` + `installer/install.ps1`
-(plain scripts, nothing to compile).
+The installers live in `installer/` (`install.bat` + `install.ps1`,
+and `tepy_setup.c` for the exe); the release carries all three.
 
 ### Manual install
 

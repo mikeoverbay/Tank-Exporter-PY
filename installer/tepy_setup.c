@@ -3,15 +3,14 @@
  *
  *  tepy_setup.c
  *
- *  SUPERSEDED 2026-10-23 by installer/install.bat + install.ps1.  This
- *  compiles to an UNSIGNED exe that downloads and then runs other
- *  installers -- which is the textbook fingerprint of a trojan
- *  downloader, so Windows Defender quarantines it on sight (it deleted
- *  a built copy off the owner's machine).  Nothing here is wrong; the
- *  behaviour is just unwinnable while the exe is unsigned, so the shipped
- *  installer is now the readable .bat/.ps1 pair, which Defender does not
- *  auto-delete.  Kept only as a reference / a starting point if the exe
- *  is ever code-signed.  DO NOT point users at the exe.
+ *  SHIPPED at the owner's request alongside install.bat + install.ps1.
+ *  CAVEAT: this compiles to an UNSIGNED exe that downloads and then runs
+ *  other installers -- the textbook fingerprint of a trojan downloader --
+ *  so Windows Defender may quarantine it on sight (it deleted a built
+ *  copy off the owner's machine on 2026-10-23).  That is unwinnable
+ *  without code-signing.  The readable .bat/.ps1 installer is the
+ *  fallback for anyone whose AV eats this exe.  The release workflow
+ *  builds and attaches all three.
  *
  *  What it does, in order:
  *    1. Find Python (`py -3` launcher first, bare `python` second --
