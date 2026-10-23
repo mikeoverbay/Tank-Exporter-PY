@@ -113,8 +113,15 @@ def ensure_imgui_bundle_installed(verbose: bool = True) -> bool:
         print("[xml_editor] imgui-bundle missing -- running "
               "`pip install imgui-bundle` (one-time) ...",
               flush=True)
+    # `--upgrade` + a version floor matter here: an OLD imgui-bundle
+    # (0.8.x) predates the `imgui_bundle.python_backends` package the
+    # editor imports, and a bare `pip install imgui-bundle` reports
+    # "already satisfied" against it forever -- the install "works"
+    # every launch while the import keeps failing (friend's machine,
+    # 2026-10-23).  1.0 is the first release that ships
+    # python_backends.
     cmd_base = [sys.executable, '-m', 'pip', 'install',
-                'imgui-bundle']
+                '--upgrade', 'imgui-bundle>=1.0']
     try:
         rc = subprocess.call(cmd_base)
     except Exception as exc:

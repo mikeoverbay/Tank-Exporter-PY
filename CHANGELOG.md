@@ -7,6 +7,35 @@ available at the time this file was written).
 
 ---
 
+## 2026-10-23
+
+### Fresh-install startup crash fixed; imgui-bundle floor (1.259.0)
+
+A friend's fresh install (no reachable WoT path, so
+`resources/smoke` was never extracted) crashed at startup:
+the big particle-init try block died at its first flipbook
+load, its except only restored the four smoke attributes,
+and every attribute assigned further down the block stayed
+unbound -- first downstream reference
+(`gun_flash_flipbook` at the muzzle_flash_systems check)
+raised AttributeError and killed the app.
+
+* **Every attribute the particle-init block assigns is now
+  pre-seeded** with a safe default before the try (gun-flash
+  family, shot trails, refraction state, flash shader).  A
+  failed particle init now degrades to "effects disabled";
+  the app boots to "PkgExtractor not configured -- open Set
+  Paths".  Reproduced and verified both ways with the
+  extractor suppressed and resources/smoke hidden.
+* **xml_editor auto-install pins `imgui-bundle>=1.0`
+  with `--upgrade`.**  An ancient 0.8.x (predates
+  `imgui_bundle.python_backends`) satisfied the bare
+  `pip install imgui-bundle` forever, so the same machine
+  reinstalled "successfully" on every launch while the
+  import kept failing.
+
+---
+
 ## 2026-10-22
 
 ### "Hide chassis" import option -- empty chassis + single-LOD .model (1.258.0)

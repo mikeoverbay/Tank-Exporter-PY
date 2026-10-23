@@ -1421,6 +1421,31 @@ class Viewer:
         self.smoke_flipbook       = None
         self.smoke_particles      = None
         self.fire_smoke_particles = None
+        # Pre-seed EVERY attribute the big try block below assigns.
+        # The block can die at its very first flipbook load (fresh
+        # install, no WoT path set yet -> resources/smoke was never
+        # extracted), and its except only restored the four smoke
+        # attrs above -- everything assigned further down stayed
+        # unbound and the first downstream reference crashed the app
+        # (reported 2026-10-23: AttributeError 'gun_flash_flipbook'
+        # at the muzzle_flash_systems check).  With these defaults a
+        # failed particle init degrades to "effects disabled" instead
+        # of a startup crash.
+        self.shot_trail_flipbook  = None
+        self.shot_trail_systems   = []
+        self.shot_trail_smoke     = None
+        self.gun_flash_flipbook   = None
+        self.gun_flash_vao        = None
+        self.gun_flash_vbo        = None
+        self.gun_flash_quad_angles = []
+        self.gun_flash_length     = 1.2   # m
+        self.gun_flash_thickness  = 0.6   # m
+        self.flash_shader         = None
+        self.gun_flash_distortion_flipbook = None
+        self.refraction_tex       = None
+        self.refraction_tex_w     = 0
+        self.refraction_tex_h     = 0
+        self.flash_dist_strength  = 0.03
         try:
             self.particle_shader = ParticleShader()
             smoke_dir = os.path.join(
