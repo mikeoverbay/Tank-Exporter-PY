@@ -9,6 +9,24 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### Installer: Blender auto-install (1.261.0)
+
+Per Coffee ("this installer will install the necessary ...
+Python, blah blah" / "fix the installer so that it does that
+automatically"): tepy_setup.exe now also covers Blender.
+
+* After the Python step, the installer looks for Blender on
+  PATH and under `Program Files\Blender Foundation\Blender *`
+  (the same roots TEPY's own find_blender_executable scans).
+  If absent, it offers to download **Blender 4.2.14 LTS**
+  (the series TEPY is exercised against) and runs the MSI
+  elevated (`msiexec /qb`, normal Windows permission prompt).
+* Strictly optional: declining, a failed download, or a
+  cancelled UAC prompt all degrade to a warning -- TEPY
+  works without Blender everywhere except FBX / GLB / OBJ
+  import + export.
+* README easy-install list updated to match.
+
 ### One-file Windows installer (1.260.0)
 
 Per Coffee ("write out a simple little Windows install program

@@ -39,6 +39,7 @@
 
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "shell32.lib")
 
 #define REPO_ZIP_URL \
     "https://github.com/mikeoverbay/Tank-Exporter-PY/archive/refs/heads/master.zip"
@@ -48,6 +49,11 @@
  * imgui-bundle all publish 3.13 wheels).  Bump deliberately. */
 #define PYTHON_URL \
     "https://www.python.org/ftp/python/3.13.1/python-3.13.1-amd64.exe"
+/* Blender powers FBX / GLB / OBJ import + export (headless bridge).
+ * 4.2 LTS is the series TEPY is exercised against; pinned to the
+ * newest LTS patch.  Optional -- setup never fails over it. */
+#define BLENDER_URL \
+    "https://download.blender.org/release/Blender4.2/blender-4.2.14-windows-x64.msi"
 
 static int g_yes = 0;   /* /yes: take defaults, never prompt */
 
@@ -178,6 +184,108 @@ static int ensure_python(void)
     return 1;
 }
 
+/* ---- step 1b: Blender (optional) ---------------------------------------- */
+
+static int find_blender(void)
+{
+    /* PATH first (rare), then the standard install roots: every
+     * Blender MSI lands at
+     *   C:\Program Files\Blender Foundation\Blender X.Y\blender.exe
+     * -- same locations TEPY's own find_blender_executable scans. */
+    static const char *roots[] = {
+        "C:\\Program Files\\Blender Foundation",
+        "C:\\Program Files (x86)\\Blender Foundation",
+    };
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    char probe[MAX_PATH], exe[MAX_PATH];
+    int i;
+
+    if (run_wait("where blender >nul 2>&1", 0) == 0)
+        return 1;
+    for (i = 0; i < 2; i++) {
+        _snprintf(probe, sizeof(probe), "%s\\*", roots[i]);
+        probe[sizeof(probe) - 1] = 0;
+        h = FindFirstFileA(probe, &fd);
+        if (h == INVALID_HANDLE_VALUE)
+            continue;
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    && fd.cFileName[0] != '.') {
+                _snprintf(exe, sizeof(exe), "%s\\%s\\blender.exe",
+                          roots[i], fd.cFileName);
+                exe[sizeof(exe) - 1] = 0;
+                if (GetFileAttributesA(exe)
+                        != INVALID_FILE_ATTRIBUTES) {
+                    FindClose(h);
+                    return 1;
+                }
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return 0;
+}
+
+static void ensure_blender(void)
+{
+    /* Optional: TEPY views / extracts / Save-Prims fine without
+     * Blender -- only FBX / GLB / OBJ import + export need it.  So
+     * every failure path here is a warning, never a setup abort. */
+    char tmp[MAX_PATH], msi[MAX_PATH], params[1024];
+    SHELLEXECUTEINFOA sei;
+    DWORD code = 1;
+
+    if (find_blender()) {
+        say("Blender: found.");
+        return;
+    }
+    say("Blender: NOT found.  (Only needed for FBX / GLB / OBJ "
+        "import + export -- everything else works without it.)");
+    if (!ask_yesno("Download and install Blender 4.2 LTS now?", 1)) {
+        say("Skipping Blender.  Install it later from blender.org "
+            "if you want FBX import/export.");
+        return;
+    }
+    GetTempPathA(sizeof(tmp), tmp);
+    _snprintf(msi, sizeof(msi), "%sblender-setup.msi", tmp);
+    msi[sizeof(msi) - 1] = 0;
+    if (!download(BLENDER_URL, msi, "Blender 4.2 LTS (~350 MB)")) {
+        say("WARNING: Blender download failed -- continuing "
+            "without it.");
+        return;
+    }
+    /* The MSI is per-machine, so msiexec needs elevation; the
+     * "runas" verb pops the normal Windows permission prompt.
+     * /qb = unattended with a progress bar. */
+    say("Installing Blender (Windows will ask for permission) ...");
+    _snprintf(params, sizeof(params), "/i \"%s\" /qb", msi);
+    params[sizeof(params) - 1] = 0;
+    ZeroMemory(&sei, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = "runas";
+    sei.lpFile = "msiexec.exe";
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExA(&sei) || !sei.hProcess) {
+        say("WARNING: Blender install was declined or failed to "
+            "start.  TEPY still works; FBX import/export won't "
+            "until Blender is installed.");
+        return;
+    }
+    WaitForSingleObject(sei.hProcess, INFINITE);
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+    DeleteFileA(msi);
+    if (code == 0 && find_blender())
+        say("Blender: installed.");
+    else
+        say("WARNING: the Blender installer did not finish cleanly "
+            "-- FBX import/export may be unavailable until it's "
+            "installed from blender.org.");
+}
+
 /* ---- main ---------------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -232,6 +340,9 @@ int main(int argc, char **argv)
         if (!g_yes) { say("Press Enter to close."); getchar(); }
         return 1;
     }
+
+    /* -- 1b. Blender (optional, for FBX import/export) -- */
+    ensure_blender();
 
     /* -- 2. download the project -- */
     GetTempPathA(sizeof(tmp), tmp);

@@ -163,10 +163,13 @@ from the latest release and run it.  It does the whole job:
    Python 3.13 for you (python.org installer, per-user, with the
    `py` launcher and tcl/tk included, so the
    [Tkinter gotcha](#tkinter-is-required) can't happen).
-2. Downloads the latest TEPY snapshot straight from GitHub.
-3. Extracts it to the folder you pick (default
+2. Checks for Blender -- and if it's missing, offers to download
+   and install Blender 4.2 LTS (needed only for FBX / GLB / OBJ
+   import + export; skipping it is fine, everything else works).
+3. Downloads the latest TEPY snapshot straight from GitHub.
+4. Extracts it to the folder you pick (default
    `C:\Users\<you>\TankExporterPY`).
-4. Puts a **Tank Exporter PY** shortcut on your Desktop and offers
+5. Puts a **Tank Exporter PY** shortcut on your Desktop and offers
    to launch right away.
 
 The first launch installs the Python packages it needs (one-time,
