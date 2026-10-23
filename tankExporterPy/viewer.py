@@ -2115,6 +2115,31 @@ class Viewer:
             elif os.path.isfile(default_img):
                 terrain_img = default_img
 
+            # PRIME DIRECTIVE / HAZARD (added Opus 4.8, 2026-10-23).
+            # The terrain shape is driven by this LOCAL, UNTRACKED
+            # file: resources/heightmap.png.  It is NOT in git -- the
+            # resources artwork is gitignored -- so it only ever
+            # exists on disk, and `git` cannot restore it.  If it is
+            # missing, Terrain() SILENTLY falls back to the procedural
+            # Perlin-fBm generator (terrain.py), which renders as a
+            # dense field of noise spikes that looks nothing like the
+            # authored map.  Nothing in the console used to say which
+            # path was taken, so the swap was invisible -- that cost
+            # ~an hour on 2026-10-23 after the file was renamed out of
+            # the way to "turn off" the relief.  DO NOT delete/rename
+            # heightmap.png to disable terrain: point the config key
+            # 'terrain_heightmap' at the image you want instead.  The
+            # warning captured here is surfaced in the console once it
+            # exists (see run(), after the "ready" line).
+            self._terrain_src_warning = None
+            if terrain_img is None:
+                self._terrain_src_warning = (
+                    "Terrain: resources/heightmap.png not found -- "
+                    "falling back to the procedural Perlin generator "
+                    "(renders as a field of noise spikes).  Restore "
+                    "heightmap.png, or set 'terrain_heightmap' in the "
+                    "config to the image you want.")
+
             # Default: 1025-vertex grid (was 257) -- bumped 4x per
             # side so each ~67 cm sand ripple gets ~4 verts across,
             # which is what the detail-displacement companion needs
@@ -2901,6 +2926,13 @@ class Viewer:
             self.log(f"PkgExtractor: {n_pkg_entries:,} entries indexed")
         else:
             self.log_error("PkgExtractor not configured -- open Set Paths")
+        # Surface the terrain-fallback warning now that the console
+        # exists (it is decided during __init__, before the console is
+        # built).  See the PRIME DIRECTIVE note at the terrain source
+        # selection -- this is what makes the silent Perlin fallback
+        # visible instead of leaving the user staring at noise spikes.
+        if getattr(self, '_terrain_src_warning', None):
+            self.log_error(self._terrain_src_warning)
 
         # Tkinter availability probe.  Every modal dialog in TEPY
         # (Set Paths file pickers, Import / Export, Language picker,

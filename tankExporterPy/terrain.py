@@ -705,6 +705,14 @@ class Terrain:
                 edge_fade=float(image_edge_fade),
                 curve_gamma=float(image_curve_gamma))
         else:
+            # HAZARD (noted Opus 4.8, 2026-10-23): this Perlin-fBm
+            # fallback only runs when NO `image_path` was given --
+            # i.e. the caller's heightmap file was missing.  Its
+            # output is a dense noise field that looks like corrugated
+            # spikes, nothing like an authored map.  The viewer's
+            # terrain source-select carries the full PRIME DIRECTIVE
+            # note and now warns the user when this branch is taken;
+            # do not treat this path as the normal terrain.
             heights = _make_heightmap(
                 seed=self.seed,
                 size=self.size,

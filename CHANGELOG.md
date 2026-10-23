@@ -9,6 +9,33 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### Terrain: mark the heightmap hazard, make the Perlin fallback loud (1.262.0)
+
+Root-cause of the "corrugated / convoluted terrain" the owner hit:
+the terrain shape comes from `resources/heightmap.png`, a LOCAL,
+UNTRACKED file (the resources artwork is gitignored, so it is not in
+the repo and git cannot restore it).  When it is missing, `Terrain()`
+silently falls back to the procedural Perlin-fBm generator, which
+renders as a dense field of noise spikes -- and nothing in the
+console said which path was taken.  The file went missing because it
+was renamed out of the way to "turn off" the relief; restoring it
+fixes the terrain (verified: the restored May-7 file reproduces the
+smooth authored valley; the spike field reproduces exactly from the
+Perlin fallback).  Neither the terrain code (unchanged since
+v1.197.0) nor any recent commit was involved.
+
+Walked the code per the prime directive, then:
+
+* **Marked the hazard in code** at the viewer's terrain
+  source-selection and at terrain.py's Perlin-fallback branch: do
+  not delete/rename heightmap.png to disable terrain -- point the
+  `terrain_heightmap` config key at the image you want instead.
+* **Made the fallback visible**: when heightmap.png is absent, the
+  console now shows a clear warning ("falling back to the procedural
+  Perlin generator ... renders as a field of noise spikes") once the
+  console exists, instead of leaving the user staring at noise with
+  no explanation.
+
 ### Installer: Blender auto-install (1.261.0)
 
 Per Coffee ("this installer will install the necessary ...
