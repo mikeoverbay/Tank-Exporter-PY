@@ -9,6 +9,28 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### Terrain assets now ship / self-generate -- fresh installs look right (1.263.0)
+
+The owner spotted that his local build's terrain looks right while a
+fresh GitHub install does not: "there's something in my build that is
+not on the server."  Found it -- all four terrain assets the viewer
+uses were gitignored, so they only ever existed on his disk:
+heightmap.png (shape), sand_painted.png + _height (texture), sand.png.
+A fresh install had no heightmap -> Perlin noise-spike terrain, and no
+sand texture.  The .gitignore even claimed "sand textures DO ship"
+while the rules below it excluded them.
+
+* **heightmap.png now ships** (221 KB authored shape, un-ignored and
+  committed).  This alone fixes the noise-spike terrain on every
+  fresh install.
+* **Sand textures self-generate on first launch** via new
+  `cust_tools/ensure_runtime_sand.py` (same pattern as the fire/smoke
+  flipbook extraction), painting a 4096 `sand_painted.png` once
+  (~20 s, ~400 MB peak) instead of committing 166 MB of regenerable
+  PNGs.  No-op once it exists; falls back harmlessly to the flat sand
+  colour if painting fails.  Verified end-to-end.
+* .gitignore comment corrected to match reality.
+
 ### Terrain: mark the heightmap hazard, make the Perlin fallback loud (1.262.0)
 
 Root-cause of the "corrugated / convoluted terrain" the owner hit:

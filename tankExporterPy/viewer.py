@@ -1416,6 +1416,25 @@ class Viewer:
         except Exception as exc:
             print(f"[viewer] karelia sky extract skipped: {exc}")
 
+        # First-launch sand ground texture.  resources/sand_painted.png
+        # is big (60-85 MB) and procedural, so it is gitignored and
+        # NOT in the repo (like the fire/smoke flipbooks) -- a fresh
+        # GitHub install has no sand texture until this paints one.
+        # Runs BEFORE the terrain init below so the file exists when
+        # Terrain() looks for it; no-op once it exists.  See the
+        # terrain-asset fix of 2026-10-23 (the authored heightmap.png
+        # DOES ship; the big sand textures are generated here instead).
+        self._splash_status('Checking sand texture...')
+        try:
+            from cust_tools.ensure_runtime_sand import ensure_runtime_sand
+            ensure_runtime_sand(
+                resources_dir=os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'resources'),
+                on_status=self._splash_status)
+        except Exception as exc:
+            print(f"[viewer] sand texture generate skipped: {exc}")
+
         self._splash_status('Loading smoke flipbook (91 frames)...')
         self.particle_shader      = None
         self.smoke_flipbook       = None
