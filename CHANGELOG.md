@@ -9,6 +9,31 @@ available at the time this file was written).
 
 ## 2026-10-23
 
+### Installer is now a script, not an exe (Defender deleted the exe) (1.264.0)
+
+Windows Defender quarantined `tepy_setup.exe` on the owner's machine:
+an unsigned exe that downloads and then runs other installers is the
+textbook trojan-downloader fingerprint, so it is deleted on sight, and
+there is no way around that while it is unsigned.  Signing needs a paid
+cert; the free, works-today fix is a readable script, which Defender
+does not auto-delete.
+
+* **`installer/install.ps1`** -- PowerShell port of the whole flow,
+  fully automatic for a non-technical user: installs Python if
+  missing, installs Blender if missing (announcing the one UAC prompt
+  in plain words), downloads + extracts TEPY, makes a Desktop
+  shortcut, launches.  Verified end-to-end.
+* **`installer/install.bat`** -- the single file a user downloads and
+  double-clicks.  Runs the adjacent install.ps1, or fetches the latest
+  from GitHub if run alone.
+* **`.github/workflows/release.yml`** -- on a version-tag push, creates
+  the release and attaches install.bat + install.ps1 automatically, so
+  `releases/latest/download/install.bat` always resolves.  No compile
+  step (the installer is scripts now).
+* `installer/tepy_setup.c` kept but marked SUPERSEDED (reference only,
+  for a future signed build); README "Easy install" rewritten around
+  the one-double-click .bat with plain-language SmartScreen/UAC steps.
+
 ### Terrain assets now ship / self-generate -- fresh installs look right (1.263.0)
 
 The owner spotted that his local build's terrain looks right while a

@@ -1,0 +1,5 @@
+# The installer scripts must be CRLF so the .bat behaves on every
+# Windows box and so the copies the release workflow attaches (checked
+# out on a Linux runner) still arrive with Windows line endings.
+installer/install.bat text eol=crlf
+installer/install.ps1  text eol=crlf

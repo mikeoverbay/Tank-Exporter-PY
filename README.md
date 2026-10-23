@@ -156,34 +156,39 @@ verified.
 
 ### Easy install (recommended)
 
-Download **[tepy_setup.exe](https://github.com/mikeoverbay/Tank-Exporter-PY/releases/latest/download/tepy_setup.exe)**
-from the latest release and run it.  It does the whole job:
+**One file. Download it, double-click it, done.**
 
-1. Checks for Python -- and if it's missing, downloads and installs
-   Python 3.13 for you (python.org installer, per-user, with the
-   `py` launcher and tcl/tk included, so the
-   [Tkinter gotcha](#tkinter-is-required) can't happen).
-2. Checks for Blender -- and if it's missing, offers to download
-   and install Blender 4.2 LTS (needed only for FBX / GLB / OBJ
-   import + export; skipping it is fine, everything else works).
-3. Downloads the latest TEPY snapshot straight from GitHub.
-4. Extracts it to the folder you pick (default
-   `C:\Users\<you>\TankExporterPY`).
-5. Puts a **Tank Exporter PY** shortcut on your Desktop and offers
-   to launch right away.
+1. Download **[install.bat](https://github.com/mikeoverbay/Tank-Exporter-PY/releases/latest/download/install.bat)**
+   from the latest release (it lands in your **Downloads** folder).
+2. **Double-click `install.bat`.**
+3. If a blue **"Windows protected your PC"** box appears, click
+   **More info**, then **Run anyway**.  (It's safe -- the box shows
+   for anything not from the Microsoft Store.)
+4. If Windows asks permission to install Blender, click **Yes**.
 
-The first launch installs the Python packages it needs (one-time,
-about a minute) and opens the viewer -- then use **Set Paths** to
-point it at your World of Tanks folder.
+That's it.  The installer does everything on its own:
 
-> **SmartScreen note.**  The exe is unsigned, so Windows may show
-> "Windows protected your PC" on first run -- click **More info ->
-> Run anyway**.  If you'd rather not, use the manual install below;
-> it ends up in exactly the same place.
+- Installs **Python** if it's not already there (with the pieces
+  TEPY needs, so the [Tkinter gotcha](#tkinter-is-required) can't
+  happen).
+- Installs **Blender** if it's not already there (used only for
+  importing/exporting 3D files -- the rest works without it).
+- Downloads **Tank Exporter PY** and puts a **Tank Exporter PY**
+  shortcut on your **Desktop**.
 
-The installer's source is `installer/tepy_setup.c` (plain C, no
-dependencies); `installer\build.bat` rebuilds it with any Visual
-Studio.
+The first time it starts it sets up a few things (about a minute),
+then opens the viewer.  In the app, click **Set Paths** and point it
+at your World of Tanks folder.  From then on, just use the Desktop
+shortcut.
+
+> **Why a `.bat` and not a `.exe`?**  A plain downloadable `.exe`
+> that installs other programs looks, to antivirus, exactly like a
+> virus downloader, so Windows Defender deletes it on sight.  The
+> `.bat` is a short, readable script that does the same job without
+> being quarantined.  You can open it in Notepad and read every line.
+
+The installer is `installer/install.bat` + `installer/install.ps1`
+(plain scripts, nothing to compile).
 
 ### Manual install
 

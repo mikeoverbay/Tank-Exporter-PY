@@ -1,0 +1,38 @@
+# ============================================================================
+#  Auto-publish the installer with every tagged release.
+#
+#  On a version-tag push (vX.Y.Z) this creates the GitHub Release for that
+#  tag and attaches the installer files, so
+#  releases/latest/download/install.bat always resolves to the newest
+#  version -- no manual upload.
+#
+#  The installer is now plain scripts (install.bat + install.ps1), not a
+#  compiled exe, so there is nothing to build: we just attach them.  (The
+#  old unsigned C exe was dropped because Windows Defender quarantines an
+#  unsigned download-and-run exe on sight -- see installer/install.bat.)
+# ============================================================================
+name: Release installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write        # create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Create the release and attach the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/install.bat
+            installer/install.ps1
+          generate_release_notes: true
+          fail_on_unmatched_files: true
